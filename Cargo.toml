@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = ["worker"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+repository = "https://github.com/gntik-ai/falcone-serverless"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
