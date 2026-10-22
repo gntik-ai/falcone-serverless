@@ -1,0 +1,1032 @@
+{
+  "schema_version": 1,
+  "project": "falcone-serverless",
+  "date": "2026-10-21",
+  "baseline_commit": "bde62dd1e2e91f957b1dc6b8212dfbbaee977a7f",
+  "categories": [
+    {
+      "code": "API",
+      "name": "API and developer experience",
+      "goal": "Expose the new runtime through Falcone's existing product contracts.",
+      "requirements": [
+        "Preserve inventoried Falcone Functions routes, API versions, request/response schemas, error codes, pagination and idempotency behavior through a compatibility adapter.",
+        "Provide authenticated REST and CLI operations to create, inspect, update, invoke, roll back and delete functions and inspect activations.",
+        "Provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment.",
+        "Accept a versioned declarative function manifest, validate it before deployment and return field-specific errors without partial mutations.",
+        "Expose runtime readiness and deployment progress in the existing console with role-appropriate detail and accessible failure states.",
+        "Publish machine-readable OpenAPI schemas and run generated-client contract tests against every supported API version."
+      ],
+      "stories": [
+        [
+          "01",
+          "Preserve the Functions API and add CLI operations",
+          "developer",
+          "manage functions through familiar API and CLI operations",
+          "existing applications continue to work",
+          "Implement the public facade and CLI against the same validated contracts.",
+          [
+            "Legacy API fixtures pass against both backends, including status and error envelopes.",
+            "CLI deploy/invoke/logs/rollback/delete works with Keycloak credentials; replaying a mutation idempotency key creates no duplicate resource.",
+            "Unauthorized requests and tenant-scoped reads retain the baseline behavior."
+          ],
+          "L",
+          "M1",
+          [
+            "MIG-01",
+            "SEC-01"
+          ]
+        ],
+        [
+          "02",
+          "Deliver language starters and declarative manifests",
+          "function author",
+          "develop locally and deploy a validated manifest",
+          "development matches hosted execution",
+          "Add three starter templates, local runner and schema validation.",
+          [
+            "Go, Python and JavaScript examples pass the same inputs locally and remotely.",
+            "Unsupported runtime versions, reserved environment variables and malformed manifests fail before a build or runtime write.",
+            "Manifest schema versions and defaults are documented and covered by compatibility fixtures."
+          ],
+          "M",
+          "M2",
+          [
+            "RUN-01",
+            "DEP-01"
+          ]
+        ],
+        [
+          "03",
+          "Integrate runtime status, console and SDK schemas",
+          "workspace administrator",
+          "see reliable status and typed APIs",
+          "I can diagnose deployments without learning Kubernetes",
+          "Wire the existing console and OpenAPI generation to the backend-neutral status model.",
+          [
+            "Console distinguishes disabled, unavailable, deploying, active and deletion_pending; retry controls remain keyboard accessible.",
+            "Tenant views contain no other-tenant resources or cluster internals; operator views are separately authorized.",
+            "Generated client tests cover successful and unavailable runtime responses."
+          ],
+          "M",
+          "M2",
+          [
+            "API-01",
+            "OBS-01"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "RUN",
+      "name": "Runtime and execution",
+      "goal": "Run qualified Wasm functions while preserving supported legacy source contracts.",
+      "requirements": [
+        "Execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; reject arbitrary native tenant binaries and OCI container execution.",
+        "Preserve main(params), result/status/log envelopes and scoped invocation verification for qualified legacy functions; detect unsupported libraries or OS behavior and block migration rather than silently altering semantics.",
+        "Enforce guest memory, host-buffer, compiler, CPU, payload, execution-time and concurrency budgets; report the specific exceeded limit.",
+        "Provide worker readiness/startup probes, bounded draining, guest interruption and host-call cancellation; reject new executions on draining workers.",
+        "Create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files.",
+        "Publish a pinned engine/WASI/language/package support matrix and EOL policy; block unsupported combinations before deployment without silently changing revisions."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement Wasmtime execution and qualified source adapters",
+          "function author",
+          "run supported Wasm and legacy source functions",
+          "I can migrate without rewriting handlers",
+          "Build the Rust/Wasmtime worker, beginning with JavaScript contract qualification; Go and Python profiles are enabled only after matrix tests.",
+          [
+            "Validated Wasm artifacts execute in fresh instances using the declared imports; native executable and arbitrary tenant-image submissions are rejected.",
+            "Qualified main(params), status/result/logs and invocation-identity fixtures pass unchanged; incompatible legacy functions are explicitly blocked from cutover.",
+            "Each activation records function revision, raw artifact digest, Wasmtime version, language profile and interface version."
+          ],
+          "L",
+          "M1",
+          [
+            "MIG-01",
+            "SEC-02",
+            "WAS-03"
+          ]
+        ],
+        [
+          "02",
+          "Enforce guest and host limits with safe draining",
+          "operator",
+          "bound each execution and stop it predictably",
+          "one function cannot exhaust the service",
+          "Enforce deadlines and memory budgets in both guest execution and Falcone host operations.",
+          [
+            "Infinite loops, guest allocation, host-buffer growth, compilation exhaustion and oversized I/O hit documented limits without exhausting the worker pool.",
+            "Guest interruption and blocked storage/network host-call cancellation are independently tested; kill fallback replaces only the affected execution process.",
+            "Draining rejects new work and completes, checkpoints or cancels admitted executions within profile-specific budgets."
+          ],
+          "L",
+          "M1",
+          [
+            "RUN-01",
+            "INV-01"
+          ]
+        ],
+        [
+          "03",
+          "Enforce fresh instances and runtime support policy",
+          "operator",
+          "manage supported runtimes and storage bindings",
+          "upgrades do not change function behavior unexpectedly",
+          "Keep compiled-code caching separate from tenant execution state.",
+          [
+            "Sequential executions cannot observe prior guest memory, handles, environment or temporary files, including after traps and cancellation.",
+            "Artifact caches use digest, engine, architecture and interface-version keys; user-supplied native precompiled caches are rejected.",
+            "Unsupported package/profile versions fail deployment with actionable diagnostics; upgrades preserve immutable revision references."
+          ],
+          "M",
+          "M2",
+          [
+            "RUN-01",
+            "STO-01"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "DEP",
+      "name": "Build, revisions and deployment",
+      "goal": "Produce traceable artifacts and safe, repeatable rollouts.",
+      "requirements": [
+        "Build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host.",
+        "Generate SBOM/provenance for function artifacts and trusted worker images, verify signatures, validate Wasm imports/features and pin every runtime/artifact dependency by digest.",
+        "Create an immutable revision for code, engine/profile, host-interface or effective configuration changes and retain all artifact references.",
+        "Deploy a revision only after readiness succeeds; support weighted canary traffic and atomic rollback to a retained revision.",
+        "Reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function.",
+        "Garbage-collect obsolete images, revisions and build artifacts only after checking active routes, in-flight invocations, rollback retention and workflow pins."
+      ],
+      "stories": [
+        [
+          "01",
+          "Build and verify Wasm function artifacts",
+          "developer",
+          "build trusted Wasm artifacts from source or submit a module",
+          "deployments are reproducible and traceable",
+          "Use approved language toolchains and package catalogues; isolate compilation and prohibit native dependency hooks.",
+          [
+            "Supported source and uploaded raw Wasm produce validated digest-pinned revisions with SBOM, provenance and declared imports.",
+            "Disallowed imports/features, invalid signatures, native executables and submitted native compiled caches are rejected before worker execution.",
+            "Build hooks cannot execute arbitrary native code; malicious compilation inputs are bounded and cannot read another tenant\u2019s artifacts or credentials."
+          ],
+          "L",
+          "M2",
+          [
+            "WAS-03",
+            "SEC-02",
+            "STO-01",
+            "TEN-02"
+          ]
+        ],
+        [
+          "02",
+          "Implement revisions, weighted rollout and rollback",
+          "developer",
+          "release gradually and roll back",
+          "faulty code affects fewer users",
+          "Add immutable revisions and route-generation updates.",
+          [
+            "A bad readiness probe never receives production traffic.",
+            "Configured canary weights meet the test tolerance over the agreed request sample; rollback restores the previous target without rebuilding.",
+            "Concurrent updates use compare-and-swap; requests already admitted retain their revision."
+          ],
+          "L",
+          "M2",
+          [
+            "RUN-01",
+            "INV-01"
+          ]
+        ],
+        [
+          "03",
+          "Reconcile worker pools and collect artifacts safely",
+          "operator",
+          "recover drift and remove unused artifacts",
+          "restarts do not leak or destroy workloads",
+          "Reconcile standard namespaced workloads and reference-aware artifact/cache cleanup.",
+          [
+            "A controller restart converges to one owned worker-pool configuration and routing generation; stale updates cannot overwrite newer state.",
+            "A 10,000-deployed-function inventory does not create 10,000 pods or per-function Services; worker count follows admitted compute demand.",
+            "GC retains active, workflow-pinned, in-flight and rollback-protected artifacts and removes only expired owned data."
+          ],
+          "L",
+          "M2",
+          [
+            "DEP-02",
+            "OPS-01"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "INV",
+      "name": "Invocation, routing and autoscaling",
+      "goal": "Provide controlled synchronous and asynchronous execution, including scale from zero.",
+      "requirements": [
+        "Route synchronous invocations to authorized tenant-scoped Wasm workers with a pinned immutable function revision and a configured end-to-end deadline.",
+        "Accept asynchronous invocations only after durable persistence, return an activation ID, and expose terminal status and result retrieval.",
+        "Enforce per-pod hard concurrency and tenant-wide admission limits across multiple router replicas; bound queue length and waiting time.",
+        "Scale tenant/profile worker pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate.",
+        "Prevent scale-down from discarding admitted work, account for long-running jobs, use stabilization and metric freshness, and maintain exactly one scaling owner per worker pool.",
+        "Preserve existing WebSocket URLs, authentication, ordering rules, backpressure, reconnect and draining semantics at a trusted gateway; separate connection/message capacity from guest execution slots."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement authenticated sync and durable async invocation",
+          "application developer",
+          "invoke synchronously or submit durable work",
+          "I can choose the right response model",
+          "Build router admission, activation records and transactional outbox submission.",
+          [
+            "Sync calls return the existing envelope; async returns 202 plus an activation ID only after the acceptance transaction commits.",
+            "Crashes before/after outbox publication do not lose accepted work; duplicate delivery maps to one logical invocation.",
+            "A gateway timeout after dispatch is recorded as uncertain where necessary and never automatically retried as a safe read."
+          ],
+          "L",
+          "M1",
+          [
+            "API-01",
+            "STO-03",
+            "SEC-01"
+          ]
+        ],
+        [
+          "02",
+          "Implement bounded admission and worker-pool activation",
+          "operator",
+          "scale with demand within quotas",
+          "bursts remain controlled and idle functions release capacity",
+          "Scale tenant/profile pools from execution demand while keeping deployment metadata independent of worker capacity.",
+          [
+            "A zero-replica tenant/profile pool wakes for admitted execution and returns bounded cold-start or queue errors.",
+            "Multi-router tests enforce configurable tenant quotas; the initial default is 20 simultaneous executions per tenant, not a throughput guarantee.",
+            "The pool scaler never follows raw WebSocket message count directly; stale metrics and long-running jobs cannot cause unsafe scale-down."
+          ],
+          "L",
+          "M2",
+          [
+            "INV-01",
+            "TEN-02",
+            "OBS-02"
+          ]
+        ],
+        [
+          "03",
+          "Preserve WebSocket behavior and benchmark message routing",
+          "MCP application developer",
+          "keep streaming and sessions working",
+          "runtime migration does not interrupt tools",
+          "Separate trusted WebSocket gateway capacity from Wasm execution and qualify an explicit traffic profile.",
+          [
+            "Compatibility tests cover authentication, ordering, backpressure, reconnect and draining; existing deployed MCP behavior, if found, is inventoried separately.",
+            "Benchmark 100,000 aggregate ingress messages/second with declared payload size, open connections, fan-out, durability and function-trigger fraction; distinguish input from output deliveries.",
+            "Connection counts, message rates, invocation rates and running guests are separate metrics and quotas; no 100,000-invocations/second claim is made."
+          ],
+          "L",
+          "M3",
+          [
+            "MIG-01",
+            "RUN-02",
+            "INV-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "EVT",
+      "name": "Events and triggers",
+      "goal": "Deliver tenant-scoped events with explicit retry and recovery semantics.",
+      "requirements": [
+        "Normalize Kafka, storage, webhook and scheduled events into versioned CloudEvents envelopes containing trusted tenant/workspace context.",
+        "Create, update, filter, pause and delete triggers with separate permissions for event sources and target functions.",
+        "Provide at-least-once durable delivery, configurable bounded retries/backoff, terminal dead-letter queues and audited manual replay.",
+        "Deduplicate delivery identifiers within a documented retention window and expose idempotency keys to function code without promising exactly-once external effects.",
+        "Support ordering per configured key/partition and bounded parallelism; document that delayed retries or replay can change order unless strict ordering is selected.",
+        "Integrate cron triggers with the existing Falcone scheduling service, retaining timezone, daylight-saving, overlap and missed-run policies."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement CloudEvents adapters and trigger management",
+          "integration developer",
+          "connect authorized event sources to functions",
+          "I can react to platform changes",
+          "Add Kafka, storage and webhook adapters plus trigger lifecycle APIs.",
+          [
+            "Fixtures for each source produce the versioned envelope and validated resource ownership.",
+            "Forged payload tenant IDs cannot change the destination scope.",
+            "Filters, pause/resume and deletion operate without silently discarding accepted deliveries."
+          ],
+          "L",
+          "M2",
+          [
+            "SEC-01",
+            "INV-01",
+            "STO-02"
+          ]
+        ],
+        [
+          "02",
+          "Implement retry, deduplication, DLQ and replay",
+          "operator",
+          "recover failed deliveries visibly",
+          "events are not silently lost",
+          "Build delivery-attempt records, fenced claims and explicit redrive controls.",
+          [
+            "Crash-after-handler-success/before-ack causes a traceable possible duplicate, never an exactly-once claim.",
+            "Retries stop at the configured limit, persist to DLQ and can be replayed by an authorized operator.",
+            "Dedupe retention, replay identity and ordering modes are documented and tested, including poison messages."
+          ],
+          "L",
+          "M2",
+          [
+            "EVT-01",
+            "STO-03"
+          ]
+        ],
+        [
+          "03",
+          "Integrate schedules and ordered dispatch",
+          "workspace administrator",
+          "schedule work and choose event ordering",
+          "automation runs predictably",
+          "Reuse Falcone scheduling ownership and partition-aware delivery.",
+          [
+            "Cron fixtures cover DST transitions, timezones, missed executions and overlap policies.",
+            "Two scheduler instances cannot create two logical occurrences for one schedule timestamp.",
+            "Strict per-key mode blocks later events behind failure; relaxed mode documents and tests reordering."
+          ],
+          "M",
+          "M2",
+          [
+            "EVT-02",
+            "TEN-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "WF",
+      "name": "Temporal integration",
+      "goal": "Retain durable workflow semantics while changing the compute backend.",
+      "requirements": [
+        "Execute functions from Temporal Activities through the existing functions.invoke contract, preserving result and retryable/non-retryable error mappings.",
+        "Assign a stable logical invocation key across retries of one Activity and record workflow, run, activity and attempt identifiers.",
+        "Pin the function revision at the first durable admission of an Activity invocation and reuse that pin across retries.",
+        "Choose one retry owner for each failure class; Temporal-owned retries must not multiply with hidden runtime delivery retries.",
+        "Propagate heartbeats, cancellation and deadlines to guest and host operations; persist explicit progress/checkpoint references and report cancellation uncertainty rather than claiming external side effects were reversed.",
+        "Allow authorized function code to start or signal allow-listed workflows via a scoped Falcone API, using object references for payloads above the agreed size budget."
+      ],
+      "stories": [
+        [
+          "01",
+          "Preserve functions.invoke and retry identity",
+          "workflow author",
+          "invoke the new backend from existing Flows",
+          "my workflows retain their behavior",
+          "Adapt the existing worker activity, preserving workspace binding and failure classification.",
+          [
+            "Existing functions.invoke tests pass, including non-retryable missing-function/runtime errors and retryable timeouts.",
+            "A task input cannot override the credential-bound workspace.",
+            "Retries share a logical key while recording separate attempt IDs and the same pinned revision."
+          ],
+          "L",
+          "M2",
+          [
+            "MIG-01",
+            "INV-01"
+          ]
+        ],
+        [
+          "02",
+          "Coordinate revision pins, retries and cancellation",
+          "workflow author",
+          "resume safely after failures",
+          "recovery does not unexpectedly execute new code",
+          "Define retry ownership and preserve activation/pin state across worker restarts.",
+          [
+            "Deploying a new function during an Activity retry does not change the pinned revision.",
+            "A worker crash resumes/polls the same accepted invocation when its result is unresolved; a known retryable failure creates a new recorded attempt.",
+            "Heartbeat and cancellation tests expose requested, acknowledged or uncertain outcomes and avoid nested retry multiplication."
+          ],
+          "L",
+          "M2",
+          [
+            "WF-01",
+            "DEP-02",
+            "RUN-02"
+          ]
+        ],
+        [
+          "03",
+          "Expose scoped workflow start and signal operations",
+          "function author",
+          "start and signal workflows safely",
+          "functions can participate in durable processes",
+          "Add a narrow capability-controlled bridge and large-payload references.",
+          [
+            "Allowed workflow starts/signals succeed with idempotent request IDs and audit records.",
+            "Cross-tenant targets and unlisted workflow types are denied even with forged input fields.",
+            "Large payloads use authorized SeaweedFS object references; Temporal histories contain no raw credentials."
+          ],
+          "M",
+          "M2",
+          [
+            "WF-01",
+            "STO-01",
+            "SEC-03"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "SEC",
+      "name": "Identity and security",
+      "goal": "Enforce verified identities and safe execution at every trust boundary.",
+      "requirements": [
+        "Validate Keycloak issuer, audience, signature, allowed algorithms and token lifetime using an explicit realm allow-list and bounded JWKS caching/rotation.",
+        "Authorize every management, invoke, log, result, secret and trigger operation using Falcone's verified tenant/workspace roles and capability policies; ignore spoofed identity headers.",
+        "Run trusted Falcone worker images under restricted non-root, arbitrary-UID-compatible policies without privilege escalation, host mounts/networking or automatic API tokens in guest workers.",
+        "Execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native execution.",
+        "Authenticate service calls and issue short-lived, audience-bound execution credentials; keep signing keys and broad service credentials out of guests and scope each host operation to verified tenant/workspace context.",
+        "Enforce tenant network isolation and destination policies, block metadata/private-network SSRF except explicitly authorized bindings, and audit security-sensitive actions without recording secrets."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement Keycloak verification and Falcone authorization",
+          "security engineer",
+          "verify identity and scope at each API boundary",
+          "tenant claims cannot be forged",
+          "Reuse Falcone's realm/trust policy and test public and internal entry points.",
+          [
+            "Expired, wrong-audience, wrong-issuer, forged and untrusted-realm tokens are rejected.",
+            "JWKS rotation succeeds within the configured cache budget; unknown keys fail closed during outages.",
+            "Tenant, workspace, platform-reader and mutation persona tests match the existing authorization matrix."
+          ],
+          "L",
+          "M1",
+          [
+            "MIG-01"
+          ]
+        ],
+        [
+          "02",
+          "Qualify restricted pods and the application sandbox",
+          "platform operator",
+          "run untrusted modules under the approved application sandbox",
+          "tenant code cannot obtain host privileges",
+          "Run trusted worker processes and untrusted Wasm guests under existing corporate policy.",
+          [
+            "Installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass.",
+            "Guests cannot invoke native processes, load native libraries or obtain Kubernetes/admin credentials; dangerous imports are rejected.",
+            "Sandbox failure or unsupported features stop execution; there is no native fallback. Worker and compilation isolation tests are documented."
+          ],
+          "L",
+          "M1",
+          [
+            "WAS-02",
+            "OPS-01"
+          ]
+        ],
+        [
+          "03",
+          "Secure host capabilities, egress and audit",
+          "security engineer",
+          "bind internal requests to a scoped identity",
+          "a compromised function cannot impersonate another tenant",
+          "Implement the privileged host-operation boundary separately from guest code.",
+          [
+            "Every host call verifies execution scope and capability grants; guessed object IDs, credential handles and forged tenant fields fail.",
+            "Metadata endpoints, DNS rebinding, redirects to forbidden destinations and unauthorized cross-tenant traffic are denied, including through host-call proxies.",
+            "Secrets and signing keys are absent from guest artifacts and telemetry; exposing a secret to guest code requires an explicit narrow grant."
+          ],
+          "L",
+          "M1",
+          [
+            "SEC-01",
+            "SEC-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "TEN",
+      "name": "Tenancy, plans and quotas",
+      "goal": "Preserve Falcone's tenant contract and bound noisy-neighbor effects.",
+      "requirements": [
+        "Persist tenant_id and workspace_id on every business resource, activation, artifact binding and audit record, with database enforcement and authorization-scoped lookups.",
+        "Use administrator-preprovisioned namespaces and explicit namespaced RBAC; isolate tenant worker pools by verified mappings without requiring namespace creation or treating labels as a security boundary.",
+        "Obtain all quota and charging policies from Falcone, including failures, retries, startup, idle capacity, builds, storage, WebSocket connections/messages and interactive/batch execution.",
+        "Enforce aggregate reservations across replicas with an initial configurable allowance of 20 executions per tenant; allocate separate interactive/batch budgets and fair queued capacity.",
+        "On tenant suspension or capability disable, deny new work immediately, pause triggers and apply an explicit policy to in-flight and queued work.",
+        "On function/workspace/tenant deletion, persist cleanup obligations, verify ownership before deletion and report completion only after all scoped runtime resources are absent."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement tenant scoping and namespace bindings",
+          "tenant administrator",
+          "have resources isolated by tenant and workspace",
+          "other customers cannot observe or alter them",
+          "Use existing identity scope plus an operator-owned namespace resolver.",
+          [
+            "SQL/RLS, API, log, artifact and activation tests reject adjacent tenants and unauthorized sibling workspaces.",
+            "Same function name in two tenants produces distinct owned runtime resources.",
+            "Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace."
+          ],
+          "L",
+          "M1",
+          [
+            "SEC-01",
+            "OPS-01"
+          ]
+        ],
+        [
+          "02",
+          "Enforce Falcone-owned quotas and workload fairness",
+          "platform operator",
+          "apply plans and fair capacity limits",
+          "one tenant cannot consume all shared capacity",
+          "Keep all accounting and policy in Falcone; distinguish messages/connections, executions and long-running work.",
+          [
+            "Multi-router tests never exceed the configured aggregate tenant limits, initially 20 execution slots per tenant where enabled.",
+            "Interactive and batch budgets prevent analysis jobs starving interactive traffic; expired reservations recover with fenced ownership.",
+            "Failed attempts, retries, cold starts and warm idle capacity generate distinct usage records; Falcone configuration alone determines charging."
+          ],
+          "L",
+          "M1",
+          [
+            "TEN-01",
+            "STO-03"
+          ]
+        ],
+        [
+          "03",
+          "Implement suspension and durable scoped cleanup",
+          "tenant administrator",
+          "suspend and remove workloads reliably",
+          "disabled tenants stop consuming services",
+          "Unify suspension, deletion and tenant teardown around durable owner-checked cleanup.",
+          [
+            "Suspension stops new admissions and trigger delivery; queued/in-flight policy is applied and audited.",
+            "Deletion during an outage returns deletion_pending and resumes idempotently after recovery.",
+            "UID/resourceVersion/ownership mismatch retains the resource and raises a repair condition; completion requires verified absence."
+          ],
+          "L",
+          "M3",
+          [
+            "TEN-01",
+            "DEP-03",
+            "EVT-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "STO",
+      "name": "SeaweedFS, secrets and metadata",
+      "goal": "Reuse Falcone storage and secrets without introducing new identity or persistence silos.",
+      "requirements": [
+        "Store source, Wasm artifacts, checkpoints and large payloads/results in SeaweedFS through existing scoped storage APIs with checksums, retention and authorized references.",
+        "Test S3 operations against the latest two qualified stable SeaweedFS releases, initially 4.48 and 4.47 from the research snapshot, preserving current notification configuration after it is supplied and verified.",
+        "Translate verified storage events into function triggers, including writes made through direct S3 clients, and document source-side retention and recovery guarantees.",
+        "Resolve OpenBao secrets through host capabilities or explicit narrow guest bindings; keep values out of source-controlled manifests, artifacts and logs and support scoped rotation.",
+        "Persist desired function state, activation state, deduplication records and cleanup obligations in PostgreSQL with migrations and unique scope-aware keys.",
+        "Use transactional outbox/inbox patterns and fenced attempt ownership so database/broker failures do not lose accepted work or allow stale workers to overwrite terminal status."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement Wasm artifact, checkpoint and scoped S3 storage",
+          "function author",
+          "access artifacts and application objects securely",
+          "my function can use Falcone storage",
+          "Reuse Falcone storage through capability-controlled host operations.",
+          [
+            "Required upload/download, multipart, signed-URL and checksum cases pass against both pinned SeaweedFS releases.",
+            "Guessed keys, path traversal and signed-URL requests cannot cross tenant/workspace boundaries; guest access uses narrow grants.",
+            "Retention preserves workflow-pinned artifacts, live payloads and resumable checkpoints; current notifications are preserved and regression-tested."
+          ],
+          "M",
+          "M1",
+          [
+            "SEC-01",
+            "TEN-01"
+          ]
+        ],
+        [
+          "02",
+          "Bridge storage events and rotate OpenBao secrets",
+          "integration developer",
+          "receive object events and use rotating secrets",
+          "storage automation remains secure",
+          "Qualify the actual SeaweedFS notification/feed path and preserve OpenBao references.",
+          [
+            "PUT, multipart completion and DELETE through direct S3 clients produce normalized events according to the pinned-version contract.",
+            "Disconnect/reconnect tests establish replay checkpoints and any source-side loss window; unsupported guarantees block release of the corresponding trigger.",
+            "Secret rotation updates only authorized consumers and never writes values into revision manifests, telemetry or build outputs."
+          ],
+          "L",
+          "M2",
+          [
+            "STO-01",
+            "SEC-03"
+          ]
+        ],
+        [
+          "03",
+          "Implement durable invocation metadata and outbox recovery",
+          "operator",
+          "persist accepted work and recover dispatcher failures",
+          "acknowledged submissions survive restarts",
+          "Add scoped PostgreSQL schemas, outbox/inbox processing and fenced leases.",
+          [
+            "A transaction atomically persists activation plus outbox before returning accepted.",
+            "Crash tests at commit/publish/consume/complete boundaries recover pending work and reconcile duplicates.",
+            "A stale attempt cannot overwrite a newer terminal record; no guarantee of exactly-once arbitrary external side effects is advertised."
+          ],
+          "L",
+          "M1",
+          [
+            "MIG-01",
+            "OPS-01"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "OBS",
+      "name": "Observability, audit and metering",
+      "goal": "Make failures, performance and consumption visible without leaking tenant data.",
+      "requirements": [
+        "Emit structured logs and trace context carrying trusted tenant/workspace, function/revision, activation and workflow identifiers, with tenant-scoped retrieval.",
+        "Export OpenTelemetry traces across gateway, admission, event dispatch, runtime and workflow boundaries, preserving W3C context when permitted.",
+        "Measure deployed function count, connected WebSockets, ingress/egress messages, triggered invocations, execution/queue/activation latency, guest/host memory, pool capacity, retries and DLQ depth separately with bounded-cardinality metrics.",
+        "Provide dashboards and alerts for unavailable runtimes, saturation, scaling failure, stale queues, security denials and failed cleanup.",
+        "Record append-only auditable lifecycle/security events and invocation usage units with stable event IDs and reconciliation.",
+        "Enforce telemetry redaction, configurable retention and per-tenant access controls; never use unbounded user input as metric labels."
+      ],
+      "stories": [
+        [
+          "01",
+          "Add tenant-scoped logs and distributed tracing",
+          "developer",
+          "trace one invocation across services",
+          "I can locate failures quickly",
+          "Instrument runtime and Falcone adapters with OpenTelemetry and structured logs.",
+          [
+            "An HTTP and a Temporal-triggered invocation can each be followed across their full path.",
+            "Log/result/trace queries reject cross-tenant and unauthorized sibling-workspace access.",
+            "Tokens, secret values and request bodies are excluded or redacted according to policy."
+          ],
+          "M",
+          "M1",
+          [
+            "INV-01",
+            "SEC-01"
+          ]
+        ],
+        [
+          "02",
+          "Deliver metrics, dashboards and operational alerts",
+          "SRE",
+          "observe load and scaling decisions",
+          "I can diagnose saturation before an outage",
+          "Define bounded metrics and dashboards for the complete execution path.",
+          [
+            "Load tests populate warm, cold-start, queue and execution histograms separately.",
+            "Injected broker lag, stale metrics, unavailable runtime and failed cleanup trigger the expected alerts.",
+            "Metric-cardinality tests reject function-supplied labels and demonstrate a bounded series budget."
+          ],
+          "M",
+          "M2",
+          [
+            "OBS-01"
+          ]
+        ],
+        [
+          "03",
+          "Add auditable metering and retention controls",
+          "platform administrator",
+          "reconcile usage with execution records",
+          "quotas and future billing use explainable data",
+          "Implement idempotent usage events, audit queries and retention jobs.",
+          [
+            "Duplicate delivery does not double-count the same billable attempt; retry charging policy is explicit.",
+            "Usage totals reconcile with recorded execution attempts within the agreed lag budget.",
+            "Retention deletes expired telemetry without deleting active workflow or legal-hold references where configured."
+          ],
+          "M",
+          "M2",
+          [
+            "OBS-01",
+            "STO-03",
+            "TEN-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "OPS",
+      "name": "Operations, CI/CD and resilience",
+      "goal": "Ship and operate a supported, reproducible serverless subsystem.",
+      "requirements": [
+        "Install with ordinary namespaced Helm resources and pregranted RBAC on the latest two qualified Kubernetes minor lines and OpenShift 4.20; require no CRD, cluster-role, operator, custom RuntimeClass or elevated SCC creation.",
+        "Support HA control/data-plane replicas, leader election or sharding for singleton duties, disruption budgets and documented degraded behavior.",
+        "Provide CI gates for API contracts, tenant isolation, runtime conformance, supply-chain policy and realistic integration tests with Keycloak, SeaweedFS, Kafka and Temporal.",
+        "Submit function manifests through the authoritative Falcone API; keep PostgreSQL as desired-state authority and let one namespaced reconciler own standard worker-pool resources without custom Kubernetes resources.",
+        "Provide backup/restore and disaster-recovery procedures covering PostgreSQL, SeaweedFS, broker state, secret references and runtime reconstruction, with measured RPO/RTO.",
+        "Support compatible upgrades, schema evolution, rollback or forward-repair boundaries, installation preflight and retain-by-default uninstall."
+      ],
+      "stories": [
+        [
+          "01",
+          "Package namespace-only installation and resource ownership",
+          "platform installer",
+          "deploy a supported runtime reproducibly",
+          "cluster setup is inspectable and repeatable",
+          "Deploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation.",
+          [
+            "Preflight using the deployment identity proves all required namespaced verbs; a rendered manifest audit contains no cluster-scoped resources, privileged pods or custom SCC/RuntimeClass.",
+            "Actual pod startup and invocation pass on qualified Kubernetes lines and the supplied OpenShift patch release under its existing SCC.",
+            "Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure."
+          ],
+          "L",
+          "M1",
+          [
+            "MIG-01",
+            "WAS-01"
+          ]
+        ],
+        [
+          "02",
+          "Implement HA and the integration CI gate",
+          "maintainer",
+          "test the whole stack under failures",
+          "releases do not regress isolation or availability",
+          "Build real-stack CI plus multi-replica failover and GitOps workflows.",
+          [
+            "Node/controller/router/worker restarts recover according to documented sync/async guarantees.",
+            "CI exercises real Keycloak, SeaweedFS, Kafka and Temporal rather than mocks alone.",
+            "GitOps updates use the public authority path and cannot overwrite newer generations or bypass validation."
+          ],
+          "L",
+          "M2",
+          [
+            "OPS-01",
+            "EVT-02",
+            "WF-02",
+            "TEN-02"
+          ]
+        ],
+        [
+          "03",
+          "Prove restore, upgrades and safe uninstall",
+          "SRE",
+          "recover and upgrade the platform",
+          "operations do not destroy accepted work or rollback options",
+          "Create tested recovery points, compatibility gates and operator runbooks.",
+          [
+            "Restore into a clean cluster reconciles resource ownership and pending invocations; measured RPO/RTO are recorded.",
+            "Upgrade/rollback tests cover data-format compatibility and refuse unsafe downgrades.",
+            "Default uninstall retains data; deletion requires explicit scoped intent and verified ownership."
+          ],
+          "L",
+          "M3",
+          [
+            "OPS-02",
+            "TEN-03",
+            "DEP-03"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "MIG",
+      "name": "Compatibility and Knative retirement",
+      "goal": "Replace the runtime incrementally with evidence of Falcone contract parity.",
+      "requirements": [
+        "Freeze Falcone API/URL/data/authorization/execution contracts and classify existing functions by Wasm language/package compatibility; exclude raw Knative APIs and URLs from the replacement scope.",
+        "Record the accepted Option A decision and supersede native tenant-container, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification.",
+        "Implement interchangeable Knative and native backend adapters with per-resource backend selection and exactly one active traffic/trigger owner.",
+        "Preserve public identifiers, URLs, permissions, versions and activation history during migration; never double-execute side-effecting shadow traffic.",
+        "Validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration.",
+        "Retire Knative/Kourier only after a dependency inventory is empty, in-flight and retained-workflow references are resolved, rollback policy is met and resource ownership is verified."
+      ],
+      "stories": [
+        [
+          "01",
+          "Freeze Falcone contracts and accept Option A architecture",
+          "maintainer",
+          "record the exact replacement boundary",
+          "the implementation solves the real integration problem",
+          "Record the user-selected Wasm-only tenant execution direction, scope changes and migration blockers.",
+          [
+            "Inventory marks each Falcone contract observed, source-defined or proposed and explicitly excludes raw Knative compatibility.",
+            "The ADR records 20 tenants, 10,000 deployed functions, 100,000 mostly WebSocket/event messages/second, no admin sandbox and Falcone-owned quotas.",
+            "Existing source dependencies are classified before any migration; API compatibility never disguises an unsupported execution environment."
+          ],
+          "M",
+          "M0",
+          []
+        ],
+        [
+          "02",
+          "Implement backend selection and staged tenant migration",
+          "platform operator",
+          "move selected workloads between backends",
+          "I can evaluate the new runtime with a rollback path",
+          "Add backend drivers and generation-fenced route/trigger ownership.",
+          [
+            "One public function identity can switch backend while keeping URLs, permissions and history.",
+            "At every cutover point only one backend owns production trigger delivery; non-idempotent traffic is never shadow-executed.",
+            "A failed canary can return to a retained compatible backend, with in-flight work drained or explicitly reconciled."
+          ],
+          "L",
+          "M3",
+          [
+            "DEP-02",
+            "WF-02",
+            "EVT-02",
+            "API-03"
+          ]
+        ],
+        [
+          "03",
+          "Certify Wasm compatibility and retire owned Knative resources",
+          "platform owner",
+          "remove Knative after proven compatibility",
+          "Falcone no longer requires its serving stack",
+          "Qualify actual existing workloads and retire only after all consumers have a supported execution path.",
+          [
+            "All mandatory public contracts and all in-scope migrated function/package cases pass; unsupported workloads remain explicit cutover blockers.",
+            "WebSockets, guest isolation, long-job checkpoint/recovery and any deployed MCP journeys pass; expected SLOs are measured rather than assumed.",
+            "No live workload or workflow pin depends on Knative; only proven-owned removable resources are retired through the authorized lifecycle path."
+          ],
+          "L",
+          "M3",
+          [
+            "MIG-02",
+            "INV-03",
+            "OPS-03",
+            "TEN-03",
+            "JOB-03",
+            "WAS-03"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "WAS",
+      "name": "Wasm qualification and capability contract",
+      "goal": "Prove Option A works under actual corporate policy before building the complete platform.",
+      "requirements": [
+        "Demonstrate Wasmtime startup, guest execution, interruption and compilation under the existing OpenShift SCC and namespace identity without additional administrator privileges.",
+        "Pin engine, architecture, WASI interface and compiler versions; test qualified Kubernetes 1.37/1.36 lines and the exact OpenShift 4.20 patch reported by the operator, without assuming CRI-O patch numbers identify Kubernetes patches.",
+        "Define versioned, capability-controlled Falcone storage, HTTP, event and workflow host interfaces; deny undeclared imports and ambient filesystem/network authority.",
+        "Keep untrusted raw Wasm validation, bounded compilation and trusted native cache generation separate; never deserialize a tenant-supplied native compiled artifact.",
+        "Publish exact JavaScript, Python and Go profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks unless a future separately reviewed capability explicitly supports them.",
+        "Run adversarial guest and host-interface tests covering memory/CPU exhaustion, malformed artifacts, cross-tenant handles, denial of service and worker recovery, and retain security-review evidence."
+      ],
+      "stories": [
+        [
+          "01",
+          "Prove restricted OpenShift execution feasibility",
+          "platform engineer",
+          "validate Wasmtime under existing corporate policies",
+          "implementation starts from a deployable foundation",
+          "Build a minimal disposable qualification fixture and collect actual admission/runtime evidence.",
+          [
+            "The deployment identity can install the fixture and execute/interrupt a guest without cluster-scoped writes, elevated SCC or custom RuntimeClass.",
+            "Compile/load behavior, executable-memory needs, arbitrary UID, read-only filesystem and temporary storage work under the actual policy; failures are reported without escalation or native fallback.",
+            "The exact OpenShift/Kubernetes versions and available namespaced permissions are recorded; absent access means unverified, not passed."
+          ],
+          "L",
+          "M0",
+          [
+            "MIG-01"
+          ]
+        ],
+        [
+          "02",
+          "Specify host capabilities and safe artifact loading",
+          "security engineer",
+          "control every sandbox escape hatch",
+          "tenant modules have only explicitly granted authority",
+          "Define the WIT/host API contract, invocation capability context and bounded compiler/cache path.",
+          [
+            "Deny-by-default import tests and scope-bound storage/event/workflow/HTTP capability tests pass.",
+            "Tenant-provided native precompiled caches and arbitrary host-call implementations are rejected; only trusted locally generated caches are loaded.",
+            "Compiler CPU/memory limits, guest/host buffer limits and cancellation boundaries are part of the contract and have executable fixtures."
+          ],
+          "L",
+          "M1",
+          [
+            "WAS-01"
+          ]
+        ],
+        [
+          "03",
+          "Qualify language profiles and legacy compatibility",
+          "function developer",
+          "know which code and packages are supported",
+          "I can deploy without hidden compatibility changes",
+          "Test representative legacy JavaScript, real Python analysis dependencies and Go modules before enabling a profile.",
+          [
+            "Each enabled language has exact runtime/compiler/package versions, allowed interfaces, tested examples and unsupported-feature diagnostics.",
+            "The selected legacy JavaScript function and representative Python analysis pass expected results and dependency behavior; a failure blocks that profile or migration claim.",
+            "Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement."
+          ],
+          "L",
+          "M1",
+          [
+            "WAS-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "JOB",
+      "name": "Long-running analysis and recovery",
+      "goal": "Run extended analysis without losing progress or starving interactive traffic.",
+      "requirements": [
+        "Provide asynchronous job submission/status/progress APIs through Falcone with tenant-scoped cancellation and configurable duration limits separate from HTTP connection deadlines.",
+        "Persist explicit application checkpoints in SeaweedFS with pinned revision, schema version, input digest and fenced attempt identity; never advertise transparent arbitrary-memory restoration.",
+        "Resume checkpoint-aware jobs after worker/pod interruption using Temporal coordination and a single retry owner, with documented restart behavior for jobs without checkpoints.",
+        "Propagate cancellation to guest computation and blocking host calls, record acknowledged/uncertain states and enforce profile-specific termination budgets without claiming side-effect rollback.",
+        "Reserve separate interactive and long-running capacity within Falcone quotas, enforce fair admission and include checkpoint/drain state in worker scale-down decisions.",
+        "Benchmark representative hours-long, memory-intensive analysis and failure recovery, publishing wall time, CPU, memory, checkpoint overhead and restored progress on the supported runtime profile."
+      ],
+      "stories": [
+        [
+          "01",
+          "Implement asynchronous analysis jobs and checkpoint contracts",
+          "data analyst",
+          "save progress during extended executions",
+          "a pod restart does not require recomputing all completed work",
+          "Define job lifecycle, progress and explicit checkpoint/resume SDK contracts.",
+          [
+            "Submission returns a durable job ID; progress and cancellation are scoped to the submitting tenant/workspace.",
+            "Checkpoint objects include revision/input/schema identifiers and cannot be written by a stale fenced attempt.",
+            "A sample analysis saves and reloads a checkpoint; an uncheckpointed job clearly reports that recovery restarts computation."
+          ],
+          "L",
+          "M2",
+          [
+            "WF-01",
+            "STO-01",
+            "RUN-02"
+          ]
+        ],
+        [
+          "02",
+          "Recover and cancel analysis jobs through Temporal",
+          "workflow author",
+          "resume or stop analysis safely",
+          "long executions remain operable during failures",
+          "Coordinate attempts, pins and checkpoints through existing Temporal Activities.",
+          [
+            "Terminate a worker during a checkpoint-aware job and verify resumption from the last committed checkpoint with the same revision.",
+            "Retry ownership prevents nested retry storms; uncertain external effects are recorded and require application idempotency.",
+            "Cancellation tests cover compute loops and blocked host I/O, with a bounded process-termination fallback and explicit final status."
+          ],
+          "L",
+          "M2",
+          [
+            "JOB-01",
+            "WF-02"
+          ]
+        ],
+        [
+          "03",
+          "Qualify mixed interactive and long-running load",
+          "SRE",
+          "protect interactive work while analysis runs",
+          "batch jobs cannot monopolize shared capacity",
+          "Establish separate budgets and measure representative long-job performance and recovery.",
+          [
+            "Run a declared hours-long analysis fixture with measured memory/CPU/checkpoint costs; no native dependency fallback occurs.",
+            "A mixed-load test enforces configured interactive and batch reservations and reports queueing when quotas are exhausted.",
+            "Worker scale-down respects jobs/checkpoints, and a failure exercise meets the agreed checkpoint-loss and recovery bounds."
+          ],
+          "L",
+          "M3",
+          [
+            "JOB-02",
+            "TEN-02",
+            "OBS-02"
+          ]
+        ]
+      ]
+    }
+  ],
+  "decision": "Option A accepted: application-level WebAssembly/WASI sandbox inside restricted pods",
+  "planning_revision": "option-a-v2"
+}
