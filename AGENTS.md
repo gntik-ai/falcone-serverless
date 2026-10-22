@@ -18,9 +18,9 @@ A story that spans repositories is split into one issue per repository, each wit
 ## Hard rules (design §6; do not relax without an accepted ADR)
 
 - Restricted pods only: no operator, CRD, ClusterRole, custom RuntimeClass, elevated SCC or host access. The controller writes only standard Deployments, Services and Leases in preprovisioned namespaces.
-- No tenant OCI or native binaries, no Dockerfiles or install hooks, and no native fallback. Unsupported workloads are blocked from migration.
+- Tenants supply no OCI or native binaries, Dockerfiles or install hooks, and there is no native fallback. Unsupported workloads are blocked from migration. Trusted platform images (worker, compiler) are built by this project.
 - A tenant-supplied precompiled Wasmtime artifact is never deserialized. Native code caches come only from trusted build components.
-- Guests reach the platform only through the versioned WIT/WASI capability host (storage, allow-listed HTTP, events, workflows, logging). Secrets stay in the host binding layer.
+- Guests reach the platform only through the versioned WIT/WASI capability host (storage, allow-listed HTTP, events, workflows, logging). Secrets stay in the host binding layer, unless a reviewed, narrow grant exposes one to a guest (design §6).
 - Security-sensitive areas are the sandbox, host capabilities, egress, secrets and tenant isolation. A second reviewer and explicit operator approval are needed (Hermes R3).
 
 ## Build and test
@@ -37,7 +37,7 @@ The Rust toolchain is pinned in `rust-toolchain.toml` and Go in `controller/go.m
 ## Cluster testing (operator decision, 2026-10-22)
 
 - Every runtime test runs on the shared cluster, in dedicated `fs-test-*` namespaces created and deleted by the test.
-- Integration with Falcone reads `in-falcone-staging`. Other namespaces are off limits, including `family-rentals-prod`, `musematic*` and `llmwiki*`.
+- Integration tests may also read `in-falcone-staging` (Falcone's staging release, which the operator explicitly approved for this). Every other namespace is off limits, including `family-rentals-prod`, `musematic*` and `llmwiki*`.
 - The cluster is k3s, not OpenShift. Pod Security "restricted" plus seccomp `RuntimeDefault`, a read-only root filesystem and an arbitrary non-root UID stand in for OpenShift restricted-v2. Real OpenShift qualification is a later, separate step.
 - Never print or commit secrets. Credentials come from OpenBao through the existing External Secrets setup.
 
