@@ -86,9 +86,9 @@ Deliverables from this spike are a reproducible fixture, pinned engine/toolchain
 
 ### Backlog and import notes
 
-The revised package contains **14 epics, 42 stories and 84 requirements**. Existing IDs are retained; WAS (qualification/capabilities) and JOB (long-running recovery) are added. Every requirement maps to a story and the dependency graph is checked for cycles.
+The revised package contains **16 epics, 58 stories and 100 requirements**. Existing IDs are retained; WAS (qualification/capabilities) and JOB (long-running recovery) are added, and ADR 0010 adds OCI (OCI execution mode) and CAT (superadmin base catalog). Every requirement maps to a story and the dependency graph is checked for cycles.
 
-The importer remains preview-first and preserves existing issue bodies. If an older package was imported elsewhere, importing this revision does not automatically rewrite those existing issues; review and update their changed scope separately. No GitHub issues or deployments have been changed by producing this revision.
+The importer remains preview-first and preserves existing issue bodies. If an older package was imported elsewhere, importing this revision does not automatically rewrite those existing issues; review and update their changed scope separately. No GitHub issues or deployments have been changed by producing this revision. The ADR 0010 revision changes 31 published stories and the EP-RUN, EP-SEC and EP-MIG goals; those issue bodies need a separately reviewed update, and the 18 OCI and CAT issues are not yet published.
 
 ### Definition of done
 

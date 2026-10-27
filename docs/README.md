@@ -1,10 +1,10 @@
 # falcone-serverless starter package
 
-Updated 21 October 2026. Option A is selected: Wasmtime/WASI inside restricted pods. This is a revised implementation specification, not a runtime implementation.
+Updated 27 October 2026. Option A is selected: Wasmtime/WASI inside restricted pods. [ADR 0010](adr/0010-oci-execution-mode-and-base-catalog.md) adds a superadmin-authorized OCI execution mode and a global base catalog. This is a revised implementation specification, not a runtime implementation.
 
 ## Contents
 
-- `falcone-serverless-design.md`: complete six-section report, including 84 requirements and 42 stories under 14 epics.
+- `falcone-serverless-design.md`: complete six-section report, including 100 requirements and 58 stories under 16 epics.
 - `backlog.md`: standalone human-readable backlog.
 - `backlog.json`: issue payloads, parent IDs, dependencies, labels and requirement traceability.
 - `import_github.py`: Python 3 importer using your authenticated GitHub CLI.
@@ -23,7 +23,7 @@ This package is published in `gntik-ai/falcone-serverless/docs`. See the reposit
 python3 import_github.py --repo gntik-ai/falcone-serverless
 ```
 
-4. To create or reuse the 56 issues (stable markers prevent duplicate creation):
+4. To create or reuse the 74 issues (stable markers prevent duplicate creation):
 
 ```bash
 python3 import_github.py --repo gntik-ai/falcone-serverless --apply
@@ -47,7 +47,7 @@ All issues are created in the supplied repository. If implementation is split am
 
 ## Validation performed
 
-The generated backlog is checked for unique IDs, complete 84-requirement coverage and an acyclic dependency graph. Python compilation, local preview and a mocked import/rerun (56 issues, 42 parent links, 56 Project items) are checked. Live authenticated GitHub import is not exercised.
+The generated backlog is checked for unique IDs, complete 100-requirement coverage and an acyclic dependency graph. Python compilation, local preview and a mocked import/rerun (56 issues, 42 parent links, 56 Project items, before the ADR 0010 revision) are checked. Live authenticated GitHub import is not exercised.
 
 ## Rebuild
 

@@ -16,7 +16,7 @@ Design and implementation backlog. Option A selects Wasmtime/WASI execution insi
 ## Documentation
 
 - [Complete design and requirements](docs/falcone-serverless-design.md)
-- [Backlog: 14 epics and 42 stories](docs/backlog.md)
+- [Backlog: 16 epics and 58 stories](docs/backlog.md)
 - [Machine-readable requirements and issue payloads](docs/backlog.json)
 - [Authoring sources and import instructions](docs/README.md)
 - [GitHub issues](https://github.com/gntik-ai/falcone-serverless/issues)
