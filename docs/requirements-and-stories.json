@@ -967,7 +967,7 @@
             "Each enabled language has exact runtime/compiler/package versions, allowed interfaces, tested examples and unsupported-feature diagnostics.",
             "The selected legacy JavaScript function and representative Python analysis pass expected results and dependency behavior; a failure blocks that profile or migration claim.",
             "Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement.",
-            "Matrix entries reserve a catalog entry id; compatibility diagnostics may name OCI as an explicit alternative but never select it (ADR 0010)."
+            "Each matrix entry has a stable profile id and published qualification evidence; WAS-03 consumes no base-catalog contract and is not gated on catalog work (the catalog later imports these profiles as `wasm-profile` entries). Compatibility diagnostics may name OCI as an explicit alternative but never select it (ADR 0010)."
           ],
           "L",
           "M1",
@@ -1170,7 +1170,7 @@
             "The controller renders a Deployment and a headless Service per materialized revision only in the tenant's bound OCI namespace; its write set is unchanged.",
             "A controller guard refuses any pod spec that deviates from ctr-oci-pod-template.",
             "Scale from zero, idle dematerialization and restart convergence pass in fs-test; a 1,000-OCI-function inventory stays within the materialization cap.",
-            "Restricted posture assertions (SEC-02) run against rendered OCI pod templates, and the namespace resolver refuses OCI work for a tenant without an `oci_namespace` binding.",
+            "OCI-05 reuses the restricted posture assertion suite from SEC-02 and runs it against rendered OCI pod templates; SEC-02 consumes no OCI contract and keeps its Wasm M1 scope. The namespace resolver refuses OCI work for a tenant without an `oci_namespace` binding.",
             "Admission routes OCI revisions to their materialized pool; preflight checks the OCI prerequisites (OCI namespace, pull Secret, NetworkPolicy enforcement) and blocks OCI mode when enforcement is absent; chart values render the shim, gateway, intake and assembler images and the pull-Secret reference only when the OCI section is enabled."
           ],
           "L",
