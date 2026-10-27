@@ -1124,7 +1124,7 @@
           "only known images reach nodes",
           "Implement three image paths: P1, assembled by the trusted image assembler onto a catalog base by pure layer assembly; P2, built externally FROM a catalog base digest, with layer-ancestry verification; and P3, BYO images (`base.kind: byo`) only for superadmin-flagged projects. Catalog-membership and ancestry checks apply only to P1 and P2. Every image is copied by digest into the platform intake mirror, and kubelets pull only from there. Risk: R3 (artifact loading and supply chain).",
           [
-            "P1, P2 and P3 follow their verification rules: P1/P2 images must derive from a visible, enabled catalog base, and a `kind: byo` image requires the project's superadmin BYO flag, a valid signature against the project's registered keys, a platform-mirror copy and an advisory scan record, with the signer identity and attestation ref recorded; tag-only, wrong-platform, oversized, failed-ancestry and unsigned BYO images are rejected before any pod is rendered.",
+            "P1, P2 and P3 follow their verification rules: P1/P2 images must derive from a visible catalog base that is eligible under the CAT-04 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base), and a `kind: byo` image requires the project's superadmin BYO flag, a valid signature against the project's registered keys, a platform-mirror copy and an advisory scan record, with the signer identity and attestation ref recorded; tag-only, wrong-platform, oversized, failed-ancestry and unsigned BYO images are rejected before any pod is rendered.",
             "Intake never executes image content, and tenant registry credentials are never logged.",
             "Mirror images are retained while referenced and collected only after reference checks; mirror bytes count against the tenant cap."
           ],
@@ -1302,8 +1302,8 @@
         "Maintain one global, superadmin-managed base catalog of Wasm profile components and OCI base images with immutable name@version entries bound to one digest and visibility filtered by tenant and project.",
         "Let the superadmin register existing bases by digest-pinned reference after artifact validation or image intake, record optional signature and provenance results, and enable a Wasm base only with profile qualification evidence.",
         "Let the superadmin create bases from versioned recipes built by confined trusted builders with SBOM and provenance, and reject RUN steps in OCI recipes in v1.",
-        "Enforce the base lifecycle (draft, enabled, deprecated, retired, and disabled with optional invocation blocking) and default aliases without ever rebasing a revision automatically.",
-        "Pin the selected or default catalog base by id@version and digest on every revision with `base.kind: catalog`, and reject absent, invisible, state-disallowed or unauthorized catalog bases at deploy, promotion and invoke; BYO revisions need no catalog base.",
+        "Enforce the base lifecycle (draft, enabled, deprecated, retired, and disabled with optional invocation blocking) and default aliases without ever rebasing a revision automatically; a new function needs an enabled base, and a deprecated base stays eligible only for new revisions of functions already pinned to it, until its window end.",
+        "Pin the selected or default catalog base by id@version and digest on every revision with `base.kind: catalog`, and reject absent, invisible, lifecycle-ineligible or unauthorized catalog bases at deploy, promotion and invoke; BYO revisions need no catalog base.",
         "Audit every catalog and OCI authorization mutation, and provide superadmin console pages plus a tenant base selector filtered by visibility."
       ],
       "stories": [
@@ -1376,9 +1376,10 @@
           "I can patch bases without breaking functions silently",
           "Implement the lifecycle draft \u2192 enabled \u2192 deprecated (window end, replacement) \u2192 retired, plus disabled with optional `block_invocations`, with a provisional 90-day default deprecation window. Risk: R2 (product lifecycle; the block path is reviewed under CAT-05).",
           [
-            "The lifecycle state machine is enforced for `base.kind: catalog` revisions at deploy, promotion and, for `block_invocations`, invoke; deprecation and retirement do not apply to BYO revisions.",
+            "The lifecycle state machine is enforced for `base.kind: catalog` revisions at deploy, promotion and, for `block_invocations`, invoke; deprecation and retirement do not apply to BYO revisions. Base eligibility follows the lifecycle: a new function, or a function switching base, needs an `enabled` base visible to the project; a new revision of a function already pinned to a base may keep that base while it is `deprecated`, until `window_end`; `retired` and `disabled` bases are refused for new revisions, and `disabled` with `block_invocations` also denies invocations of pinned revisions (`base_disabled`).",
             "There is no auto-rebase; a replacement creates candidate revisions that owners must promote.",
-            "The default alias is resolved and pinned at deploy."
+            "The default alias is resolved and pinned at deploy.",
+            "Lifecycle tests: a grandfathered new revision of a function pinned to a deprecated base is accepted before `window_end` and refused after it; a new function selecting a deprecated base is refused."
           ],
           "M",
           "M3",
@@ -1393,10 +1394,10 @@
           "developer",
           "pick a base or get my mode's default",
           "my builds are reproducible",
-          "Resolve the selected base, or the per-mode and per-language default alias, at deploy and pin it on the revision; admission enforces visibility, state and OCI authorization. Risk: R3 (cross-tenant authorization).",
+          "Resolve the selected base, or the per-mode and per-language default alias, at deploy and pin it on the revision; admission enforces visibility, lifecycle eligibility and OCI authorization. Risk: R3 (cross-tenant authorization).",
           [
             "The manifest selects a catalog base or gets the default; revisions with `base.kind: catalog` pin id@version and digest, and a `kind: byo` revision never requires a catalog base.",
-            "Admission rejects a catalog base that is absent, invisible or disallowed by state,",
+            "Admission rejects a catalog base that is absent, invisible or ineligible under the CAT-04 lifecycle rule (a `deprecated` base only for a function already pinned to it, until `window_end`),",
             "The worker refuses a Wasm revision whose profile component digest differs from its pin."
           ],
           "L",

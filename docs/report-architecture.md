@@ -88,7 +88,7 @@ Guest code cannot launch native processes or arbitrary host plugins. The trusted
 - P2: the tenant's CI builds `FROM <catalog base digest>`; intake verifies that the bottom layers equal the base manifest's layers, by digest.
 - P3 (BYO, `base.kind: byo`): any base, only in projects the superadmin flags. It requires a valid signature against keys registered for the project, a platform-mirror copy and an advisory scan record.
 
-Catalog-membership validation and base lifecycle controls (deprecation, retirement) apply only to `kind: catalog`; no BYO revision requires a catalog base.
+Catalog-membership validation and base lifecycle controls (deprecation, retirement) apply only to `kind: catalog`; no BYO revision requires a catalog base. Base eligibility follows the lifecycle: a new function, or a function switching base, needs an `enabled` base visible to the project; a new revision of a function already pinned to a base may keep that base while it is `deprecated`, until `window_end`; `retired` and `disabled` bases are refused for new revisions, and `disabled` with `block_invocations` also denies invocations of pinned revisions (`base_disabled`).
 
 Ancestry is provenance and patch tracking, not a security boundary: upper layers can overwrite any base file. The isolation boundary is the restricted single-revision pod. Every image is copied by digest into the platform intake mirror before a pod is rendered. An OCI container process serves many invocations of the same revision (warm reuse): memory, `/tmp` and globals can persist between them, but credentials do not, because each per-attempt handle is invalidated. This is documented and shown before deploy; the fresh-instance rule applies to Wasm mode.
 
