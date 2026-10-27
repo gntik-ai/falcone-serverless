@@ -1,12 +1,14 @@
 # falcone-serverless: Option A implementation specification
 
-Updated 21 October 2026. **Architecture direction accepted by the user; implementation, corporate-cluster feasibility and security qualification remain unverified.** This revision supersedes the initial native-container execution design. The original survey is retained as comparative evidence.
+Updated 27 October 2026. **Architecture direction accepted by the user; implementation, corporate-cluster feasibility and security qualification remain unverified.** This revision supersedes the initial native-container execution design. [ADR 0010](adr/0010-oci-execution-mode-and-base-catalog.md), accepted by the operator on 27 October 2026, adds OCI as an explicit execution mode that the platform superadmin authorizes per tenant and project, and a global superadmin base catalog. OCI mode is chosen per function and is never a silent fallback. The original survey is retained as comparative evidence.
 
 ## Accepted direction and scope
 
 Build a Falcone-owned **WebAssembly/WASI execution layer inside ordinary restricted Kubernetes/OpenShift pods**, using Wasmtime as the sandbox engine. Keep Keycloak, SeaweedFS, Temporal, APISIX, Kafka, PostgreSQL and OpenBao. Falcone owns APIs, quotas, execution policy, integrations, routing and lifecycle.
 
-The product supports untrusted code through explicitly qualified language and package profiles. It does **not** accept arbitrary tenant Linux containers, native executables, native install scripts or unrestricted operating-system access. Existing Functions APIs, URLs and data contracts remain the compatibility target; raw Knative APIs and URLs are excluded.
+The product supports untrusted code through explicitly qualified language and package profiles. In Wasm mode it does **not** accept arbitrary tenant Linux containers, native executables, native install scripts or unrestricted operating-system access. Existing Functions APIs, URLs and data contracts remain the compatibility target; raw Knative APIs and URLs are excluded.
+
+Functions run in Wasm by default. A superadmin may authorize OCI mode per tenant (none, all or selected projects) under ADR 0010, as an explicit per-function choice with accepted same-kernel risk. There is still no silent fallback. OCI function images are built FROM a catalog base; a project may bring its own image only when the superadmin flags it. A project is a Falcone workspace.
 
 **Compatibility is a measured gate.** Unsupported legacy dependencies block those workloads from migration. Selecting Option A is not proof that every existing function can run under Wasm. Neither silent native fallback nor weakening sandbox boundaries is an acceptable compatibility mechanism.
 
@@ -15,9 +17,11 @@ The product supports untrusted code through explicitly qualified language and pa
 | Topic | Accepted requirement |
 | --- | --- |
 | Motivation | Corporate OpenShift restrictions make operators and special permissions difficult; prioritize namespace-only deployment, performance, Falcone integration and extensibility |
-| Execution location | Option A inside restricted pods; no administrator-provided sandbox runtime |
+| Execution location | Option A inside restricted pods; no administrator-provided sandbox runtime. Authorized OCI functions also run in restricted pods, in a preprovisioned OCI namespace per tenant (ADR 0010) |
 | Deployment permissions | No required operator, CRD, ClusterRole, custom RuntimeClass, elevated SCC or host access; use existing approved namespaces and pregranted namespaced RBAC |
-| Tenant trust | Arbitrary untrusted code within qualified Wasm profiles; no arbitrary native execution |
+| Tenant trust | Arbitrary untrusted code within qualified Wasm profiles; no arbitrary native execution. OCI mode: untrusted code in catalog-derived images, only in superadmin-authorized projects, with accepted same-kernel residual risk (ADR 0010) |
+| Base catalog | Global, superadmin-managed catalog of Wasm runtime profiles and OCI base images, with tenant/project visibility; bases are selected by registry digest or created from a recipe |
+| OCI authorization | Superadmin-only, per tenant (none, all or selected projects), audited; tenant admins cannot change it; BYO images only in projects the superadmin flags |
 | Scale | Approximately 20 tenants and 10,000 deployed function definitions |
 | Messaging | Approximately 100,000 aggregate WebSocket/event messages per second; mostly messaging, not 100,000 function invocations/second |
 | Execution quota | Initial configurable estimate of 20 simultaneous executions per tenant; roughly 400 total if all 20 tenants use their quota |
@@ -241,9 +245,18 @@ flowchart TD
     Host --> Bindings["SeaweedFS / OpenBao / Falcone APIs"]
     Temporal["Temporal and existing workflow worker"] --> Dispatcher
     Host --> Temporal
+    Controller -. "standard resources only" .-> OciPool["OCI revision pools (shim + function container)"]
+    Dispatcher --> OciPool
+    OciPool --> CapApi["Localhost capability API in the shim"]
+    CapApi --> Bindings
+    CapApi --> Egress["Per-namespace egress gateway"]
+    API --> Catalog["Superadmin base catalog"]
+    Catalog --> Intake["Image intake / assembler"]
+    Intake --> Mirror["Digest-pinned platform intake mirror"]
+    Mirror -. "pull by digest" .-> OciPool
 ```
 
-OpenTelemetry instruments gateways, dispatch, guest lifecycle and host calls. Telemetry and results always carry verified tenant/workspace scope. The diagram does not imply guest access to raw infrastructure credentials.
+OpenTelemetry instruments gateways, dispatch, guest lifecycle and host calls. Telemetry and results always carry verified tenant/workspace scope. The diagram does not imply guest access to raw infrastructure credentials. In OCI mode (ADR 0010) the execution credential stays in the trusted shim and never enters the tenant container.
 
 ### Technology and deployment model
 
@@ -254,15 +267,19 @@ OpenTelemetry instruments gateways, dispatch, guest lifecycle and host calls. Te
 | Messaging | Existing trusted WebSocket gateway plus Kafka/event routing | Separate connection/message throughput from execution load |
 | Dispatch/admission | Falcone service with durable records, reservations and revision pinning | Preserve tenant fairness and accepted-work durability |
 | Execution worker | Rust embedding a pinned Wasmtime engine | Direct control of sandbox configuration, imports, budgets and interruption |
-| Function artifacts | Validated raw Wasm modules/components plus immutable manifests | No arbitrary tenant OCI image execution |
+| Function artifacts | Validated raw Wasm modules/components plus immutable manifests, **or**, in authorized projects, a digest-pinned OCI image derived from a catalog base | No unvetted tenant OCI image execution; OCI is an explicit, superadmin-authorized mode (ADR 0010) |
 | Language profiles | Qualified JavaScript adapter first; separately qualify Go and Python | Preserve source semantics where possible without pretending a full Linux environment exists |
 | Host interfaces | Versioned WIT/WASI interfaces and narrow Falcone capabilities | Explicit grants for storage, HTTP, events and workflows |
 | Storage | Existing PostgreSQL for metadata; SeaweedFS for artifacts/checkpoints/payloads | Reuse established persistence and tenant policies |
 | Workflow engine | Existing Temporal/workflow-worker | Durable orchestration, retry coordination and long-job recovery |
-| Image delivery | Approved digest-pinned Falcone worker/compiler images in existing registry | Containers package trusted platform code, not arbitrary tenant programs |
+| Image delivery | Approved digest-pinned Falcone worker/compiler images in existing registry; tenant OCI function images only through the platform intake mirror | Kubelets pull trusted platform images and verified, mirrored function images by digest, never directly from tenant registries |
+| OCI shim | Trusted falcone-serverless sidecar in each OCI revision pod | Serves the worker execution API and a localhost capability API; keeps the execution credential out of the tenant container |
+| Egress gateway | Trusted per-namespace HTTP egress gateway for OCI namespaces | Credential-checked allow-listed egress with DNS-rebinding, redirect and metadata checks |
+| Image intake / assembler | Trusted falcone-serverless components rendered as restricted pods | Verify, assemble and mirror function images by digest; never run tenant build hooks |
+| Base catalog | Falcone-owned global catalog of Wasm profile components and OCI bases | Superadmin-managed bases with tenant/project visibility, immutable versions and audited lifecycle |
 | Installation | Namespaced Helm resources under existing corporate admission policy | No operator, CRD, RuntimeClass or elevated SCC prerequisite |
 
-Wasmtime/WASI capability isolation is the selected boundary for untrusted guest code. It requires a correctly secured host interface and patch policy; it is not a claim of zero residual risk. [S26–S27]
+Wasmtime/WASI capability isolation is the selected boundary for untrusted guest code. It requires a correctly secured host interface and patch policy; it is not a claim of zero residual risk. [S26–S27] OCI mode is a weaker boundary: tenant code shares the node kernel under restricted Pod Security only, and the superadmin accepts that residual risk when authorizing a project (ADR 0010).
 
 ### Deployment authority and permission boundary
 
@@ -276,17 +293,27 @@ PostgreSQL remains authoritative for Function/Revision/Trigger/Job records. API 
 
 The native pool scaler is the only writer of replica counts. Desired-state reconciliation must not reset those counts. KEDA/HPA is not a mandatory dependency; any future alternate scaler requires an exclusive ownership handoff.
 
+The controller also renders single-revision OCI pools (ADR 0010): one Deployment and one headless Service per materialized OCI revision, with the same kinds and verbs and no Pod, Job or Secret writes. OCI adds preflight prerequisites: a preprovisioned OCI namespace per tenant, a preprovisioned pull Secret for the platform intake mirror in each OCI namespace, and verified NetworkPolicy enforcement. If enforcement is missing, OCI mode is blocked, not degraded.
+
 ### Runtime contract and artifact security
 
 A revision records source/artifact digest, language profile, engine/WASI/interface versions, supported imports, resource budgets, granted capabilities and effective configuration. Functions deploy as definitions and artifacts; **10,000 deployed functions do not allocate 10,000 pods or Services**.
 
-Tenant code may be uploaded as raw Wasm or source supported by an approved toolchain. Source conversion uses an approved dependency catalogue. Arbitrary native package install hooks, Dockerfiles, binaries and shell scripts are rejected. A package needing unsupported native libraries must be reported as unsupported rather than built/executed on the host.
+**Wasm mode.** Tenant code may be uploaded as raw Wasm or source supported by an approved toolchain. Source builds compose onto the selected catalog Wasm base, and the revision pins its component digest. Source conversion uses an approved dependency catalogue. Arbitrary native package install hooks, Dockerfiles, binaries and shell scripts are rejected. A package needing unsupported native libraries must be reported as unsupported rather than built/executed on the host.
 
 Validate uploaded modules before bounded compilation. Accept no tenant-produced native precompiled cache: native engine caches are generated only by trusted platform components and keyed by artifact digest, engine, architecture and configuration. Cache provenance is distinct from the portability of raw Wasm.
 
 Begin with tenant/profile-specific worker pools. Each invocation receives a fresh guest instance and scoped handles. Pool capacity and trusted compiled code can be reused, but dirty guest memory, credentials, temporary files and handles cannot. Use a fresh trusted execution process per invocation for the first qualified implementation where feasible; benchmark the startup cost before enabling more aggressive in-process multiplexing. Process separation supplements the Wasm boundary; it does not replace sandbox validation.
 
 Guest code cannot launch native processes or arbitrary host plugins. The trusted worker may launch the fixed execution harness; that is platform behavior, not a guest capability.
+
+**OCI mode (ADR 0010).** An OCI revision records the mode, base catalog id@version and base digest, function image digest, container contract version, shim version, resources, grants and concurrency. Changing mode or base creates a new revision. Images reach a revision by one of three paths:
+
+- P1: the trusted image assembler layers source or a prebuilt artifact onto a catalog base by pure layer assembly, with no RUN step and no tenant hook.
+- P2: the tenant's CI builds `FROM <catalog base digest>`; intake verifies that the bottom layers equal the base manifest's layers, by digest.
+- P3 (BYO): any base, only in projects the superadmin flags, with a mandatory signature against keys registered for the project.
+
+Ancestry is provenance and patch tracking, not a security boundary: upper layers can overwrite any base file. The isolation boundary is the restricted single-revision pod. Every image is copied by digest into the platform intake mirror before a pod is rendered. An OCI container process serves many invocations of the same revision (warm reuse): memory, `/tmp` and globals can persist between them, but credentials do not, because each per-attempt handle is invalidated. This is documented and shown before deploy; the fresh-instance rule applies to Wasm mode.
 
 ### Host capability model
 
@@ -300,14 +327,16 @@ Provide explicit interfaces for:
 
 Authorization is derived from verified invocation context, never caller-chosen guest fields. Credentials remain in the host binding layer unless a specific reviewed API explicitly grants a narrow secret to guest code. Guest handles are execution-scoped and invalid after completion.
 
+In OCI mode there are no WIT host calls. The trusted shim offers the same capabilities as a localhost capability API (`ctr-oci-capability-api`) that mirrors `falcone:host` and calls the existing Falcone host APIs with the per-attempt execution credential. The container receives only an opaque per-attempt handle that is invalid after the attempt, and scope still comes from the credential, never from request fields. Allow-listed outbound HTTP goes through the shim to the per-namespace egress gateway, which applies the same DNS-rebinding, redirect and metadata/private-range checks; NetworkPolicy limits raw sockets to Falcone host APIs, the egress gateway and DNS. A secret reaches OCI code only as a reviewed narrow guest grant fetched per attempt, never through environment variables, files or the image.
+
 Wasmtime fuel/epoch interruption applies to guest computation, not every blocking host call. Host network/storage operations require their own timeout, cancellation and memory limits; a bounded process termination fallback handles unresponsive executions. [S28]
 
 ### Synchronous invocation
 
-1. APISIX/Falcone validates Keycloak identity, resolves tenant/workspace and checks capability/plan.
+1. APISIX/Falcone validates Keycloak identity, resolves tenant/workspace and checks capability/plan. For an OCI revision, admission also checks the project's OCI authorization and the base state.
 2. Admission reserves a slot and pins a function revision/profile. Required activation state is persisted.
-3. Dispatch selects the authorized tenant/profile pool. If it is at zero, activate it and wait within the bounded request deadline.
-4. The trusted execution harness validates the artifact and creates a fresh Wasm instance with only approved imports and grants.
+3. Dispatch selects a pool by revision mode: the authorized tenant/profile pool for Wasm, or the single-revision OCI pool, which is materialized on first demand. If the pool is at zero, activate it and wait within the bounded request deadline.
+4. Wasm: the trusted execution harness validates the artifact and creates a fresh Wasm instance with only approved imports and grants. OCI: the shim verifies the dispatcher identity, enforces concurrency and deadlines, and forwards the attempt to the function container over localhost.
 5. Guest code runs; host operations independently enforce scope, budgets and cancellation.
 6. Persist outcome, usage and result references; return the existing Falcone envelope for compatible profiles and release reservations.
 
@@ -319,7 +348,7 @@ Trusted gateways terminate WebSockets, maintain authentication/reconnect behavio
 
 Persist durable accepted invocations and outbox entries atomically. Kafka dispatch remains at-least-once; dedupe, fenced attempts, retries and DLQ/replay remain explicit. Durable message acceptance and transient WebSocket delivery are different promises and need separate API/benchmark definitions.
 
-Scale connection gateways by connection/message load, dispatchers by backlog, and execution pools by admitted running/waiting work and profile capacity. A basic pool demand estimate is running plus admitted waiting executions divided by per-replica execution capacity, bounded by Falcone quotas and stabilization policy. Validate the control loop under burst/idle/failure tests.
+Scale connection gateways by connection/message load, dispatchers by backlog, and execution pools by admitted running/waiting work and profile capacity. A basic pool demand estimate is running plus admitted waiting executions divided by per-replica execution capacity, bounded by Falcone quotas and stabilization policy. Validate the control loop under burst/idle/failure tests. OCI pools scale per revision: the demand signal carries per-revision entries, idle revisions dematerialize after a TTL, and a per-tenant quota bounds materialized OCI revisions.
 
 Track incoming messages, outgoing deliveries after fan-out, bytes, triggered invocations and open connections separately. For example, 1% of 100,000 messages triggering one function means 1,000 invocations/second. At a one-second average duration, that needs roughly 1,000 active execution slots; the provisional 400-slot quota would queue or reject excess work. Long jobs further consume capacity, so reserve interactive and analysis budgets.
 
@@ -333,11 +362,13 @@ Temporal coordinates accepted jobs through Activities and one retry owner. On re
 
 Worker scale-down must account for running jobs, checkpoint opportunities and maximum drain periods. Define termination semantics for uncheckpointed jobs honestly: restart may repeat work and side effects.
 
+In OCI mode the shim relays progress and checkpoints through the same execution-updates contract. Cancellation first asks the container over HTTP; the bounded kill fallback is a liveness-probe restart that the shim triggers by failing the probe, which needs no Pod-delete RBAC.
+
 ### Migration and compatibility
 
 Retain public Falcone identifiers, APIs, URLs, schemas, ownership and activation history. Inventory JavaScript dependencies and actual function behavior, not only example request/response JSON. Python threading, process and OS interfaces can differ under Wasm; supported packages must be demonstrated. [S29]
 
-Keep existing Knative only as an optional migration reference where already installed. A clean Option A installation must not install or depend on it. Unsupported old workloads stay explicitly blocked from cutover; they must be adapted or separately resolved before full retirement.
+Keep existing Knative only as an optional migration reference where already installed. A clean Option A installation must not install or depend on it. Unsupported old workloads stay explicitly blocked from cutover; they must be adapted or separately resolved before full retirement. ADR 0010 makes OCI the explicit compatibility path: classification records a verdict per mode, and a workload can target OCI only with an oci-candidate verdict in an OCI-authorized project. Nothing selects OCI automatically, and workloads without a candidate verdict in either mode still block Knative retirement. OCI mode is Falcone-owned and installs no Knative.
 
 Trusted platform services such as Falcone's own MCP adapter can remain ordinary approved container services. This does not allow tenant-supplied arbitrary MCP server images. Only WebSockets are currently confirmed by the user; preserve any actually deployed MCP contracts found in discovery and leave speculative additional transports out of the initial mandatory scope.
 
@@ -358,6 +389,9 @@ Targets below are provisional engineering objectives, not measured results or co
 | Disaster recovery | Proposed RPO ≤5 min and RTO ≤60 min, conditional on actual backups/replication and a restore exercise |
 | Long jobs | Hours-long representative analysis, bounded resource usage and recovery from the last committed application checkpoint; checkpoint interval/loss budget still to agree |
 | Sandbox | Adversarial guest/host-boundary tests, independent review and actual restricted-OpenShift evidence before hostile-code production enablement |
+| OCI cold latency | Provisional p95 ≤10 s with a node-cached image under 250 MB; report pod scheduling, image pull, container start, application init and contract probe separately; uncached pulls are reported, not targeted |
+| OCI warm latency | Provisional p95 ≤25 ms platform overhead (dispatcher → shim → localhost), excluding handler duration |
+| OCI isolation | Adversarial OCI suite (OCI-07) and preflight-confirmed NetworkPolicy enforcement before OCI is enabled for any tenant |
 
 The 100,000-message target is not coupled to the warm-invocation latency target until a mixed traffic profile is agreed. No throughput benchmark has been run for this proposal.
 
@@ -681,7 +715,7 @@ The 100,000-message target is not coupled to the warm-invocation latency target 
 
 ## 5. Remaining questions and ownership
 
-The user has selected Option A. Motivation, Falcone-only interface scope, untrusted code, deployed-function/message scale and quota ownership are settled. They must not be reopened as generic architecture questions.
+The user has selected Option A. Motivation, Falcone-only interface scope, untrusted code, deployed-function/message scale and quota ownership are settled. They must not be reopened as generic architecture questions. ADR 0010 (27 October 2026) settles the OCI execution mode and the base catalog, including decisions D1–D13.
 
 Implementation discovery still needs:
 
@@ -692,6 +726,11 @@ Implementation discovery still needs:
 5. Long-job duration distribution, checkpoint interval, acceptable lost progress and whether application authors can implement checkpoints.
 6. Whether any Model Context Protocol endpoints are actually deployed; WebSockets alone do not establish MCP compatibility.
 7. Named maintainers/on-call/security approvers, actual SLA budget and repository/Project destination.
+8. For OCI mode: the registry location for the platform intake mirror and the pull Secret in each OCI namespace.
+9. Whether the kubelet sets `podPidsLimit`.
+10. Whether user namespaces (`hostUsers: false`) and AppArmor are available on the nodes.
+11. Who owns node kernel and container-runtime patching.
+12. Whether an existing vulnerability scanner can be named; until then, scanning is advisory.
 
 These are qualification inputs, not reasons to stop design work or permission to assume successful tests.
 
@@ -706,6 +745,7 @@ These are qualification inputs, not reasons to stop design work or permission to
 | Corporate infrastructure | Existing OpenShift/platform administrators | Approved cluster/SCC/network/storage prerequisites; no new sandbox-runtime installation assumed |
 | Security qualification | Application/platform security and independent testers | Threat model, sandbox/host-boundary review, adversarial tests and release evidence |
 | Risk acceptance | Deploying organization's designated security/risk owner | Accept residual deployment risks; engineering tests do not substitute for organizational approval |
+| OCI authorization and base catalog | Platform superadmin | Authorize OCI per tenant and project, acknowledge the versioned residual-risk text, flag BYO projects and curate catalog bases (ADR 0010) |
 
 Small teams may combine roles, but each responsibility needs a named owner. Open-source maintainers own software/security advisories; self-hosting organizations normally own their deployment and on-call duty unless a support agreement says otherwise.
 
@@ -716,12 +756,14 @@ Small teams may combine roles, but each responsibility needs a named owner. Open
 | Choice | Decision | Consequence |
 | --- | --- | --- |
 | Wasmtime/WASI in restricted pods | Selected baseline | No cluster sandbox runtime required; language/package compatibility and host security become Falcone responsibilities |
-| Arbitrary tenant containers/native binaries | Excluded from Option A | Cannot claim transparent compatibility with every Linux workload |
+| Superadmin-authorized OCI mode (ADR 0010) | Selected as an explicit per-function mode for authorized projects | Catalog-derived images in restricted single-revision pools; same-kernel residual risk accepted per authorization; never a fallback. Unvetted tenant containers and native binaries in Wasm mode remain excluded |
 | New operator/CRDs/RuntimeClass | Excluded as mandatory dependencies | PostgreSQL authority and namespaced standard-resource controller |
 | Existing Knative | Optional coexistence during migration | No new installation required; no full retirement until all real consumers are resolved |
 | External execution pool | Not selected | Not an automatic fallback for unsupported functions |
 | Interactive + analysis pools | Selected logical separation | Independent reservations/scaling with quotas governed by Falcone |
-| Shared dirty guest instances | Excluded | Fresh execution state; cache only trusted code artifacts |
+| Shared dirty guest instances | Excluded | Fresh execution state in Wasm mode; cache only trusted code artifacts. OCI containers reuse state only within one revision, as documented warm reuse |
+| RUN-capable base builds | Deferred | v1 OCI recipes are declarative with no RUN step until a rootless builder is qualified under restricted pods |
+| Single-use OCI pods | Deferred | A pod per invocation would need much slower cold paths; OCI uses documented warm reuse instead |
 | gRPC/NATS/AMQP additions | Deferred pending measured need | Reuse current WebSockets/Kafka; avoid adding operators/services to solve an unproven gap |
 | KEDA | Optional future alternative only | Not required for namespace-only installation; one replica owner remains mandatory |
 | Multi-region | Deferred | First prove single-region execution, recovery and corporate-policy compatibility |
@@ -742,6 +784,8 @@ This is a testing order, not a claim that one language is universally faster or 
 | M1 — secure execution | Host capability contract, qualified profiles, fresh-instance runner, Falcone auth/quotas, durable invocations and namespaced packaging | WAS-02/03 plus native slice; “native” means Falcone-owned backend, not tenant native machine code |
 | M2 — platform behavior | Wasm artifact pipeline, routes/rollbacks, pool activation, events/DLQ, Temporal, checkpoint-aware jobs and HA | Recovery, isolation, package compatibility and mixed-load evidence |
 | M3 — migration | WebSocket load qualification, hours-long analysis tests, legacy migration, restore/upgrade and retirement | All mandatory compatible-workload contracts pass; unresolved workloads block retirement |
+| M2 (OCI) — authorized OCI mode and base catalog | After the Wasm M1 exit: OCI-01 authorization, CAT-01/02/03/05 catalog core, OCI-02..07 contract, intake, shim, pools, capabilities and isolation evidence, OCI-10 developer support | OCI-07 isolation evidence and preflight-confirmed NetworkPolicy enforcement before OCI is enabled for any tenant |
+| M3 (OCI) — OCI operations and migration path | OCI-08 metering and benchmarks, OCI-09 explicit migration path, CAT-04 lifecycle and CAT-06 console | OCI-migrated workloads counted in retirement; no automatic mode or base change anywhere |
 
 ### First executable qualification specification
 
@@ -751,6 +795,7 @@ This is a testing order, not a claim that one language is universally faster or 
 - Attempt cross-tenant object/handle access and forbidden filesystem/network operations; prove denial and scoped audit.
 - Run a real legacy JavaScript function and real analysis dependencies; publish supported and unsupported behaviors.
 - Kill a checkpoint-aware analysis execution and resume from a committed SeaweedFS checkpoint through Temporal.
+- OCI fixture (ADR 0010): start a restricted single-revision OCI pod, run an escape and lateral-movement suite against it, and prove revocation drain.
 
 Deliverables from this spike are a reproducible fixture, pinned engine/toolchain manifests, compatibility results, resource measurements and a go/no-go report. This package specifies that work; it does not claim the fixture or tests have run.
 
@@ -764,7 +809,7 @@ The importer remains preview-first and preserves existing issue bodies. If an ol
 
 - Linked requirements and explicit positive/negative acceptance criteria pass on supported profiles.
 - Integration evidence uses actual relevant services and actual corporate admission policies.
-- No native fallback, implicit privilege escalation or cross-tenant capability leakage is accepted.
+- No native or OCI fallback, implicit mode or base change, implicit privilege escalation or cross-tenant capability leakage is accepted.
 - Unsupported dependencies, timeout uncertainty and checkpoint limitations are visible to users.
 - Engine, toolchain, package, chart and data-format versions are pinned and recoverable.
 - Production qualification, SLO claims and Knative retirement require evidence, not design approval alone.

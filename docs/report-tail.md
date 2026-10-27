@@ -1,6 +1,6 @@
 ## 5. Remaining questions and ownership
 
-The user has selected Option A. Motivation, Falcone-only interface scope, untrusted code, deployed-function/message scale and quota ownership are settled. They must not be reopened as generic architecture questions.
+The user has selected Option A. Motivation, Falcone-only interface scope, untrusted code, deployed-function/message scale and quota ownership are settled. They must not be reopened as generic architecture questions. ADR 0010 (27 October 2026) settles the OCI execution mode and the base catalog, including decisions D1–D13.
 
 Implementation discovery still needs:
 
@@ -11,6 +11,11 @@ Implementation discovery still needs:
 5. Long-job duration distribution, checkpoint interval, acceptable lost progress and whether application authors can implement checkpoints.
 6. Whether any Model Context Protocol endpoints are actually deployed; WebSockets alone do not establish MCP compatibility.
 7. Named maintainers/on-call/security approvers, actual SLA budget and repository/Project destination.
+8. For OCI mode: the registry location for the platform intake mirror and the pull Secret in each OCI namespace.
+9. Whether the kubelet sets `podPidsLimit`.
+10. Whether user namespaces (`hostUsers: false`) and AppArmor are available on the nodes.
+11. Who owns node kernel and container-runtime patching.
+12. Whether an existing vulnerability scanner can be named; until then, scanning is advisory.
 
 These are qualification inputs, not reasons to stop design work or permission to assume successful tests.
 
@@ -25,6 +30,7 @@ These are qualification inputs, not reasons to stop design work or permission to
 | Corporate infrastructure | Existing OpenShift/platform administrators | Approved cluster/SCC/network/storage prerequisites; no new sandbox-runtime installation assumed |
 | Security qualification | Application/platform security and independent testers | Threat model, sandbox/host-boundary review, adversarial tests and release evidence |
 | Risk acceptance | Deploying organization's designated security/risk owner | Accept residual deployment risks; engineering tests do not substitute for organizational approval |
+| OCI authorization and base catalog | Platform superadmin | Authorize OCI per tenant and project, acknowledge the versioned residual-risk text, flag BYO projects and curate catalog bases (ADR 0010) |
 
 Small teams may combine roles, but each responsibility needs a named owner. Open-source maintainers own software/security advisories; self-hosting organizations normally own their deployment and on-call duty unless a support agreement says otherwise.
 
@@ -35,12 +41,14 @@ Small teams may combine roles, but each responsibility needs a named owner. Open
 | Choice | Decision | Consequence |
 | --- | --- | --- |
 | Wasmtime/WASI in restricted pods | Selected baseline | No cluster sandbox runtime required; language/package compatibility and host security become Falcone responsibilities |
-| Arbitrary tenant containers/native binaries | Excluded from Option A | Cannot claim transparent compatibility with every Linux workload |
+| Superadmin-authorized OCI mode (ADR 0010) | Selected as an explicit per-function mode for authorized projects | Catalog-derived images in restricted single-revision pools; same-kernel residual risk accepted per authorization; never a fallback. Unvetted tenant containers and native binaries in Wasm mode remain excluded |
 | New operator/CRDs/RuntimeClass | Excluded as mandatory dependencies | PostgreSQL authority and namespaced standard-resource controller |
 | Existing Knative | Optional coexistence during migration | No new installation required; no full retirement until all real consumers are resolved |
 | External execution pool | Not selected | Not an automatic fallback for unsupported functions |
 | Interactive + analysis pools | Selected logical separation | Independent reservations/scaling with quotas governed by Falcone |
-| Shared dirty guest instances | Excluded | Fresh execution state; cache only trusted code artifacts |
+| Shared dirty guest instances | Excluded | Fresh execution state in Wasm mode; cache only trusted code artifacts. OCI containers reuse state only within one revision, as documented warm reuse |
+| RUN-capable base builds | Deferred | v1 OCI recipes are declarative with no RUN step until a rootless builder is qualified under restricted pods |
+| Single-use OCI pods | Deferred | A pod per invocation would need much slower cold paths; OCI uses documented warm reuse instead |
 | gRPC/NATS/AMQP additions | Deferred pending measured need | Reuse current WebSockets/Kafka; avoid adding operators/services to solve an unproven gap |
 | KEDA | Optional future alternative only | Not required for namespace-only installation; one replica owner remains mandatory |
 | Multi-region | Deferred | First prove single-region execution, recovery and corporate-policy compatibility |
@@ -61,6 +69,8 @@ This is a testing order, not a claim that one language is universally faster or 
 | M1 — secure execution | Host capability contract, qualified profiles, fresh-instance runner, Falcone auth/quotas, durable invocations and namespaced packaging | WAS-02/03 plus native slice; “native” means Falcone-owned backend, not tenant native machine code |
 | M2 — platform behavior | Wasm artifact pipeline, routes/rollbacks, pool activation, events/DLQ, Temporal, checkpoint-aware jobs and HA | Recovery, isolation, package compatibility and mixed-load evidence |
 | M3 — migration | WebSocket load qualification, hours-long analysis tests, legacy migration, restore/upgrade and retirement | All mandatory compatible-workload contracts pass; unresolved workloads block retirement |
+| M2 (OCI) — authorized OCI mode and base catalog | After the Wasm M1 exit: OCI-01 authorization, CAT-01/02/03/05 catalog core, OCI-02..07 contract, intake, shim, pools, capabilities and isolation evidence, OCI-10 developer support | OCI-07 isolation evidence and preflight-confirmed NetworkPolicy enforcement before OCI is enabled for any tenant |
+| M3 (OCI) — OCI operations and migration path | OCI-08 metering and benchmarks, OCI-09 explicit migration path, CAT-04 lifecycle and CAT-06 console | OCI-migrated workloads counted in retirement; no automatic mode or base change anywhere |
 
 ### First executable qualification specification
 
@@ -70,6 +80,7 @@ This is a testing order, not a claim that one language is universally faster or 
 - Attempt cross-tenant object/handle access and forbidden filesystem/network operations; prove denial and scoped audit.
 - Run a real legacy JavaScript function and real analysis dependencies; publish supported and unsupported behaviors.
 - Kill a checkpoint-aware analysis execution and resume from a committed SeaweedFS checkpoint through Temporal.
+- OCI fixture (ADR 0010): start a restricted single-revision OCI pod, run an escape and lateral-movement suite against it, and prove revocation drain.
 
 Deliverables from this spike are a reproducible fixture, pinned engine/toolchain manifests, compatibility results, resource measurements and a go/no-go report. This package specifies that work; it does not claim the fixture or tests have run.
 
@@ -83,7 +94,7 @@ The importer remains preview-first and preserves existing issue bodies. If an ol
 
 - Linked requirements and explicit positive/negative acceptance criteria pass on supported profiles.
 - Integration evidence uses actual relevant services and actual corporate admission policies.
-- No native fallback, implicit privilege escalation or cross-tenant capability leakage is accepted.
+- No native or OCI fallback, implicit mode or base change, implicit privilege escalation or cross-tenant capability leakage is accepted.
 - Unsupported dependencies, timeout uncertainty and checkpoint limitations are visible to users.
 - Engine, toolchain, package, chart and data-format versions are pinned and recoverable.
 - Production qualification, SLO claims and Knative retirement require evidence, not design approval alone.

@@ -1,12 +1,14 @@
 # falcone-serverless: Option A implementation specification
 
-Updated 21 October 2026. **Architecture direction accepted by the user; implementation, corporate-cluster feasibility and security qualification remain unverified.** This revision supersedes the initial native-container execution design. The original survey is retained as comparative evidence.
+Updated 27 October 2026. **Architecture direction accepted by the user; implementation, corporate-cluster feasibility and security qualification remain unverified.** This revision supersedes the initial native-container execution design. [ADR 0010](adr/0010-oci-execution-mode-and-base-catalog.md), accepted by the operator on 27 October 2026, adds OCI as an explicit execution mode that the platform superadmin authorizes per tenant and project, and a global superadmin base catalog. OCI mode is chosen per function and is never a silent fallback. The original survey is retained as comparative evidence.
 
 ## Accepted direction and scope
 
 Build a Falcone-owned **WebAssembly/WASI execution layer inside ordinary restricted Kubernetes/OpenShift pods**, using Wasmtime as the sandbox engine. Keep Keycloak, SeaweedFS, Temporal, APISIX, Kafka, PostgreSQL and OpenBao. Falcone owns APIs, quotas, execution policy, integrations, routing and lifecycle.
 
-The product supports untrusted code through explicitly qualified language and package profiles. It does **not** accept arbitrary tenant Linux containers, native executables, native install scripts or unrestricted operating-system access. Existing Functions APIs, URLs and data contracts remain the compatibility target; raw Knative APIs and URLs are excluded.
+The product supports untrusted code through explicitly qualified language and package profiles. In Wasm mode it does **not** accept arbitrary tenant Linux containers, native executables, native install scripts or unrestricted operating-system access. Existing Functions APIs, URLs and data contracts remain the compatibility target; raw Knative APIs and URLs are excluded.
+
+Functions run in Wasm by default. A superadmin may authorize OCI mode per tenant (none, all or selected projects) under ADR 0010, as an explicit per-function choice with accepted same-kernel risk. There is still no silent fallback. OCI function images are built FROM a catalog base; a project may bring its own image only when the superadmin flags it. A project is a Falcone workspace.
 
 **Compatibility is a measured gate.** Unsupported legacy dependencies block those workloads from migration. Selecting Option A is not proof that every existing function can run under Wasm. Neither silent native fallback nor weakening sandbox boundaries is an acceptable compatibility mechanism.
 
@@ -15,9 +17,11 @@ The product supports untrusted code through explicitly qualified language and pa
 | Topic | Accepted requirement |
 | --- | --- |
 | Motivation | Corporate OpenShift restrictions make operators and special permissions difficult; prioritize namespace-only deployment, performance, Falcone integration and extensibility |
-| Execution location | Option A inside restricted pods; no administrator-provided sandbox runtime |
+| Execution location | Option A inside restricted pods; no administrator-provided sandbox runtime. Authorized OCI functions also run in restricted pods, in a preprovisioned OCI namespace per tenant (ADR 0010) |
 | Deployment permissions | No required operator, CRD, ClusterRole, custom RuntimeClass, elevated SCC or host access; use existing approved namespaces and pregranted namespaced RBAC |
-| Tenant trust | Arbitrary untrusted code within qualified Wasm profiles; no arbitrary native execution |
+| Tenant trust | Arbitrary untrusted code within qualified Wasm profiles; no arbitrary native execution. OCI mode: untrusted code in catalog-derived images, only in superadmin-authorized projects, with accepted same-kernel residual risk (ADR 0010) |
+| Base catalog | Global, superadmin-managed catalog of Wasm runtime profiles and OCI base images, with tenant/project visibility; bases are selected by registry digest or created from a recipe |
+| OCI authorization | Superadmin-only, per tenant (none, all or selected projects), audited; tenant admins cannot change it; BYO images only in projects the superadmin flags |
 | Scale | Approximately 20 tenants and 10,000 deployed function definitions |
 | Messaging | Approximately 100,000 aggregate WebSocket/event messages per second; mostly messaging, not 100,000 function invocations/second |
 | Execution quota | Initial configurable estimate of 20 simultaneous executions per tenant; roughly 400 total if all 20 tenants use their quota |

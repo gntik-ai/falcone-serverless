@@ -25,3 +25,9 @@ Recommend invalidating execution handles on completion, cancellation or expiry a
 ## Consequences
 
 This recommends an issuer and authentication responsibility, but leaves the deployed integration unverified. The platform operator owns delivery evidence, the Falcone maintainer owns the execution-credential contract, and the security approver reviews cross-tenant denial and revocation. A missing integration capability is a qualification finding, not permission to expose secrets to guests.
+
+## Amended by ADR 0010
+
+2026-10-27. Under [ADR 0010](0010-oci-execution-mode-and-base-catalog.md), the execution credential holder may be the trusted OCI shim. The credential is never exposed to tenant code: the tenant container holds only an opaque per-attempt handle. Image intake and the image assembler use build credentials, not execution credentials. This note does not change this ADR's Proposed status or its R3 review requirement.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

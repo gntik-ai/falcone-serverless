@@ -31,3 +31,13 @@ For design §5 item 7 (`docs/falcone-serverless-design.md:694`), this settles re
 ## Consequences
 
 Runtime code must not compensate silently for missing Falcone or chart capabilities. Maintainers coordinate versioned contracts across repositories. Existing backlog placement is historical evidence, not permission to implement another repository's responsibilities here. Named operational assignments remain review work for the platform operator.
+
+## Amended by ADR 0010
+
+2026-10-27. [ADR 0010](0010-oci-execution-mode-and-base-catalog.md) adds components to the boundaries above:
+
+- `gntik-ai/falcone-serverless` also owns the trusted OCI components: `oci-shim`, `egress-gateway`, `image-intake` and `image-assembler`.
+- `gntik-ai/falcone` owns the OCI authorization, the base catalog API and schema, and their console pages.
+- `gntik-ai/falcone-charts` owns the OCI values, the OCI pod-template defaults and the OCI-namespace NetworkPolicy projections, and renders the intake and assembler as restricted pods.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.
