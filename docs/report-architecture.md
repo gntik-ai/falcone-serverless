@@ -48,7 +48,7 @@ OpenTelemetry instruments gateways, dispatch, guest lifecycle and host calls. Te
 | Storage | Existing PostgreSQL for metadata; SeaweedFS for artifacts/checkpoints/payloads | Reuse established persistence and tenant policies |
 | Workflow engine | Existing Temporal/workflow-worker | Durable orchestration, retry coordination and long-job recovery |
 | Image delivery | Approved digest-pinned Falcone worker/compiler images in existing registry; tenant OCI function images only through the platform intake mirror | Kubelets pull trusted platform images and verified, mirrored function images by digest, never directly from tenant registries |
-| OCI shim | Trusted falcone-serverless sidecar in each OCI revision pod | Serves the worker execution API and a localhost capability API; keeps the execution credential out of the tenant container |
+| OCI shim | Trusted falcone-serverless sidecar in each OCI revision pod | Serves the worker execution API over mutually authenticated TLS, with a per-pod identity mounted only into the shim container, and a localhost capability API; keeps the execution credential out of the tenant container |
 | Egress gateway | Trusted per-namespace HTTP egress gateway for OCI namespaces | Credential-checked allow-listed egress with DNS-rebinding, redirect and metadata checks |
 | Image intake / assembler | Trusted falcone-serverless components rendered as restricted pods | Verify, assemble and mirror function images by digest; never run tenant build hooks |
 | Base catalog | Falcone-owned global catalog of Wasm profile components and OCI bases | Superadmin-managed bases with tenant/project visibility, immutable versions and audited lifecycle |
@@ -82,11 +82,13 @@ Begin with tenant/profile-specific worker pools. Each invocation receives a fres
 
 Guest code cannot launch native processes or arbitrary host plugins. The trusted worker may launch the fixed execution harness; that is platform behavior, not a guest capability.
 
-**OCI mode (ADR 0010).** An OCI revision records the mode, base catalog id@version and base digest, function image digest, container contract version, shim version, resources, grants and concurrency. Changing mode or base creates a new revision. Images reach a revision by one of three paths:
+**OCI mode (ADR 0010).** An OCI revision records the mode, `base` as a tagged union (`{kind: catalog, id@version, digest}` or `{kind: byo, image digest, signer identity, attestation ref}`), the function image digest, container contract version, shim version, resources, grants and concurrency. Changing mode or base creates a new revision. Images reach a revision by one of three paths:
 
 - P1: the trusted image assembler layers source or a prebuilt artifact onto a catalog base by pure layer assembly, with no RUN step and no tenant hook.
 - P2: the tenant's CI builds `FROM <catalog base digest>`; intake verifies that the bottom layers equal the base manifest's layers, by digest.
-- P3 (BYO): any base, only in projects the superadmin flags, with a mandatory signature against keys registered for the project.
+- P3 (BYO, `base.kind: byo`): any base, only in projects the superadmin flags. It requires a valid signature against keys registered for the project, a platform-mirror copy and an advisory scan record.
+
+Catalog-membership validation and base lifecycle controls (deprecation, retirement) apply only to `kind: catalog`; no BYO revision requires a catalog base.
 
 Ancestry is provenance and patch tracking, not a security boundary: upper layers can overwrite any base file. The isolation boundary is the restricted single-revision pod. Every image is copied by digest into the platform intake mirror before a pod is rendered. An OCI container process serves many invocations of the same revision (warm reuse): memory, `/tmp` and globals can persist between them, but credentials do not, because each per-attempt handle is invalidated. This is documented and shown before deploy; the fresh-instance rule applies to Wasm mode.
 
@@ -102,16 +104,16 @@ Provide explicit interfaces for:
 
 Authorization is derived from verified invocation context, never caller-chosen guest fields. Credentials remain in the host binding layer unless a specific reviewed API explicitly grants a narrow secret to guest code. Guest handles are execution-scoped and invalid after completion.
 
-In OCI mode there are no WIT host calls. The trusted shim offers the same capabilities as a localhost capability API (`ctr-oci-capability-api`) that mirrors `falcone:host` and calls the existing Falcone host APIs with the per-attempt execution credential. The container receives only an opaque per-attempt handle that is invalid after the attempt, and scope still comes from the credential, never from request fields. Allow-listed outbound HTTP goes through the shim to the per-namespace egress gateway, which applies the same DNS-rebinding, redirect and metadata/private-range checks; NetworkPolicy limits raw sockets to Falcone host APIs, the egress gateway and DNS. A secret reaches OCI code only as a reviewed narrow guest grant fetched per attempt, never through environment variables, files or the image.
+In OCI mode there are no WIT host calls. Containers in a pod share the network namespace, so the dispatcher→shim channel is mutually authenticated TLS. The shim's per-pod identity is a certificate or projected token mounted only into the shim container; the pod sets `automountServiceAccountToken: false`, and the tenant container has no such volume. The dispatcher verifies the shim identity before it sends any credential or request. The shim→container hop uses a separate localhost port and never carries the credential. The trusted shim offers the same capabilities as a localhost capability API (`ctr-oci-capability-api`) that mirrors `falcone:host` and calls the existing Falcone host APIs with the per-attempt execution credential. The container receives only an opaque per-attempt handle that is invalid after the attempt, and scope still comes from the credential, never from request fields. Allow-listed outbound HTTP goes through the shim to the per-namespace egress gateway, which applies the same DNS-rebinding, redirect and metadata/private-range checks; NetworkPolicy limits raw sockets to Falcone host APIs, the egress gateway and DNS. A secret reaches OCI code only as a reviewed narrow guest grant fetched per attempt, never through environment variables, files or the image.
 
 Wasmtime fuel/epoch interruption applies to guest computation, not every blocking host call. Host network/storage operations require their own timeout, cancellation and memory limits; a bounded process termination fallback handles unresponsive executions. [S28]
 
 ### Synchronous invocation
 
-1. APISIX/Falcone validates Keycloak identity, resolves tenant/workspace and checks capability/plan. For an OCI revision, admission also checks the project's OCI authorization and the base state.
+1. APISIX/Falcone validates Keycloak identity, resolves tenant/workspace and checks capability/plan. For an OCI revision, admission also checks the project's OCI authorization and, for a `kind: catalog` base, the base state.
 2. Admission reserves a slot and pins a function revision/profile. Required activation state is persisted.
 3. Dispatch selects a pool by revision mode: the authorized tenant/profile pool for Wasm, or the single-revision OCI pool, which is materialized on first demand. If the pool is at zero, activate it and wait within the bounded request deadline.
-4. Wasm: the trusted execution harness validates the artifact and creates a fresh Wasm instance with only approved imports and grants. OCI: the shim verifies the dispatcher identity, enforces concurrency and deadlines, and forwards the attempt to the function container over localhost.
+4. Wasm: the trusted execution harness validates the artifact and creates a fresh Wasm instance with only approved imports and grants. OCI: the dispatcher and the shim authenticate each other over mutual TLS, and the dispatcher verifies the shim's per-pod identity before it sends the credential or request. The shim enforces concurrency and deadlines and forwards the attempt to the function container on a separate localhost port that never carries the credential.
 5. Guest code runs; host operations independently enforce scope, budgets and cancellation.
 6. Persist outcome, usage and result references; return the existing Falcone envelope for compatible profiles and release reservations.
 

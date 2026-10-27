@@ -26,11 +26,11 @@ ADR 0010 adds the OCI shim, egress gateway, image intake and image assembler to 
 - Wasm mode: guests reach the platform only through the versioned WIT/WASI capability host (storage, allow-listed HTTP, events, workflows, logging). Secrets stay in the host binding layer, unless a reviewed, narrow grant exposes one to a guest (design §6).
 - OCI mode ([ADR 0010](docs/adr/0010-oci-execution-mode-and-base-catalog.md)):
   - A function runs in OCI mode only when the platform superadmin has authorized its project (a Falcone workspace) for the tenant. Only the superadmin changes that setting. Falcone enforces it at deploy, promotion and every admission, and audits it. Nothing switches a function between modes automatically, and OCI is never a fallback.
-  - Function images are built FROM an enabled catalog base that is visible to the project. Falcone never runs tenant Dockerfiles or build hooks. A project may bring its own image (BYO) only when the superadmin flags it, and a BYO image must be signed.
+  - Function images are built FROM an enabled catalog base that is visible to the project. Falcone never runs tenant Dockerfiles or build hooks. A project may bring its own image (BYO) only when the superadmin flags it. A BYO revision records `base.kind: byo` with its signer identity and attestation ref, must be signed, mirrored and scan-recorded, and is exempt only from catalog membership and base lifecycle checks.
   - Every image is pinned by digest and copied into the platform intake mirror. Kubelets pull only from the mirror, never from tenant registries.
   - OCI pods run single-revision, under the restricted posture, in the tenant's preprovisioned OCI namespace. The controller's write set is unchanged.
   - Tenant containers reach Falcone capabilities only through the trusted shim's localhost capability API and the egress gateway. NetworkPolicy enforcement is mandatory; without it, OCI mode is blocked.
-  - The execution credential never enters the tenant container. The container holds only an opaque per-attempt handle, and secrets arrive only as reviewed narrow grants.
+  - The execution credential never enters the tenant container. The dispatcher→shim channel is mutually authenticated TLS; the shim's identity is mounted only into the shim container, and the dispatcher verifies it before sending any credential or request. The shim→container hop uses a separate localhost port and never carries the credential. The container holds only an opaque per-attempt handle, and secrets arrive only as reviewed narrow grants.
 - Security-sensitive areas are the sandbox, host capabilities, egress, secrets and tenant isolation. A second reviewer and explicit operator approval are needed (Hermes R3).
 
 ## Build and test
