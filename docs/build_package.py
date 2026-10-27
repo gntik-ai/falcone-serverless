@@ -13,10 +13,10 @@ story_ids = {f"{c['code']}-{s[0]}" for c in categories for s in c["stories"]}
 assert len(story_ids) == sum(len(c["stories"]) for c in categories)
 requirement_count = sum(len(c["requirements"]) for c in categories)
 req_section = ["## 2. Functional requirements checklist",
-    f"All {requirement_count} statements apply to the accepted Option A design. Milestones do not establish production qualification. Unsupported existing workloads block their migration; API compatibility does not imply arbitrary Linux-runtime compatibility.",
+    f"All {requirement_count} statements apply to the accepted Option A design as amended by ADR 0010: Wasm is the default runtime mode, and OCI mode runs only where the platform superadmin authorizes it. Milestones do not establish production qualification. Unsupported existing workloads block their migration; API compatibility does not imply arbitrary Linux-runtime compatibility.",
     ""]
 backlog = ["## 4. Detailed backlog — GitHub-ready",
-    f"{len(categories)} epics and {len(story_ids)} implementation stories. Every story includes a title, user story, description, acceptance criteria, requirement links, dependencies, phase and effort. Option A supersedes earlier native-container assumptions; stable IDs are retained for traceability.",
+    f"{len(categories)} epics and {len(story_ids)} implementation stories. Every story includes a title, user story, description, acceptance criteria, requirement links, dependencies, phase and effort. Option A supersedes earlier native-container assumptions; ADR 0010 adds the superadmin-authorized OCI mode (OCI) and base catalog (CAT) epics. Stable IDs are retained for traceability.",
     "",
     "**Sizing:** S = contained change; M = several focused changes or integrations; L = substantial work with failure/security validation. These are relative estimates, not person-day commitments. No S-sized stories are used because these initial items are integration-level slices.",
     "",
@@ -26,6 +26,9 @@ backlog = ["## 4. Detailed backlog — GitHub-ready",
 for c in categories:
     code = c["code"]
     epic_id = f"EP-{code}"
+    # Each story covers an equal, ordered share of its category's requirements (2 for the original epics).
+    per_story, remainder = divmod(len(c["requirements"]), len(c["stories"]))
+    assert per_story >= 1 and remainder == 0, (code, "requirements must divide evenly across stories")
     req_section += [f"### {code}. {c['name']}", ""]
     for i, text in enumerate(c["requirements"], 1):
         rid = f"FR-{code}-{i:02}"
@@ -44,7 +47,7 @@ for c in categories:
         num,title,role,want,benefit,description,ac,size,phase,deps = s
         sid = f"{code}-{num}"
         assert all(d in story_ids for d in deps), (sid,deps)
-        refs = [f"FR-{code}-{j*2+k:02}" for k in [1,2]]
+        refs = [f"FR-{code}-{j*per_story+k:02}" for k in range(1, per_story+1)]
         article = "an" if role[0].lower() in "aeiou" else "a"
         user_story = f"As {article} {role}, I want to {want}, so that {benefit}."
         issue_title = f"[falcone-serverless][{sid}] {title}"

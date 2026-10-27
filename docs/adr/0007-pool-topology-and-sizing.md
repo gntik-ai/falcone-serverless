@@ -25,3 +25,9 @@ Recommend retaining the 20-per-tenant starting assumption for qualification unti
 ## Consequences
 
 This interpretation removes the apparent numerical conflict without promising 100,000 guest invocations/s. Operators still need workload evidence to size replicas and memory. Quota exhaustion and queueing must be reported honestly in benchmarks; all latency/throughput claims remain provisional.
+
+## Amended by ADR 0010
+
+2026-10-27. [ADR 0010](0010-oci-execution-mode-and-base-catalog.md) adds single-revision OCI pools: one Deployment and one headless Service per materialized OCI revision, materialized on demand, bounded by a per-tenant quota on materialized revisions and dematerialized after an idle TTL. OCI executions share the tenant execution slots, and OCI caps cover materialized revisions, warm replicas, pod memory, image bytes and builds.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

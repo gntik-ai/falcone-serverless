@@ -25,3 +25,9 @@ Recommend considering in-process fresh instances only as a separately reviewed c
 ## Consequences
 
 The recommendation may miss latency targets and consume extra process resources. No containment or performance result is claimed. The existing fresh-state rule remains in force; process strategy stays proposed until qualification and R3 approval.
+
+## Amended by ADR 0010
+
+2026-10-27. This ADR applies to Wasm mode. In OCI mode, isolation is per revision pod, with documented warm reuse within one revision ([ADR 0010](0010-oci-execution-mode-and-base-catalog.md), D10). Credentials still do not persist across OCI invocations, because each per-attempt handle is invalidated. This note does not change this ADR's Proposed status or its R3 review requirement.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

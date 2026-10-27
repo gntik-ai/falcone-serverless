@@ -2,8 +2,8 @@
   "schema_version": 1,
   "project": "falcone-serverless",
   "baseline_commit": "bde62dd1e2e91f957b1dc6b8212dfbbaee977a7f",
-  "planning_revision": "option-a-v2",
-  "decision": "Option A accepted: application-level WebAssembly/WASI sandbox inside restricted pods",
+  "planning_revision": "option-a-v3-adr0010",
+  "decision": "Option A accepted: application-level WebAssembly/WASI sandbox inside restricted pods; ADR 0010 adds a superadmin-authorized OCI execution mode and a global base catalog",
   "requirements": [
     {
       "id": "FR-API-01",
@@ -18,12 +18,12 @@
     {
       "id": "FR-API-03",
       "category": "API",
-      "statement": "The system must provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment."
+      "statement": "The system must provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, plus an OCI starter built FROM a catalog base for OCI-authorized projects, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment."
     },
     {
       "id": "FR-API-04",
       "category": "API",
-      "statement": "The system must accept a versioned declarative function manifest, validate it before deployment and return field-specific errors without partial mutations."
+      "statement": "The system must accept a versioned declarative function manifest, including runtime mode, catalog base and OCI image fields; validate it, including OCI authorization and base visibility and state, before deployment and return field-specific errors without partial mutations."
     },
     {
       "id": "FR-API-05",
@@ -38,7 +38,7 @@
     {
       "id": "FR-RUN-01",
       "category": "RUN",
-      "statement": "The system must execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; reject arbitrary native tenant binaries and OCI container execution."
+      "statement": "The system must execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; in mode=wasm, reject arbitrary native tenant binaries and OCI container execution, which run only through the superadmin-authorized OCI mode of ADR 0010."
     },
     {
       "id": "FR-RUN-02",
@@ -58,7 +58,7 @@
     {
       "id": "FR-RUN-05",
       "category": "RUN",
-      "statement": "The system must create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files."
+      "statement": "The system must in mode=wasm, create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files. OCI mode follows the documented warm-reuse semantics of ADR 0010."
     },
     {
       "id": "FR-RUN-06",
@@ -68,7 +68,7 @@
     {
       "id": "FR-DEP-01",
       "category": "DEP",
-      "statement": "The system must build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host."
+      "statement": "The system must in mode=wasm, build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host. OCI function images are assembled or verified FROM catalog bases without tenant build hooks."
     },
     {
       "id": "FR-DEP-02",
@@ -88,7 +88,7 @@
     {
       "id": "FR-DEP-05",
       "category": "DEP",
-      "statement": "The system must reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function."
+      "statement": "The system must reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function, and materialize single-revision OCI pools only on demand within a per-tenant bound on materialized OCI revisions."
     },
     {
       "id": "FR-DEP-06",
@@ -98,7 +98,7 @@
     {
       "id": "FR-INV-01",
       "category": "INV",
-      "statement": "The system must route synchronous invocations to authorized tenant-scoped Wasm workers with a pinned immutable function revision and a configured end-to-end deadline."
+      "statement": "The system must route synchronous invocations by the pinned revision's runtime mode to authorized tenant-scoped Wasm workers or OCI revision pools, with a pinned immutable function revision and a configured end-to-end deadline."
     },
     {
       "id": "FR-INV-02",
@@ -113,7 +113,7 @@
     {
       "id": "FR-INV-04",
       "category": "INV",
-      "statement": "The system must scale tenant/profile worker pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate."
+      "statement": "The system must scale tenant/profile worker pools and single-revision OCI pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate."
     },
     {
       "id": "FR-INV-05",
@@ -203,7 +203,7 @@
     {
       "id": "FR-SEC-04",
       "category": "SEC",
-      "statement": "The system must execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native execution."
+      "statement": "The system must in mode=wasm, execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native or OCI execution. OCI mode runs only in superadmin-authorized projects, in restricted pods, under ADR 0010."
     },
     {
       "id": "FR-SEC-05",
@@ -343,12 +343,12 @@
     {
       "id": "FR-MIG-02",
       "category": "MIG",
-      "statement": "The system must record the accepted Option A decision and supersede native tenant-container, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification."
+      "statement": "The system must record the accepted Option A decision as amended by ADR 0010 (superadmin-authorized OCI mode and base catalog); supersede silent native-fallback, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification."
     },
     {
       "id": "FR-MIG-03",
       "category": "MIG",
-      "statement": "The system must implement interchangeable Knative and native backend adapters with per-resource backend selection and exactly one active traffic/trigger owner."
+      "statement": "The system must implement interchangeable Knative and native backend adapters with per-resource backend selection, an explicit target runtime mode and exactly one active traffic/trigger owner."
     },
     {
       "id": "FR-MIG-04",
@@ -358,7 +358,7 @@
     {
       "id": "FR-MIG-05",
       "category": "MIG",
-      "statement": "The system must validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration."
+      "statement": "The system must validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration, and move a workload to OCI mode only by explicit choice with an oci-candidate verdict in an authorized project."
     },
     {
       "id": "FR-MIG-06",
@@ -388,7 +388,7 @@
     {
       "id": "FR-WAS-05",
       "category": "WAS",
-      "statement": "The system must publish exact JavaScript, Python and Go profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks unless a future separately reviewed capability explicitly supports them."
+      "statement": "The system must publish exact JavaScript, Python and Go Wasm-mode profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks in mode=wasm unless a future separately reviewed capability explicitly supports them."
     },
     {
       "id": "FR-WAS-06",
@@ -424,6 +424,86 @@
       "id": "FR-JOB-06",
       "category": "JOB",
       "statement": "The system must benchmark representative hours-long, memory-intensive analysis and failure recovery, publishing wall time, CPU, memory, checkpoint overhead and restored progress on the supported runtime profile."
+    },
+    {
+      "id": "FR-OCI-01",
+      "category": "OCI",
+      "statement": "The system must let only the platform superadmin authorize OCI mode per tenant for none, all or selected projects (workspaces); enforce it at deploy, promotion and every admission path, audit each change with the acknowledged residual-risk version, and drain OCI work when authorization is revoked."
+    },
+    {
+      "id": "FR-OCI-02",
+      "category": "OCI",
+      "statement": "The system must accept an explicit per-function runtime.mode (wasm by default, or oci) recorded on the immutable revision, define a versioned OCI function container contract, and never switch a function between modes automatically."
+    },
+    {
+      "id": "FR-OCI-03",
+      "category": "OCI",
+      "statement": "The system must accept only digest-pinned OCI function images assembled or built FROM a visible catalog base, or BYO images (`base.kind: byo`) in superadmin-flagged projects with a valid signature and an advisory scan record; verify and copy each image into the platform intake mirror before any pod is rendered, without executing image content."
+    },
+    {
+      "id": "FR-OCI-04",
+      "category": "OCI",
+      "statement": "The system must serve OCI invocations through a trusted shim that implements the worker execution API over mutually authenticated TLS with a per-pod shim identity mounted only into the shim container, verifies the dispatcher identity, enforces concurrency and deadlines and reports honest cancellation outcomes; the dispatcher verifies the shim identity before sending any credential or request, and the shim never forwards the execution credential to the tenant container."
+    },
+    {
+      "id": "FR-OCI-05",
+      "category": "OCI",
+      "statement": "The system must run OCI functions in single-revision restricted pods (non-root, read-only root filesystem, no service-account token) materialized on demand in the tenant's preprovisioned OCI namespace, with the controller's write set unchanged."
+    },
+    {
+      "id": "FR-OCI-06",
+      "category": "OCI",
+      "statement": "The system must give OCI functions storage, event, workflow, secret, logging and allow-listed HTTP access only through a localhost capability API and an egress gateway; keep the execution credential outside the tenant container and enforce OCI-namespace NetworkPolicies."
+    },
+    {
+      "id": "FR-OCI-07",
+      "category": "OCI",
+      "statement": "The system must qualify OCI isolation with adversarial evidence before enabling OCI for any tenant, and publish a versioned residual-risk register covering the shared kernel, restricted PSA, side channels and node patch ownership."
+    },
+    {
+      "id": "FR-OCI-08",
+      "category": "OCI",
+      "statement": "The system must charge OCI executions against the shared tenant execution slots plus OCI caps on materialized revisions, warm replicas, pod memory, image bytes and builds, and record per-mode usage and metrics."
+    },
+    {
+      "id": "FR-OCI-09",
+      "category": "OCI",
+      "statement": "The system must offer OCI as an explicit migration target only for workloads with an oci-candidate verdict in an authorized project, and keep workloads without a candidate verdict in either mode as Knative retirement blockers."
+    },
+    {
+      "id": "FR-OCI-10",
+      "category": "OCI",
+      "statement": "The system must provide CLI, console, starter and documentation support for OCI functions, including the warm-reuse notice, and show OCI options only in authorized projects."
+    },
+    {
+      "id": "FR-CAT-01",
+      "category": "CAT",
+      "statement": "The system must maintain one global, superadmin-managed base catalog of Wasm profile components and OCI base images with immutable name@version entries bound to one digest and visibility filtered by tenant and project."
+    },
+    {
+      "id": "FR-CAT-02",
+      "category": "CAT",
+      "statement": "The system must let the superadmin register existing bases by digest-pinned reference after artifact validation or image intake, record optional signature and provenance results, and enable a Wasm base only with profile qualification evidence."
+    },
+    {
+      "id": "FR-CAT-03",
+      "category": "CAT",
+      "statement": "The system must let the superadmin create bases from versioned recipes built by confined trusted builders with SBOM and provenance, and reject RUN steps in OCI recipes in v1."
+    },
+    {
+      "id": "FR-CAT-04",
+      "category": "CAT",
+      "statement": "The system must enforce the base lifecycle (draft, enabled, deprecated, retired, and disabled with optional invocation blocking) and default aliases without ever rebasing a revision automatically; in both runtime modes, a new function or a base switch needs an enabled base, a deprecated base stays eligible only for new revisions of functions already pinned to it until its window end, and retired and disabled bases are refused for new revisions."
+    },
+    {
+      "id": "FR-CAT-05",
+      "category": "CAT",
+      "statement": "The system must pin the selected or default catalog base by id@version and digest on every revision with `base.kind: catalog`, and reject absent, invisible, lifecycle-ineligible or unauthorized catalog bases at deploy, promotion and invoke; BYO revisions need no catalog base."
+    },
+    {
+      "id": "FR-CAT-06",
+      "category": "CAT",
+      "statement": "The system must audit every catalog and OCI authorization mutation, and provide superadmin console pages plus a tenant base selector filtered by visibility."
     }
   ],
   "issues": [
@@ -443,7 +523,7 @@
       "id": "API-01",
       "type": "story",
       "title": "[falcone-serverless][API-01] Preserve the Functions API and add CLI operations",
-      "body": "<!-- falcone-serverless:API-01 -->\n\n## User story\n\nAs a developer, I want to manage functions through familiar API and CLI operations, so that existing applications continue to work.\n\n## Description\n\nImplement the public facade and CLI against the same validated contracts.\n\n## Acceptance criteria\n\n- [ ] Legacy API fixtures pass against both backends, including status and error envelopes.\n- [ ] CLI deploy/invoke/logs/rollback/delete works with Keycloak credentials; replaying a mutation idempotency key creates no duplicate resource.\n- [ ] Unauthorized requests and tenant-scoped reads retain the baseline behavior.\n\n## Planning\n\n- Parent: EP-API\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, SEC-01\n\n## Requirements\n\n- **FR-API-01:** The system must preserve inventoried Falcone Functions routes, API versions, request/response schemas, error codes, pagination and idempotency behavior through a compatibility adapter.\n- **FR-API-02:** The system must provide authenticated REST and CLI operations to create, inspect, update, invoke, roll back and delete functions and inspect activations.",
+      "body": "<!-- falcone-serverless:API-01 -->\n\n## User story\n\nAs a developer, I want to manage functions through familiar API and CLI operations, so that existing applications continue to work.\n\n## Description\n\nImplement the public facade and CLI against the same validated contracts. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Legacy API fixtures pass against both backends, including status and error envelopes.\n- [ ] CLI deploy/invoke/logs/rollback/delete works with Keycloak credentials; replaying a mutation idempotency key creates no duplicate resource.\n- [ ] Unauthorized requests and tenant-scoped reads retain the baseline behavior.\n- [ ] The Functions API contract v1 defines `runtime.mode` (default `wasm`), the `base` field and the `oci_not_authorized` and base error codes; the legacy fixtures pass in Wasm mode (ADR 0010).\n\n## Planning\n\n- Parent: EP-API\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, SEC-01\n\n## Requirements\n\n- **FR-API-01:** The system must preserve inventoried Falcone Functions routes, API versions, request/response schemas, error codes, pagination and idempotency behavior through a compatibility adapter.\n- **FR-API-02:** The system must provide authenticated REST and CLI operations to create, inspect, update, invoke, roll back and delete functions and inspect activations.",
       "parent": "EP-API",
       "requirements": [
         "FR-API-01",
@@ -467,7 +547,7 @@
       "id": "API-02",
       "type": "story",
       "title": "[falcone-serverless][API-02] Deliver language starters and declarative manifests",
-      "body": "<!-- falcone-serverless:API-02 -->\n\n## User story\n\nAs a function author, I want to develop locally and deploy a validated manifest, so that development matches hosted execution.\n\n## Description\n\nAdd three starter templates, local runner and schema validation.\n\n## Acceptance criteria\n\n- [ ] Go, Python and JavaScript examples pass the same inputs locally and remotely.\n- [ ] Unsupported runtime versions, reserved environment variables and malformed manifests fail before a build or runtime write.\n- [ ] Manifest schema versions and defaults are documented and covered by compatibility fixtures.\n\n## Planning\n\n- Parent: EP-API\n- Phase: M2\n- Effort: M\n- Depends on: RUN-01, DEP-01\n\n## Requirements\n\n- **FR-API-03:** The system must provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment.\n- **FR-API-04:** The system must accept a versioned declarative function manifest, validate it before deployment and return field-specific errors without partial mutations.",
+      "body": "<!-- falcone-serverless:API-02 -->\n\n## User story\n\nAs a function author, I want to develop locally and deploy a validated manifest, so that development matches hosted execution.\n\n## Description\n\nAdd three starter templates, local runner and schema validation. Manifest v1 adds `runtime.mode` (default `wasm`), `base` as a tagged union: `{kind: catalog, id@version, digest}` or `{kind: byo, image digest, signer identity, attestation ref}`, `image` and an OCI resources block, and an OCI starter is added (ADR 0010). Risk: R3 (host capabilities).\n\n## Acceptance criteria\n\n- [ ] Go, Python and JavaScript examples pass the same inputs locally and remotely.\n- [ ] Unsupported runtime versions, reserved environment variables and malformed manifests fail before a build or runtime write.\n- [ ] Manifest schema versions and defaults are documented and covered by compatibility fixtures.\n- [ ] The manifest schema v1 defines `runtime.mode` and the `base` tagged union with fixtures for both kinds; OCI-mode validation (authorization, catalog and BYO checks) is delivered by OCI-02 (ADR 0010).\n\n## Planning\n\n- Parent: EP-API\n- Phase: M2\n- Effort: M\n- Depends on: RUN-01, DEP-01\n\n## Requirements\n\n- **FR-API-03:** The system must provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, plus an OCI starter built FROM a catalog base for OCI-authorized projects, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment.\n- **FR-API-04:** The system must accept a versioned declarative function manifest, including runtime mode, catalog base and OCI image fields; validate it, including OCI authorization and base visibility and state, before deployment and return field-specific errors without partial mutations.",
       "parent": "EP-API",
       "requirements": [
         "FR-API-03",
@@ -491,7 +571,7 @@
       "id": "API-03",
       "type": "story",
       "title": "[falcone-serverless][API-03] Integrate runtime status, console and SDK schemas",
-      "body": "<!-- falcone-serverless:API-03 -->\n\n## User story\n\nAs a workspace administrator, I want to see reliable status and typed APIs, so that I can diagnose deployments without learning Kubernetes.\n\n## Description\n\nWire the existing console and OpenAPI generation to the backend-neutral status model.\n\n## Acceptance criteria\n\n- [ ] Console distinguishes disabled, unavailable, deploying, active and deletion_pending; retry controls remain keyboard accessible.\n- [ ] Tenant views contain no other-tenant resources or cluster internals; operator views are separately authorized.\n- [ ] Generated client tests cover successful and unavailable runtime responses.\n\n## Planning\n\n- Parent: EP-API\n- Phase: M2\n- Effort: M\n- Depends on: API-01, OBS-01\n\n## Requirements\n\n- **FR-API-05:** The system must expose runtime readiness and deployment progress in the existing console with role-appropriate detail and accessible failure states.\n- **FR-API-06:** The system must publish machine-readable OpenAPI schemas and run generated-client contract tests against every supported API version.",
+      "body": "<!-- falcone-serverless:API-03 -->\n\n## User story\n\nAs a workspace administrator, I want to see reliable status and typed APIs, so that I can diagnose deployments without learning Kubernetes.\n\n## Description\n\nWire the existing console and OpenAPI generation to the backend-neutral status model. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Console distinguishes disabled, unavailable, deploying, active and deletion_pending; retry controls remain keyboard accessible.\n- [ ] Tenant views contain no other-tenant resources or cluster internals; operator views are separately authorized.\n- [ ] Generated client tests cover successful and unavailable runtime responses.\n- [ ] The status model and console show the runtime mode and the OCI and base failure reasons; superadmin OCI authorization and catalog pages are delivered with CAT-06 (ADR 0010).\n\n## Planning\n\n- Parent: EP-API\n- Phase: M2\n- Effort: M\n- Depends on: API-01, OBS-01\n\n## Requirements\n\n- **FR-API-05:** The system must expose runtime readiness and deployment progress in the existing console with role-appropriate detail and accessible failure states.\n- **FR-API-06:** The system must publish machine-readable OpenAPI schemas and run generated-client contract tests against every supported API version.",
       "parent": "EP-API",
       "requirements": [
         "FR-API-05",
@@ -515,7 +595,7 @@
       "id": "EP-RUN",
       "type": "epic",
       "title": "[falcone-serverless][EP-RUN] Runtime and execution",
-      "body": "<!-- falcone-serverless:EP-RUN -->\n\n## Goal\n\nRun qualified Wasm functions while preserving supported legacy source contracts.\n\n## Stories\n\n- RUN-01 \u2014 Implement Wasmtime execution and qualified source adapters\n- RUN-02 \u2014 Enforce guest and host limits with safe draining\n- RUN-03 \u2014 Enforce fresh instances and runtime support policy\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
+      "body": "<!-- falcone-serverless:EP-RUN -->\n\n## Goal\n\nRun qualified Wasm functions while preserving supported legacy source contracts; Wasm by default, OCI where authorized.\n\n## Stories\n\n- RUN-01 \u2014 Implement Wasmtime execution and qualified source adapters\n- RUN-02 \u2014 Enforce guest and host limits with safe draining\n- RUN-03 \u2014 Enforce fresh instances and runtime support policy\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
       "parent": null,
       "labels": [
         "falcone-serverless",
@@ -527,7 +607,7 @@
       "id": "RUN-01",
       "type": "story",
       "title": "[falcone-serverless][RUN-01] Implement Wasmtime execution and qualified source adapters",
-      "body": "<!-- falcone-serverless:RUN-01 -->\n\n## User story\n\nAs a function author, I want to run supported Wasm and legacy source functions, so that I can migrate without rewriting handlers.\n\n## Description\n\nBuild the Rust/Wasmtime worker, beginning with JavaScript contract qualification; Go and Python profiles are enabled only after matrix tests.\n\n## Acceptance criteria\n\n- [ ] Validated Wasm artifacts execute in fresh instances using the declared imports; native executable and arbitrary tenant-image submissions are rejected.\n- [ ] Qualified main(params), status/result/logs and invocation-identity fixtures pass unchanged; incompatible legacy functions are explicitly blocked from cutover.\n- [ ] Each activation records function revision, raw artifact digest, Wasmtime version, language profile and interface version.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, SEC-02, WAS-03\n\n## Requirements\n\n- **FR-RUN-01:** The system must execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; reject arbitrary native tenant binaries and OCI container execution.\n- **FR-RUN-02:** The system must preserve main(params), result/status/log envelopes and scoped invocation verification for qualified legacy functions; detect unsupported libraries or OS behavior and block migration rather than silently altering semantics.",
+      "body": "<!-- falcone-serverless:RUN-01 -->\n\n## User story\n\nAs a function author, I want to run supported Wasm and legacy source functions, so that I can migrate without rewriting handlers.\n\n## Description\n\nBuild the Rust/Wasmtime worker, beginning with JavaScript contract qualification; Go and Python profiles are enabled only after matrix tests. Risk: R3 (sandbox, host capabilities).\n\n## Acceptance criteria\n\n- [ ] In mode `wasm`, validated Wasm artifacts execute in fresh instances using the declared imports; native executable and arbitrary tenant-image submissions are rejected, and the Wasm worker refuses any revision whose runtime mode is not `wasm` (ADR 0010).\n- [ ] Qualified main(params), status/result/logs and invocation-identity fixtures pass unchanged; incompatible legacy functions are explicitly blocked from cutover.\n- [ ] Each activation records function revision, runtime mode, raw artifact digest, base digest when the revision pins one, Wasmtime version, language profile and interface version.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, SEC-02, WAS-03\n\n## Requirements\n\n- **FR-RUN-01:** The system must execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; in mode=wasm, reject arbitrary native tenant binaries and OCI container execution, which run only through the superadmin-authorized OCI mode of ADR 0010.\n- **FR-RUN-02:** The system must preserve main(params), result/status/log envelopes and scoped invocation verification for qualified legacy functions; detect unsupported libraries or OS behavior and block migration rather than silently altering semantics.",
       "parent": "EP-RUN",
       "requirements": [
         "FR-RUN-01",
@@ -552,7 +632,7 @@
       "id": "RUN-02",
       "type": "story",
       "title": "[falcone-serverless][RUN-02] Enforce guest and host limits with safe draining",
-      "body": "<!-- falcone-serverless:RUN-02 -->\n\n## User story\n\nAs an operator, I want to bound each execution and stop it predictably, so that one function cannot exhaust the service.\n\n## Description\n\nEnforce deadlines and memory budgets in both guest execution and Falcone host operations.\n\n## Acceptance criteria\n\n- [ ] Infinite loops, guest allocation, host-buffer growth, compilation exhaustion and oversized I/O hit documented limits without exhausting the worker pool.\n- [ ] Guest interruption and blocked storage/network host-call cancellation are independently tested; kill fallback replaces only the affected execution process.\n- [ ] Draining rejects new work and completes, checkpoints or cancels admitted executions within profile-specific budgets.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M1\n- Effort: L\n- Depends on: RUN-01, INV-01\n\n## Requirements\n\n- **FR-RUN-03:** The system must enforce guest memory, host-buffer, compiler, CPU, payload, execution-time and concurrency budgets; report the specific exceeded limit.\n- **FR-RUN-04:** The system must provide worker readiness/startup probes, bounded draining, guest interruption and host-call cancellation; reject new executions on draining workers.",
+      "body": "<!-- falcone-serverless:RUN-02 -->\n\n## User story\n\nAs an operator, I want to bound each execution and stop it predictably, so that one function cannot exhaust the service.\n\n## Description\n\nEnforce deadlines and memory budgets in both guest execution and Falcone host operations. Risk: R3 (sandbox, host capabilities).\n\n## Acceptance criteria\n\n- [ ] Infinite loops, guest allocation, host-buffer growth, compilation exhaustion and oversized I/O hit documented limits without exhausting the worker pool.\n- [ ] Guest interruption and blocked storage/network host-call cancellation are independently tested; kill fallback replaces only the affected execution process.\n- [ ] Draining rejects new work and completes, checkpoints or cancels admitted executions within profile-specific budgets.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M1\n- Effort: L\n- Depends on: RUN-01, INV-01\n\n## Requirements\n\n- **FR-RUN-03:** The system must enforce guest memory, host-buffer, compiler, CPU, payload, execution-time and concurrency budgets; report the specific exceeded limit.\n- **FR-RUN-04:** The system must provide worker readiness/startup probes, bounded draining, guest interruption and host-call cancellation; reject new executions on draining workers.",
       "parent": "EP-RUN",
       "requirements": [
         "FR-RUN-03",
@@ -576,7 +656,7 @@
       "id": "RUN-03",
       "type": "story",
       "title": "[falcone-serverless][RUN-03] Enforce fresh instances and runtime support policy",
-      "body": "<!-- falcone-serverless:RUN-03 -->\n\n## User story\n\nAs an operator, I want to manage supported runtimes and storage bindings, so that upgrades do not change function behavior unexpectedly.\n\n## Description\n\nKeep compiled-code caching separate from tenant execution state.\n\n## Acceptance criteria\n\n- [ ] Sequential executions cannot observe prior guest memory, handles, environment or temporary files, including after traps and cancellation.\n- [ ] Artifact caches use digest, engine, architecture and interface-version keys; user-supplied native precompiled caches are rejected.\n- [ ] Unsupported package/profile versions fail deployment with actionable diagnostics; upgrades preserve immutable revision references.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M2\n- Effort: M\n- Depends on: RUN-01, STO-01\n\n## Requirements\n\n- **FR-RUN-05:** The system must create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files.\n- **FR-RUN-06:** The system must publish a pinned engine/WASI/language/package support matrix and EOL policy; block unsupported combinations before deployment without silently changing revisions.",
+      "body": "<!-- falcone-serverless:RUN-03 -->\n\n## User story\n\nAs an operator, I want to manage supported runtimes and storage bindings, so that upgrades do not change function behavior unexpectedly.\n\n## Description\n\nKeep compiled-code caching separate from tenant execution state. Risk: R3 (host capabilities).\n\n## Acceptance criteria\n\n- [ ] In mode `wasm`, sequential executions cannot observe prior guest memory, handles, environment or temporary files, including after traps and cancellation.\n- [ ] Artifact caches use digest, engine, architecture and interface-version keys; user-supplied native precompiled caches are rejected.\n- [ ] Unsupported package/profile versions fail deployment with actionable diagnostics; a supported profile comes only from a catalog Wasm entry that is eligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions); upgrades preserve immutable revision references.\n\n## Planning\n\n- Parent: EP-RUN\n- Phase: M2\n- Effort: M\n- Depends on: RUN-01, STO-01\n\n## Requirements\n\n- **FR-RUN-05:** The system must in mode=wasm, create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files. OCI mode follows the documented warm-reuse semantics of ADR 0010.\n- **FR-RUN-06:** The system must publish a pinned engine/WASI/language/package support matrix and EOL policy; block unsupported combinations before deployment without silently changing revisions.",
       "parent": "EP-RUN",
       "requirements": [
         "FR-RUN-05",
@@ -612,7 +692,7 @@
       "id": "DEP-01",
       "type": "story",
       "title": "[falcone-serverless][DEP-01] Build and verify Wasm function artifacts",
-      "body": "<!-- falcone-serverless:DEP-01 -->\n\n## User story\n\nAs a developer, I want to build trusted Wasm artifacts from source or submit a module, so that deployments are reproducible and traceable.\n\n## Description\n\nUse approved language toolchains and package catalogues; isolate compilation and prohibit native dependency hooks.\n\n## Acceptance criteria\n\n- [ ] Supported source and uploaded raw Wasm produce validated digest-pinned revisions with SBOM, provenance and declared imports.\n- [ ] Disallowed imports/features, invalid signatures, native executables and submitted native compiled caches are rejected before worker execution.\n- [ ] Build hooks cannot execute arbitrary native code; malicious compilation inputs are bounded and cannot read another tenant\u2019s artifacts or credentials.\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: WAS-03, SEC-02, STO-01, TEN-02\n\n## Requirements\n\n- **FR-DEP-01:** The system must build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host.\n- **FR-DEP-02:** The system must generate SBOM/provenance for function artifacts and trusted worker images, verify signatures, validate Wasm imports/features and pin every runtime/artifact dependency by digest.",
+      "body": "<!-- falcone-serverless:DEP-01 -->\n\n## User story\n\nAs a developer, I want to build trusted Wasm artifacts from source or submit a module, so that deployments are reproducible and traceable.\n\n## Description\n\nUse approved language toolchains and package catalogues; isolate compilation and prohibit native dependency hooks. Source builds compose onto the selected catalog Wasm base; for OCI, the trusted image assembler layers source or a prebuilt artifact onto a catalog base without RUN steps or tenant hooks (ADR 0010). Risk: R3 (sandbox, host capabilities, secrets, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Supported source and uploaded raw Wasm produce validated digest-pinned revisions with SBOM, provenance and declared imports.\n- [ ] Disallowed imports/features, invalid signatures, native executables and submitted native compiled caches are rejected before worker execution.\n- [ ] Build hooks cannot execute arbitrary native code; malicious compilation inputs are bounded and cannot read another tenant\u2019s artifacts or credentials.\n- [ ] A build composes only onto its pinned catalog base digest and fails with `base_mismatch` otherwise; the OCI assembler path runs no tenant hook.\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: WAS-03, SEC-02, STO-01, TEN-02\n\n## Requirements\n\n- **FR-DEP-01:** The system must in mode=wasm, build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host. OCI function images are assembled or verified FROM catalog bases without tenant build hooks.\n- **FR-DEP-02:** The system must generate SBOM/provenance for function artifacts and trusted worker images, verify signatures, validate Wasm imports/features and pin every runtime/artifact dependency by digest.",
       "parent": "EP-DEP",
       "requirements": [
         "FR-DEP-01",
@@ -638,7 +718,7 @@
       "id": "DEP-02",
       "type": "story",
       "title": "[falcone-serverless][DEP-02] Implement revisions, weighted rollout and rollback",
-      "body": "<!-- falcone-serverless:DEP-02 -->\n\n## User story\n\nAs a developer, I want to release gradually and roll back, so that faulty code affects fewer users.\n\n## Description\n\nAdd immutable revisions and route-generation updates.\n\n## Acceptance criteria\n\n- [ ] A bad readiness probe never receives production traffic.\n- [ ] Configured canary weights meet the test tolerance over the agreed request sample; rollback restores the previous target without rebuilding.\n- [ ] Concurrent updates use compare-and-swap; requests already admitted retain their revision.\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: RUN-01, INV-01\n\n## Requirements\n\n- **FR-DEP-03:** The system must create an immutable revision for code, engine/profile, host-interface or effective configuration changes and retain all artifact references.\n- **FR-DEP-04:** The system must deploy a revision only after readiness succeeds; support weighted canary traffic and atomic rollback to a retained revision.",
+      "body": "<!-- falcone-serverless:DEP-02 -->\n\n## User story\n\nAs a developer, I want to release gradually and roll back, so that faulty code affects fewer users.\n\n## Description\n\nAdd immutable revisions and route-generation updates. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] A bad readiness probe never receives production traffic.\n- [ ] Configured canary weights meet the test tolerance over the agreed request sample; rollback restores the previous target without rebuilding.\n- [ ] Concurrent updates use compare-and-swap; requests already admitted retain their revision.\n- [ ] Revision identity includes runtime mode and base and image digests; promotion re-checks OCI authorization and base state; a cross-mode canary runs only when the rollout explicitly opts in (ADR 0010).\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: RUN-01, INV-01\n\n## Requirements\n\n- **FR-DEP-03:** The system must create an immutable revision for code, engine/profile, host-interface or effective configuration changes and retain all artifact references.\n- **FR-DEP-04:** The system must deploy a revision only after readiness succeeds; support weighted canary traffic and atomic rollback to a retained revision.",
       "parent": "EP-DEP",
       "requirements": [
         "FR-DEP-03",
@@ -662,7 +742,7 @@
       "id": "DEP-03",
       "type": "story",
       "title": "[falcone-serverless][DEP-03] Reconcile worker pools and collect artifacts safely",
-      "body": "<!-- falcone-serverless:DEP-03 -->\n\n## User story\n\nAs an operator, I want to recover drift and remove unused artifacts, so that restarts do not leak or destroy workloads.\n\n## Description\n\nReconcile standard namespaced workloads and reference-aware artifact/cache cleanup.\n\n## Acceptance criteria\n\n- [ ] A controller restart converges to one owned worker-pool configuration and routing generation; stale updates cannot overwrite newer state.\n- [ ] A 10,000-deployed-function inventory does not create 10,000 pods or per-function Services; worker count follows admitted compute demand.\n- [ ] GC retains active, workflow-pinned, in-flight and rollback-protected artifacts and removes only expired owned data.\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: DEP-02, OPS-01\n\n## Requirements\n\n- **FR-DEP-05:** The system must reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function.\n- **FR-DEP-06:** The system must garbage-collect obsolete images, revisions and build artifacts only after checking active routes, in-flight invocations, rollback retention and workflow pins.",
+      "body": "<!-- falcone-serverless:DEP-03 -->\n\n## User story\n\nAs an operator, I want to recover drift and remove unused artifacts, so that restarts do not leak or destroy workloads.\n\n## Description\n\nReconcile standard namespaced workloads and reference-aware artifact/cache cleanup. Risk: R3 (host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] A controller restart converges to one owned worker-pool configuration and routing generation; stale updates cannot overwrite newer state.\n- [ ] A 10,000-deployed-function inventory does not create 10,000 pods or per-function Services; worker count follows admitted compute demand.\n- [ ] GC retains active, workflow-pinned, in-flight and rollback-protected artifacts and removes only expired owned data.\n- [ ] Single-revision OCI pools are materialized only within the per-tenant bound; GC also covers intake-mirror images and catalog bases after reference checks (ADR 0010).\n\n## Planning\n\n- Parent: EP-DEP\n- Phase: M2\n- Effort: L\n- Depends on: DEP-02, OPS-01\n\n## Requirements\n\n- **FR-DEP-05:** The system must reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function, and materialize single-revision OCI pools only on demand within a per-tenant bound on materialized OCI revisions.\n- **FR-DEP-06:** The system must garbage-collect obsolete images, revisions and build artifacts only after checking active routes, in-flight invocations, rollback retention and workflow pins.",
       "parent": "EP-DEP",
       "requirements": [
         "FR-DEP-05",
@@ -698,7 +778,7 @@
       "id": "INV-01",
       "type": "story",
       "title": "[falcone-serverless][INV-01] Implement authenticated sync and durable async invocation",
-      "body": "<!-- falcone-serverless:INV-01 -->\n\n## User story\n\nAs an application developer, I want to invoke synchronously or submit durable work, so that I can choose the right response model.\n\n## Description\n\nBuild router admission, activation records and transactional outbox submission.\n\n## Acceptance criteria\n\n- [ ] Sync calls return the existing envelope; async returns 202 plus an activation ID only after the acceptance transaction commits.\n- [ ] Crashes before/after outbox publication do not lose accepted work; duplicate delivery maps to one logical invocation.\n- [ ] A gateway timeout after dispatch is recorded as uncertain where necessary and never automatically retried as a safe read.\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M1\n- Effort: L\n- Depends on: API-01, STO-03, SEC-01\n\n## Requirements\n\n- **FR-INV-01:** The system must route synchronous invocations to authorized tenant-scoped Wasm workers with a pinned immutable function revision and a configured end-to-end deadline.\n- **FR-INV-02:** The system must accept asynchronous invocations only after durable persistence, return an activation ID, and expose terminal status and result retrieval.",
+      "body": "<!-- falcone-serverless:INV-01 -->\n\n## User story\n\nAs an application developer, I want to invoke synchronously or submit durable work, so that I can choose the right response model.\n\n## Description\n\nBuild router admission, activation records and transactional outbox submission. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Sync calls return the existing envelope; async returns 202 plus an activation ID only after the acceptance transaction commits.\n- [ ] Crashes before/after outbox publication do not lose accepted work; duplicate delivery maps to one logical invocation.\n- [ ] A gateway timeout after dispatch is recorded as uncertain where necessary and never automatically retried as a safe read.\n- [ ] The dispatch contract carries the pinned revision's runtime mode; until EP-OCI delivers OCI pools, admission refuses a revision that is not in mode `wasm` with a non-retryable error (ADR 0010).\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M1\n- Effort: L\n- Depends on: API-01, STO-03, SEC-01\n\n## Requirements\n\n- **FR-INV-01:** The system must route synchronous invocations by the pinned revision's runtime mode to authorized tenant-scoped Wasm workers or OCI revision pools, with a pinned immutable function revision and a configured end-to-end deadline.\n- **FR-INV-02:** The system must accept asynchronous invocations only after durable persistence, return an activation ID, and expose terminal status and result retrieval.",
       "parent": "EP-INV",
       "requirements": [
         "FR-INV-01",
@@ -723,7 +803,7 @@
       "id": "INV-02",
       "type": "story",
       "title": "[falcone-serverless][INV-02] Implement bounded admission and worker-pool activation",
-      "body": "<!-- falcone-serverless:INV-02 -->\n\n## User story\n\nAs an operator, I want to scale with demand within quotas, so that bursts remain controlled and idle functions release capacity.\n\n## Description\n\nScale tenant/profile pools from execution demand while keeping deployment metadata independent of worker capacity.\n\n## Acceptance criteria\n\n- [ ] A zero-replica tenant/profile pool wakes for admitted execution and returns bounded cold-start or queue errors.\n- [ ] Multi-router tests enforce configurable tenant quotas; the initial default is 20 simultaneous executions per tenant, not a throughput guarantee.\n- [ ] The pool scaler never follows raw WebSocket message count directly; stale metrics and long-running jobs cannot cause unsafe scale-down.\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M2\n- Effort: L\n- Depends on: INV-01, TEN-02, OBS-02\n\n## Requirements\n\n- **FR-INV-03:** The system must enforce per-pod hard concurrency and tenant-wide admission limits across multiple router replicas; bound queue length and waiting time.\n- **FR-INV-04:** The system must scale tenant/profile worker pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate.",
+      "body": "<!-- falcone-serverless:INV-02 -->\n\n## User story\n\nAs an operator, I want to scale with demand within quotas, so that bursts remain controlled and idle functions release capacity.\n\n## Description\n\nScale tenant/profile pools from execution demand while keeping deployment metadata independent of worker capacity. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] A zero-replica tenant/profile pool wakes for admitted execution and returns bounded cold-start or queue errors.\n- [ ] Multi-router tests enforce configurable tenant quotas; the initial default is 20 simultaneous executions per tenant, not a throughput guarantee.\n- [ ] The pool scaler never follows raw WebSocket message count directly; stale metrics and long-running jobs cannot cause unsafe scale-down.\n- [ ] The demand signal and scaler include per-revision OCI pools, which scale to zero when idle (ADR 0010).\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M2\n- Effort: L\n- Depends on: INV-01, TEN-02, OBS-02\n\n## Requirements\n\n- **FR-INV-03:** The system must enforce per-pod hard concurrency and tenant-wide admission limits across multiple router replicas; bound queue length and waiting time.\n- **FR-INV-04:** The system must scale tenant/profile worker pools and single-revision OCI pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate.",
       "parent": "EP-INV",
       "requirements": [
         "FR-INV-03",
@@ -748,7 +828,7 @@
       "id": "INV-03",
       "type": "story",
       "title": "[falcone-serverless][INV-03] Preserve WebSocket behavior and benchmark message routing",
-      "body": "<!-- falcone-serverless:INV-03 -->\n\n## User story\n\nAs a MCP application developer, I want to keep streaming and sessions working, so that runtime migration does not interrupt tools.\n\n## Description\n\nSeparate trusted WebSocket gateway capacity from Wasm execution and qualify an explicit traffic profile.\n\n## Acceptance criteria\n\n- [ ] Compatibility tests cover authentication, ordering, backpressure, reconnect and draining; existing deployed MCP behavior, if found, is inventoried separately.\n- [ ] Benchmark 100,000 aggregate ingress messages/second with declared payload size, open connections, fan-out, durability and function-trigger fraction; distinguish input from output deliveries.\n- [ ] Connection counts, message rates, invocation rates and running guests are separate metrics and quotas; no 100,000-invocations/second claim is made.\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M3\n- Effort: L\n- Depends on: MIG-01, RUN-02, INV-02\n\n## Requirements\n\n- **FR-INV-05:** The system must prevent scale-down from discarding admitted work, account for long-running jobs, use stabilization and metric freshness, and maintain exactly one scaling owner per worker pool.\n- **FR-INV-06:** The system must preserve existing WebSocket URLs, authentication, ordering rules, backpressure, reconnect and draining semantics at a trusted gateway; separate connection/message capacity from guest execution slots.",
+      "body": "<!-- falcone-serverless:INV-03 -->\n\n## User story\n\nAs a MCP application developer, I want to keep streaming and sessions working, so that runtime migration does not interrupt tools.\n\n## Description\n\nSeparate trusted WebSocket gateway capacity from Wasm execution and qualify an explicit traffic profile. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Compatibility tests cover authentication, ordering, backpressure, reconnect and draining; existing deployed MCP behavior, if found, is inventoried separately.\n- [ ] Benchmark 100,000 aggregate ingress messages/second with declared payload size, open connections, fan-out, durability and function-trigger fraction; distinguish input from output deliveries.\n- [ ] Connection counts, message rates, invocation rates and running guests are separate metrics and quotas; no 100,000-invocations/second claim is made.\n\n## Planning\n\n- Parent: EP-INV\n- Phase: M3\n- Effort: L\n- Depends on: MIG-01, RUN-02, INV-02\n\n## Requirements\n\n- **FR-INV-05:** The system must prevent scale-down from discarding admitted work, account for long-running jobs, use stabilization and metric freshness, and maintain exactly one scaling owner per worker pool.\n- **FR-INV-06:** The system must preserve existing WebSocket URLs, authentication, ordering rules, backpressure, reconnect and draining semantics at a trusted gateway; separate connection/message capacity from guest execution slots.",
       "parent": "EP-INV",
       "requirements": [
         "FR-INV-05",
@@ -785,7 +865,7 @@
       "id": "EVT-01",
       "type": "story",
       "title": "[falcone-serverless][EVT-01] Implement CloudEvents adapters and trigger management",
-      "body": "<!-- falcone-serverless:EVT-01 -->\n\n## User story\n\nAs an integration developer, I want to connect authorized event sources to functions, so that I can react to platform changes.\n\n## Description\n\nAdd Kafka, storage and webhook adapters plus trigger lifecycle APIs.\n\n## Acceptance criteria\n\n- [ ] Fixtures for each source produce the versioned envelope and validated resource ownership.\n- [ ] Forged payload tenant IDs cannot change the destination scope.\n- [ ] Filters, pause/resume and deletion operate without silently discarding accepted deliveries.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: L\n- Depends on: SEC-01, INV-01, STO-02\n\n## Requirements\n\n- **FR-EVT-01:** The system must normalize Kafka, storage, webhook and scheduled events into versioned CloudEvents envelopes containing trusted tenant/workspace context.\n- **FR-EVT-02:** The system must create, update, filter, pause and delete triggers with separate permissions for event sources and target functions.",
+      "body": "<!-- falcone-serverless:EVT-01 -->\n\n## User story\n\nAs an integration developer, I want to connect authorized event sources to functions, so that I can react to platform changes.\n\n## Description\n\nAdd Kafka, storage and webhook adapters plus trigger lifecycle APIs. Risk: R3 (host capabilities).\n\n## Acceptance criteria\n\n- [ ] Fixtures for each source produce the versioned envelope and validated resource ownership.\n- [ ] Forged payload tenant IDs cannot change the destination scope.\n- [ ] Filters, pause/resume and deletion operate without silently discarding accepted deliveries.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: L\n- Depends on: SEC-01, INV-01, STO-02\n\n## Requirements\n\n- **FR-EVT-01:** The system must normalize Kafka, storage, webhook and scheduled events into versioned CloudEvents envelopes containing trusted tenant/workspace context.\n- **FR-EVT-02:** The system must create, update, filter, pause and delete triggers with separate permissions for event sources and target functions.",
       "parent": "EP-EVT",
       "requirements": [
         "FR-EVT-01",
@@ -810,7 +890,7 @@
       "id": "EVT-02",
       "type": "story",
       "title": "[falcone-serverless][EVT-02] Implement retry, deduplication, DLQ and replay",
-      "body": "<!-- falcone-serverless:EVT-02 -->\n\n## User story\n\nAs an operator, I want to recover failed deliveries visibly, so that events are not silently lost.\n\n## Description\n\nBuild delivery-attempt records, fenced claims and explicit redrive controls.\n\n## Acceptance criteria\n\n- [ ] Crash-after-handler-success/before-ack causes a traceable possible duplicate, never an exactly-once claim.\n- [ ] Retries stop at the configured limit, persist to DLQ and can be replayed by an authorized operator.\n- [ ] Dedupe retention, replay identity and ordering modes are documented and tested, including poison messages.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: L\n- Depends on: EVT-01, STO-03\n\n## Requirements\n\n- **FR-EVT-03:** The system must provide at-least-once durable delivery, configurable bounded retries/backoff, terminal dead-letter queues and audited manual replay.\n- **FR-EVT-04:** The system must deduplicate delivery identifiers within a documented retention window and expose idempotency keys to function code without promising exactly-once external effects.",
+      "body": "<!-- falcone-serverless:EVT-02 -->\n\n## User story\n\nAs an operator, I want to recover failed deliveries visibly, so that events are not silently lost.\n\n## Description\n\nBuild delivery-attempt records, fenced claims and explicit redrive controls. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Crash-after-handler-success/before-ack causes a traceable possible duplicate, never an exactly-once claim.\n- [ ] Retries stop at the configured limit, persist to DLQ and can be replayed by an authorized operator.\n- [ ] Dedupe retention, replay identity and ordering modes are documented and tested, including poison messages.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: L\n- Depends on: EVT-01, STO-03\n\n## Requirements\n\n- **FR-EVT-03:** The system must provide at-least-once durable delivery, configurable bounded retries/backoff, terminal dead-letter queues and audited manual replay.\n- **FR-EVT-04:** The system must deduplicate delivery identifiers within a documented retention window and expose idempotency keys to function code without promising exactly-once external effects.",
       "parent": "EP-EVT",
       "requirements": [
         "FR-EVT-03",
@@ -834,7 +914,7 @@
       "id": "EVT-03",
       "type": "story",
       "title": "[falcone-serverless][EVT-03] Integrate schedules and ordered dispatch",
-      "body": "<!-- falcone-serverless:EVT-03 -->\n\n## User story\n\nAs a workspace administrator, I want to schedule work and choose event ordering, so that automation runs predictably.\n\n## Description\n\nReuse Falcone scheduling ownership and partition-aware delivery.\n\n## Acceptance criteria\n\n- [ ] Cron fixtures cover DST transitions, timezones, missed executions and overlap policies.\n- [ ] Two scheduler instances cannot create two logical occurrences for one schedule timestamp.\n- [ ] Strict per-key mode blocks later events behind failure; relaxed mode documents and tests reordering.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: M\n- Depends on: EVT-02, TEN-02\n\n## Requirements\n\n- **FR-EVT-05:** The system must support ordering per configured key/partition and bounded parallelism; document that delayed retries or replay can change order unless strict ordering is selected.\n- **FR-EVT-06:** The system must integrate cron triggers with the existing Falcone scheduling service, retaining timezone, daylight-saving, overlap and missed-run policies.",
+      "body": "<!-- falcone-serverless:EVT-03 -->\n\n## User story\n\nAs a workspace administrator, I want to schedule work and choose event ordering, so that automation runs predictably.\n\n## Description\n\nReuse Falcone scheduling ownership and partition-aware delivery. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Cron fixtures cover DST transitions, timezones, missed executions and overlap policies.\n- [ ] Two scheduler instances cannot create two logical occurrences for one schedule timestamp.\n- [ ] Strict per-key mode blocks later events behind failure; relaxed mode documents and tests reordering.\n\n## Planning\n\n- Parent: EP-EVT\n- Phase: M2\n- Effort: M\n- Depends on: EVT-02, TEN-02\n\n## Requirements\n\n- **FR-EVT-05:** The system must support ordering per configured key/partition and bounded parallelism; document that delayed retries or replay can change order unless strict ordering is selected.\n- **FR-EVT-06:** The system must integrate cron triggers with the existing Falcone scheduling service, retaining timezone, daylight-saving, overlap and missed-run policies.",
       "parent": "EP-EVT",
       "requirements": [
         "FR-EVT-05",
@@ -870,7 +950,7 @@
       "id": "WF-01",
       "type": "story",
       "title": "[falcone-serverless][WF-01] Preserve functions.invoke and retry identity",
-      "body": "<!-- falcone-serverless:WF-01 -->\n\n## User story\n\nAs a workflow author, I want to invoke the new backend from existing Flows, so that my workflows retain their behavior.\n\n## Description\n\nAdapt the existing worker activity, preserving workspace binding and failure classification.\n\n## Acceptance criteria\n\n- [ ] Existing functions.invoke tests pass, including non-retryable missing-function/runtime errors and retryable timeouts.\n- [ ] A task input cannot override the credential-bound workspace.\n- [ ] Retries share a logical key while recording separate attempt IDs and the same pinned revision.\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: L\n- Depends on: MIG-01, INV-01\n\n## Requirements\n\n- **FR-WF-01:** The system must execute functions from Temporal Activities through the existing functions.invoke contract, preserving result and retryable/non-retryable error mappings.\n- **FR-WF-02:** The system must assign a stable logical invocation key across retries of one Activity and record workflow, run, activity and attempt identifiers.",
+      "body": "<!-- falcone-serverless:WF-01 -->\n\n## User story\n\nAs a workflow author, I want to invoke the new backend from existing Flows, so that my workflows retain their behavior.\n\n## Description\n\nAdapt the existing worker activity, preserving workspace binding and failure classification. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Existing functions.invoke tests pass, including non-retryable missing-function/runtime errors and retryable timeouts.\n- [ ] A task input cannot override the credential-bound workspace.\n- [ ] Retries share a logical key while recording separate attempt IDs and the same pinned revision.\n- [ ] `functions.invoke` covers both runtime modes; `oci_not_authorized` and `base_disabled` map to non-retryable errors (ADR 0010).\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: L\n- Depends on: MIG-01, INV-01\n\n## Requirements\n\n- **FR-WF-01:** The system must execute functions from Temporal Activities through the existing functions.invoke contract, preserving result and retryable/non-retryable error mappings.\n- **FR-WF-02:** The system must assign a stable logical invocation key across retries of one Activity and record workflow, run, activity and attempt identifiers.",
       "parent": "EP-WF",
       "requirements": [
         "FR-WF-01",
@@ -894,7 +974,7 @@
       "id": "WF-02",
       "type": "story",
       "title": "[falcone-serverless][WF-02] Coordinate revision pins, retries and cancellation",
-      "body": "<!-- falcone-serverless:WF-02 -->\n\n## User story\n\nAs a workflow author, I want to resume safely after failures, so that recovery does not unexpectedly execute new code.\n\n## Description\n\nDefine retry ownership and preserve activation/pin state across worker restarts.\n\n## Acceptance criteria\n\n- [ ] Deploying a new function during an Activity retry does not change the pinned revision.\n- [ ] A worker crash resumes/polls the same accepted invocation when its result is unresolved; a known retryable failure creates a new recorded attempt.\n- [ ] Heartbeat and cancellation tests expose requested, acknowledged or uncertain outcomes and avoid nested retry multiplication.\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: L\n- Depends on: WF-01, DEP-02, RUN-02\n\n## Requirements\n\n- **FR-WF-03:** The system must pin the function revision at the first durable admission of an Activity invocation and reuse that pin across retries.\n- **FR-WF-04:** The system must choose one retry owner for each failure class; Temporal-owned retries must not multiply with hidden runtime delivery retries.",
+      "body": "<!-- falcone-serverless:WF-02 -->\n\n## User story\n\nAs a workflow author, I want to resume safely after failures, so that recovery does not unexpectedly execute new code.\n\n## Description\n\nDefine retry ownership and preserve activation/pin state across worker restarts. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Deploying a new function during an Activity retry does not change the pinned revision.\n- [ ] A worker crash resumes/polls the same accepted invocation when its result is unresolved; a known retryable failure creates a new recorded attempt.\n- [ ] Heartbeat and cancellation tests expose requested, acknowledged or uncertain outcomes and avoid nested retry multiplication.\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: L\n- Depends on: WF-01, DEP-02, RUN-02\n\n## Requirements\n\n- **FR-WF-03:** The system must pin the function revision at the first durable admission of an Activity invocation and reuse that pin across retries.\n- **FR-WF-04:** The system must choose one retry owner for each failure class; Temporal-owned retries must not multiply with hidden runtime delivery retries.",
       "parent": "EP-WF",
       "requirements": [
         "FR-WF-03",
@@ -919,7 +999,7 @@
       "id": "WF-03",
       "type": "story",
       "title": "[falcone-serverless][WF-03] Expose scoped workflow start and signal operations",
-      "body": "<!-- falcone-serverless:WF-03 -->\n\n## User story\n\nAs a function author, I want to start and signal workflows safely, so that functions can participate in durable processes.\n\n## Description\n\nAdd a narrow capability-controlled bridge and large-payload references.\n\n## Acceptance criteria\n\n- [ ] Allowed workflow starts/signals succeed with idempotent request IDs and audit records.\n- [ ] Cross-tenant targets and unlisted workflow types are denied even with forged input fields.\n- [ ] Large payloads use authorized SeaweedFS object references; Temporal histories contain no raw credentials.\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: M\n- Depends on: WF-01, STO-01, SEC-03\n\n## Requirements\n\n- **FR-WF-05:** The system must propagate heartbeats, cancellation and deadlines to guest and host operations; persist explicit progress/checkpoint references and report cancellation uncertainty rather than claiming external side effects were reversed.\n- **FR-WF-06:** The system must allow authorized function code to start or signal allow-listed workflows via a scoped Falcone API, using object references for payloads above the agreed size budget.",
+      "body": "<!-- falcone-serverless:WF-03 -->\n\n## User story\n\nAs a function author, I want to start and signal workflows safely, so that functions can participate in durable processes.\n\n## Description\n\nAdd a narrow capability-controlled bridge and large-payload references. Risk: R3 (host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Allowed workflow starts/signals succeed with idempotent request IDs and audit records.\n- [ ] Cross-tenant targets and unlisted workflow types are denied even with forged input fields.\n- [ ] Large payloads use authorized SeaweedFS object references; Temporal histories contain no raw credentials.\n\n## Planning\n\n- Parent: EP-WF\n- Phase: M2\n- Effort: M\n- Depends on: WF-01, STO-01, SEC-03\n\n## Requirements\n\n- **FR-WF-05:** The system must propagate heartbeats, cancellation and deadlines to guest and host operations; persist explicit progress/checkpoint references and report cancellation uncertainty rather than claiming external side effects were reversed.\n- **FR-WF-06:** The system must allow authorized function code to start or signal allow-listed workflows via a scoped Falcone API, using object references for payloads above the agreed size budget.",
       "parent": "EP-WF",
       "requirements": [
         "FR-WF-05",
@@ -944,7 +1024,7 @@
       "id": "EP-SEC",
       "type": "epic",
       "title": "[falcone-serverless][EP-SEC] Identity and security",
-      "body": "<!-- falcone-serverless:EP-SEC -->\n\n## Goal\n\nEnforce verified identities and safe execution at every trust boundary.\n\n## Stories\n\n- SEC-01 \u2014 Implement Keycloak verification and Falcone authorization\n- SEC-02 \u2014 Qualify restricted pods and the application sandbox\n- SEC-03 \u2014 Secure host capabilities, egress and audit\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
+      "body": "<!-- falcone-serverless:EP-SEC -->\n\n## Goal\n\nEnforce verified identities and safe execution at every trust boundary; Wasm by default, OCI where authorized.\n\n## Stories\n\n- SEC-01 \u2014 Implement Keycloak verification and Falcone authorization\n- SEC-02 \u2014 Qualify restricted pods and the application sandbox\n- SEC-03 \u2014 Secure host capabilities, egress and audit\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
       "parent": null,
       "labels": [
         "falcone-serverless",
@@ -956,7 +1036,7 @@
       "id": "SEC-01",
       "type": "story",
       "title": "[falcone-serverless][SEC-01] Implement Keycloak verification and Falcone authorization",
-      "body": "<!-- falcone-serverless:SEC-01 -->\n\n## User story\n\nAs a security engineer, I want to verify identity and scope at each API boundary, so that tenant claims cannot be forged.\n\n## Description\n\nReuse Falcone's realm/trust policy and test public and internal entry points.\n\n## Acceptance criteria\n\n- [ ] Expired, wrong-audience, wrong-issuer, forged and untrusted-realm tokens are rejected.\n- [ ] JWKS rotation succeeds within the configured cache budget; unknown keys fail closed during outages.\n- [ ] Tenant, workspace, platform-reader and mutation persona tests match the existing authorization matrix.\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01\n\n## Requirements\n\n- **FR-SEC-01:** The system must validate Keycloak issuer, audience, signature, allowed algorithms and token lifetime using an explicit realm allow-list and bounded JWKS caching/rotation.\n- **FR-SEC-02:** The system must authorize every management, invoke, log, result, secret and trigger operation using Falcone's verified tenant/workspace roles and capability policies; ignore spoofed identity headers.",
+      "body": "<!-- falcone-serverless:SEC-01 -->\n\n## User story\n\nAs a security engineer, I want to verify identity and scope at each API boundary, so that tenant claims cannot be forged.\n\n## Description\n\nReuse Falcone's realm/trust policy and test public and internal entry points. Risk: R3 (secrets, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Expired, wrong-audience, wrong-issuer, forged and untrusted-realm tokens are rejected.\n- [ ] JWKS rotation succeeds within the configured cache budget; unknown keys fail closed during outages.\n- [ ] Tenant, workspace, platform-reader and mutation persona tests match the existing authorization matrix.\n- [ ] The platform service identity contract v1 reserves the `oci-shim`, `image-intake` and `image-assembler` callee audiences and the dispatcher\u2192shim mutual-TLS identity (ADR 0010).\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01\n\n## Requirements\n\n- **FR-SEC-01:** The system must validate Keycloak issuer, audience, signature, allowed algorithms and token lifetime using an explicit realm allow-list and bounded JWKS caching/rotation.\n- **FR-SEC-02:** The system must authorize every management, invoke, log, result, secret and trigger operation using Falcone's verified tenant/workspace roles and capability policies; ignore spoofed identity headers.",
       "parent": "EP-SEC",
       "requirements": [
         "FR-SEC-01",
@@ -979,7 +1059,7 @@
       "id": "SEC-02",
       "type": "story",
       "title": "[falcone-serverless][SEC-02] Qualify restricted pods and the application sandbox",
-      "body": "<!-- falcone-serverless:SEC-02 -->\n\n## User story\n\nAs a platform operator, I want to run untrusted modules under the approved application sandbox, so that tenant code cannot obtain host privileges.\n\n## Description\n\nRun trusted worker processes and untrusted Wasm guests under existing corporate policy.\n\n## Acceptance criteria\n\n- [ ] Installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass.\n- [ ] Guests cannot invoke native processes, load native libraries or obtain Kubernetes/admin credentials; dangerous imports are rejected.\n- [ ] Sandbox failure or unsupported features stop execution; there is no native fallback. Worker and compilation isolation tests are documented.\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: WAS-02, OPS-01\n\n## Requirements\n\n- **FR-SEC-03:** The system must run trusted Falcone worker images under restricted non-root, arbitrary-UID-compatible policies without privilege escalation, host mounts/networking or automatic API tokens in guest workers.\n- **FR-SEC-04:** The system must execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native execution.",
+      "body": "<!-- falcone-serverless:SEC-02 -->\n\n## User story\n\nAs a platform operator, I want to run untrusted modules under the approved application sandbox, so that tenant code cannot obtain host privileges.\n\n## Description\n\nRun trusted worker processes and untrusted Wasm guests under existing corporate policy. Risk: R3 (sandbox, host capabilities).\n\n## Acceptance criteria\n\n- [ ] Installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass.\n- [ ] Guests cannot invoke native processes, load native libraries or obtain Kubernetes/admin credentials; dangerous imports are rejected.\n- [ ] Sandbox failure or unsupported features stop execution; there is no native fallback. Worker and compilation isolation tests are documented.\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: WAS-02, OPS-01\n\n## Requirements\n\n- **FR-SEC-03:** The system must run trusted Falcone worker images under restricted non-root, arbitrary-UID-compatible policies without privilege escalation, host mounts/networking or automatic API tokens in guest workers.\n- **FR-SEC-04:** The system must in mode=wasm, execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native or OCI execution. OCI mode runs only in superadmin-authorized projects, in restricted pods, under ADR 0010.",
       "parent": "EP-SEC",
       "requirements": [
         "FR-SEC-03",
@@ -1003,7 +1083,7 @@
       "id": "SEC-03",
       "type": "story",
       "title": "[falcone-serverless][SEC-03] Secure host capabilities, egress and audit",
-      "body": "<!-- falcone-serverless:SEC-03 -->\n\n## User story\n\nAs a security engineer, I want to bind internal requests to a scoped identity, so that a compromised function cannot impersonate another tenant.\n\n## Description\n\nImplement the privileged host-operation boundary separately from guest code.\n\n## Acceptance criteria\n\n- [ ] Every host call verifies execution scope and capability grants; guessed object IDs, credential handles and forged tenant fields fail.\n- [ ] Metadata endpoints, DNS rebinding, redirects to forbidden destinations and unauthorized cross-tenant traffic are denied, including through host-call proxies.\n- [ ] Secrets and signing keys are absent from guest artifacts and telemetry; exposing a secret to guest code requires an explicit narrow grant.\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: SEC-01, SEC-02\n\n## Requirements\n\n- **FR-SEC-05:** The system must authenticate service calls and issue short-lived, audience-bound execution credentials; keep signing keys and broad service credentials out of guests and scope each host operation to verified tenant/workspace context.\n- **FR-SEC-06:** The system must enforce tenant network isolation and destination policies, block metadata/private-network SSRF except explicitly authorized bindings, and audit security-sensitive actions without recording secrets.",
+      "body": "<!-- falcone-serverless:SEC-03 -->\n\n## User story\n\nAs a security engineer, I want to bind internal requests to a scoped identity, so that a compromised function cannot impersonate another tenant.\n\n## Description\n\nImplement the privileged host-operation boundary separately from guest code. Risk: R3 (host capabilities, egress, secrets, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Every host call verifies execution scope and capability grants; guessed object IDs, credential handles and forged tenant fields fail.\n- [ ] Metadata endpoints, DNS rebinding, redirects to forbidden destinations and unauthorized cross-tenant traffic are denied, including through host-call proxies.\n- [ ] Secrets and signing keys are absent from guest artifacts and telemetry; exposing a secret to guest code requires an explicit narrow grant.\n- [ ] The execution credential and audit event contracts v1 allow the trusted OCI shim as a credential holder, never the tenant container, and define the `oci_authorization.*` and `catalog.*` audit events (ADR 0010).\n\n## Planning\n\n- Parent: EP-SEC\n- Phase: M1\n- Effort: L\n- Depends on: SEC-01, SEC-02\n\n## Requirements\n\n- **FR-SEC-05:** The system must authenticate service calls and issue short-lived, audience-bound execution credentials; keep signing keys and broad service credentials out of guests and scope each host operation to verified tenant/workspace context.\n- **FR-SEC-06:** The system must enforce tenant network isolation and destination policies, block metadata/private-network SSRF except explicitly authorized bindings, and audit security-sensitive actions without recording secrets.",
       "parent": "EP-SEC",
       "requirements": [
         "FR-SEC-05",
@@ -1039,7 +1119,7 @@
       "id": "TEN-01",
       "type": "story",
       "title": "[falcone-serverless][TEN-01] Implement tenant scoping and namespace bindings",
-      "body": "<!-- falcone-serverless:TEN-01 -->\n\n## User story\n\nAs a tenant administrator, I want to have resources isolated by tenant and workspace, so that other customers cannot observe or alter them.\n\n## Description\n\nUse existing identity scope plus an operator-owned namespace resolver.\n\n## Acceptance criteria\n\n- [ ] SQL/RLS, API, log, artifact and activation tests reject adjacent tenants and unauthorized sibling workspaces.\n- [ ] Same function name in two tenants produces distinct owned runtime resources.\n- [ ] Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace.\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M1\n- Effort: L\n- Depends on: SEC-01, OPS-01\n\n## Requirements\n\n- **FR-TEN-01:** The system must persist tenant_id and workspace_id on every business resource, activation, artifact binding and audit record, with database enforcement and authorization-scoped lookups.\n- **FR-TEN-02:** The system must use administrator-preprovisioned namespaces and explicit namespaced RBAC; isolate tenant worker pools by verified mappings without requiring namespace creation or treating labels as a security boundary.",
+      "body": "<!-- falcone-serverless:TEN-01 -->\n\n## User story\n\nAs a tenant administrator, I want to have resources isolated by tenant and workspace, so that other customers cannot observe or alter them.\n\n## Description\n\nUse existing identity scope plus an operator-owned namespace resolver. Risk: R3 (host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] SQL/RLS, API, log, artifact and activation tests reject adjacent tenants and unauthorized sibling workspaces.\n- [ ] Same function name in two tenants produces distinct owned runtime resources.\n- [ ] Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace.\n- [ ] The namespace-bindings contract v1 includes an optional preprovisioned `oci_namespace` per tenant (ADR 0010).\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M1\n- Effort: L\n- Depends on: SEC-01, OPS-01\n\n## Requirements\n\n- **FR-TEN-01:** The system must persist tenant_id and workspace_id on every business resource, activation, artifact binding and audit record, with database enforcement and authorization-scoped lookups.\n- **FR-TEN-02:** The system must use administrator-preprovisioned namespaces and explicit namespaced RBAC; isolate tenant worker pools by verified mappings without requiring namespace creation or treating labels as a security boundary.",
       "parent": "EP-TEN",
       "requirements": [
         "FR-TEN-01",
@@ -1063,7 +1143,7 @@
       "id": "TEN-02",
       "type": "story",
       "title": "[falcone-serverless][TEN-02] Enforce Falcone-owned quotas and workload fairness",
-      "body": "<!-- falcone-serverless:TEN-02 -->\n\n## User story\n\nAs a platform operator, I want to apply plans and fair capacity limits, so that one tenant cannot consume all shared capacity.\n\n## Description\n\nKeep all accounting and policy in Falcone; distinguish messages/connections, executions and long-running work.\n\n## Acceptance criteria\n\n- [ ] Multi-router tests never exceed the configured aggregate tenant limits, initially 20 execution slots per tenant where enabled.\n- [ ] Interactive and batch budgets prevent analysis jobs starving interactive traffic; expired reservations recover with fenced ownership.\n- [ ] Failed attempts, retries, cold starts and warm idle capacity generate distinct usage records; Falcone configuration alone determines charging.\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M1\n- Effort: L\n- Depends on: TEN-01, STO-03\n\n## Requirements\n\n- **FR-TEN-03:** The system must obtain all quota and charging policies from Falcone, including failures, retries, startup, idle capacity, builds, storage, WebSocket connections/messages and interactive/batch execution.\n- **FR-TEN-04:** The system must enforce aggregate reservations across replicas with an initial configurable allowance of 20 executions per tenant; allocate separate interactive/batch budgets and fair queued capacity.",
+      "body": "<!-- falcone-serverless:TEN-02 -->\n\n## User story\n\nAs a platform operator, I want to apply plans and fair capacity limits, so that one tenant cannot consume all shared capacity.\n\n## Description\n\nKeep all accounting and policy in Falcone; distinguish messages/connections, executions and long-running work. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Multi-router tests never exceed the configured aggregate tenant limits, initially 20 execution slots per tenant where enabled.\n- [ ] Interactive and batch budgets prevent analysis jobs starving interactive traffic; expired reservations recover with fenced ownership.\n- [ ] Failed attempts, retries, cold starts and warm idle capacity generate distinct usage records; Falcone configuration alone determines charging.\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M1\n- Effort: L\n- Depends on: TEN-01, STO-03\n\n## Requirements\n\n- **FR-TEN-03:** The system must obtain all quota and charging policies from Falcone, including failures, retries, startup, idle capacity, builds, storage, WebSocket connections/messages and interactive/batch execution.\n- **FR-TEN-04:** The system must enforce aggregate reservations across replicas with an initial configurable allowance of 20 executions per tenant; allocate separate interactive/batch budgets and fair queued capacity.",
       "parent": "EP-TEN",
       "requirements": [
         "FR-TEN-03",
@@ -1087,7 +1167,7 @@
       "id": "TEN-03",
       "type": "story",
       "title": "[falcone-serverless][TEN-03] Implement suspension and durable scoped cleanup",
-      "body": "<!-- falcone-serverless:TEN-03 -->\n\n## User story\n\nAs a tenant administrator, I want to suspend and remove workloads reliably, so that disabled tenants stop consuming services.\n\n## Description\n\nUnify suspension, deletion and tenant teardown around durable owner-checked cleanup.\n\n## Acceptance criteria\n\n- [ ] Suspension stops new admissions and trigger delivery; queued/in-flight policy is applied and audited.\n- [ ] Deletion during an outage returns deletion_pending and resumes idempotently after recovery.\n- [ ] UID/resourceVersion/ownership mismatch retains the resource and raises a repair condition; completion requires verified absence.\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M3\n- Effort: L\n- Depends on: TEN-01, DEP-03, EVT-02\n\n## Requirements\n\n- **FR-TEN-05:** The system must on tenant suspension or capability disable, deny new work immediately, pause triggers and apply an explicit policy to in-flight and queued work.\n- **FR-TEN-06:** The system must on function/workspace/tenant deletion, persist cleanup obligations, verify ownership before deletion and report completion only after all scoped runtime resources are absent.",
+      "body": "<!-- falcone-serverless:TEN-03 -->\n\n## User story\n\nAs a tenant administrator, I want to suspend and remove workloads reliably, so that disabled tenants stop consuming services.\n\n## Description\n\nUnify suspension, deletion and tenant teardown around durable owner-checked cleanup. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Suspension stops new admissions and trigger delivery; queued/in-flight policy is applied and audited.\n- [ ] Deletion during an outage returns deletion_pending and resumes idempotently after recovery.\n- [ ] UID/resourceVersion/ownership mismatch retains the resource and raises a repair condition; completion requires verified absence.\n- [ ] Suspension and deletion cover OCI pools and intake-mirror images; revoking OCI authorization drains through the same in-flight and queued-work policy (ADR 0010).\n\n## Planning\n\n- Parent: EP-TEN\n- Phase: M3\n- Effort: L\n- Depends on: TEN-01, DEP-03, EVT-02\n\n## Requirements\n\n- **FR-TEN-05:** The system must on tenant suspension or capability disable, deny new work immediately, pause triggers and apply an explicit policy to in-flight and queued work.\n- **FR-TEN-06:** The system must on function/workspace/tenant deletion, persist cleanup obligations, verify ownership before deletion and report completion only after all scoped runtime resources are absent.",
       "parent": "EP-TEN",
       "requirements": [
         "FR-TEN-05",
@@ -1124,7 +1204,7 @@
       "id": "STO-01",
       "type": "story",
       "title": "[falcone-serverless][STO-01] Implement Wasm artifact, checkpoint and scoped S3 storage",
-      "body": "<!-- falcone-serverless:STO-01 -->\n\n## User story\n\nAs a function author, I want to access artifacts and application objects securely, so that my function can use Falcone storage.\n\n## Description\n\nReuse Falcone storage through capability-controlled host operations.\n\n## Acceptance criteria\n\n- [ ] Required upload/download, multipart, signed-URL and checksum cases pass against both pinned SeaweedFS releases.\n- [ ] Guessed keys, path traversal and signed-URL requests cannot cross tenant/workspace boundaries; guest access uses narrow grants.\n- [ ] Retention preserves workflow-pinned artifacts, live payloads and resumable checkpoints; current notifications are preserved and regression-tested.\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M1\n- Effort: M\n- Depends on: SEC-01, TEN-01\n\n## Requirements\n\n- **FR-STO-01:** The system must store source, Wasm artifacts, checkpoints and large payloads/results in SeaweedFS through existing scoped storage APIs with checksums, retention and authorized references.\n- **FR-STO-02:** The system must test S3 operations against the latest two qualified stable SeaweedFS releases, initially 4.48 and 4.47 from the research snapshot, preserving current notification configuration after it is supplied and verified.",
+      "body": "<!-- falcone-serverless:STO-01 -->\n\n## User story\n\nAs a function author, I want to access artifacts and application objects securely, so that my function can use Falcone storage.\n\n## Description\n\nReuse Falcone storage through capability-controlled host operations. Risk: R3 (host capabilities, secrets, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Required upload/download, multipart, signed-URL and checksum cases pass against both pinned SeaweedFS releases.\n- [ ] Guessed keys, path traversal and signed-URL requests cannot cross tenant/workspace boundaries; guest access uses narrow grants.\n- [ ] Retention preserves workflow-pinned artifacts, live payloads and resumable checkpoints; current notifications are preserved and regression-tested.\n- [ ] The host storage API contract v1 adds the `catalog-base` retention class and accepts the execution credential from any verified holder, including the trusted OCI shim (ADR 0010).\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M1\n- Effort: M\n- Depends on: SEC-01, TEN-01\n\n## Requirements\n\n- **FR-STO-01:** The system must store source, Wasm artifacts, checkpoints and large payloads/results in SeaweedFS through existing scoped storage APIs with checksums, retention and authorized references.\n- **FR-STO-02:** The system must test S3 operations against the latest two qualified stable SeaweedFS releases, initially 4.48 and 4.47 from the research snapshot, preserving current notification configuration after it is supplied and verified.",
       "parent": "EP-STO",
       "requirements": [
         "FR-STO-01",
@@ -1148,7 +1228,7 @@
       "id": "STO-02",
       "type": "story",
       "title": "[falcone-serverless][STO-02] Bridge storage events and rotate OpenBao secrets",
-      "body": "<!-- falcone-serverless:STO-02 -->\n\n## User story\n\nAs an integration developer, I want to receive object events and use rotating secrets, so that storage automation remains secure.\n\n## Description\n\nQualify the actual SeaweedFS notification/feed path and preserve OpenBao references.\n\n## Acceptance criteria\n\n- [ ] PUT, multipart completion and DELETE through direct S3 clients produce normalized events according to the pinned-version contract.\n- [ ] Disconnect/reconnect tests establish replay checkpoints and any source-side loss window; unsupported guarantees block release of the corresponding trigger.\n- [ ] Secret rotation updates only authorized consumers and never writes values into revision manifests, telemetry or build outputs.\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M2\n- Effort: L\n- Depends on: STO-01, SEC-03\n\n## Requirements\n\n- **FR-STO-03:** The system must translate verified storage events into function triggers, including writes made through direct S3 clients, and document source-side retention and recovery guarantees.\n- **FR-STO-04:** The system must resolve OpenBao secrets through host capabilities or explicit narrow guest bindings; keep values out of source-controlled manifests, artifacts and logs and support scoped rotation.",
+      "body": "<!-- falcone-serverless:STO-02 -->\n\n## User story\n\nAs an integration developer, I want to receive object events and use rotating secrets, so that storage automation remains secure.\n\n## Description\n\nQualify the actual SeaweedFS notification/feed path and preserve OpenBao references. Risk: R3 (host capabilities, secrets, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] PUT, multipart completion and DELETE through direct S3 clients produce normalized events according to the pinned-version contract.\n- [ ] Disconnect/reconnect tests establish replay checkpoints and any source-side loss window; unsupported guarantees block release of the corresponding trigger.\n- [ ] Secret rotation updates only authorized consumers and never writes values into revision manifests, telemetry or build outputs.\n- [ ] In OCI mode, a secret reaches code only as an explicit narrow guest grant fetched per attempt, never through environment variables, files or the image (ADR 0010).\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M2\n- Effort: L\n- Depends on: STO-01, SEC-03\n\n## Requirements\n\n- **FR-STO-03:** The system must translate verified storage events into function triggers, including writes made through direct S3 clients, and document source-side retention and recovery guarantees.\n- **FR-STO-04:** The system must resolve OpenBao secrets through host capabilities or explicit narrow guest bindings; keep values out of source-controlled manifests, artifacts and logs and support scoped rotation.",
       "parent": "EP-STO",
       "requirements": [
         "FR-STO-03",
@@ -1172,7 +1252,7 @@
       "id": "STO-03",
       "type": "story",
       "title": "[falcone-serverless][STO-03] Implement durable invocation metadata and outbox recovery",
-      "body": "<!-- falcone-serverless:STO-03 -->\n\n## User story\n\nAs an operator, I want to persist accepted work and recover dispatcher failures, so that acknowledged submissions survive restarts.\n\n## Description\n\nAdd scoped PostgreSQL schemas, outbox/inbox processing and fenced leases.\n\n## Acceptance criteria\n\n- [ ] A transaction atomically persists activation plus outbox before returning accepted.\n- [ ] Crash tests at commit/publish/consume/complete boundaries recover pending work and reconcile duplicates.\n- [ ] A stale attempt cannot overwrite a newer terminal record; no guarantee of exactly-once arbitrary external side effects is advertised.\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, OPS-01\n\n## Requirements\n\n- **FR-STO-05:** The system must persist desired function state, activation state, deduplication records and cleanup obligations in PostgreSQL with migrations and unique scope-aware keys.\n- **FR-STO-06:** The system must use transactional outbox/inbox patterns and fenced attempt ownership so database/broker failures do not lose accepted work or allow stale workers to overwrite terminal status.",
+      "body": "<!-- falcone-serverless:STO-03 -->\n\n## User story\n\nAs an operator, I want to persist accepted work and recover dispatcher failures, so that acknowledged submissions survive restarts.\n\n## Description\n\nAdd scoped PostgreSQL schemas, outbox/inbox processing and fenced leases. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] A transaction atomically persists activation plus outbox before returning accepted.\n- [ ] Crash tests at commit/publish/consume/complete boundaries recover pending work and reconcile duplicates.\n- [ ] A stale attempt cannot overwrite a newer terminal record; no guarantee of exactly-once arbitrary external side effects is advertised.\n\n## Planning\n\n- Parent: EP-STO\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, OPS-01\n\n## Requirements\n\n- **FR-STO-05:** The system must persist desired function state, activation state, deduplication records and cleanup obligations in PostgreSQL with migrations and unique scope-aware keys.\n- **FR-STO-06:** The system must use transactional outbox/inbox patterns and fenced attempt ownership so database/broker failures do not lose accepted work or allow stale workers to overwrite terminal status.",
       "parent": "EP-STO",
       "requirements": [
         "FR-STO-05",
@@ -1208,7 +1288,7 @@
       "id": "OBS-01",
       "type": "story",
       "title": "[falcone-serverless][OBS-01] Add tenant-scoped logs and distributed tracing",
-      "body": "<!-- falcone-serverless:OBS-01 -->\n\n## User story\n\nAs a developer, I want to trace one invocation across services, so that I can locate failures quickly.\n\n## Description\n\nInstrument runtime and Falcone adapters with OpenTelemetry and structured logs.\n\n## Acceptance criteria\n\n- [ ] An HTTP and a Temporal-triggered invocation can each be followed across their full path.\n- [ ] Log/result/trace queries reject cross-tenant and unauthorized sibling-workspace access.\n- [ ] Tokens, secret values and request bodies are excluded or redacted according to policy.\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M1\n- Effort: M\n- Depends on: INV-01, SEC-01\n\n## Requirements\n\n- **FR-OBS-01:** The system must emit structured logs and trace context carrying trusted tenant/workspace, function/revision, activation and workflow identifiers, with tenant-scoped retrieval.\n- **FR-OBS-02:** The system must export OpenTelemetry traces across gateway, admission, event dispatch, runtime and workflow boundaries, preserving W3C context when permitted.",
+      "body": "<!-- falcone-serverless:OBS-01 -->\n\n## User story\n\nAs a developer, I want to trace one invocation across services, so that I can locate failures quickly.\n\n## Description\n\nInstrument runtime and Falcone adapters with OpenTelemetry and structured logs. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] An HTTP and a Temporal-triggered invocation can each be followed across their full path.\n- [ ] Log/result/trace queries reject cross-tenant and unauthorized sibling-workspace access.\n- [ ] Tokens, secret values and request bodies are excluded or redacted according to policy.\n- [ ] The telemetry context contract v1 carries `runtime_mode` and base and image digests (ADR 0010).\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M1\n- Effort: M\n- Depends on: INV-01, SEC-01\n\n## Requirements\n\n- **FR-OBS-01:** The system must emit structured logs and trace context carrying trusted tenant/workspace, function/revision, activation and workflow identifiers, with tenant-scoped retrieval.\n- **FR-OBS-02:** The system must export OpenTelemetry traces across gateway, admission, event dispatch, runtime and workflow boundaries, preserving W3C context when permitted.",
       "parent": "EP-OBS",
       "requirements": [
         "FR-OBS-01",
@@ -1232,7 +1312,7 @@
       "id": "OBS-02",
       "type": "story",
       "title": "[falcone-serverless][OBS-02] Deliver metrics, dashboards and operational alerts",
-      "body": "<!-- falcone-serverless:OBS-02 -->\n\n## User story\n\nAs a SRE, I want to observe load and scaling decisions, so that I can diagnose saturation before an outage.\n\n## Description\n\nDefine bounded metrics and dashboards for the complete execution path.\n\n## Acceptance criteria\n\n- [ ] Load tests populate warm, cold-start, queue and execution histograms separately.\n- [ ] Injected broker lag, stale metrics, unavailable runtime and failed cleanup trigger the expected alerts.\n- [ ] Metric-cardinality tests reject function-supplied labels and demonstrate a bounded series budget.\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M2\n- Effort: M\n- Depends on: OBS-01\n\n## Requirements\n\n- **FR-OBS-03:** The system must measure deployed function count, connected WebSockets, ingress/egress messages, triggered invocations, execution/queue/activation latency, guest/host memory, pool capacity, retries and DLQ depth separately with bounded-cardinality metrics.\n- **FR-OBS-04:** The system must provide dashboards and alerts for unavailable runtimes, saturation, scaling failure, stale queues, security denials and failed cleanup.",
+      "body": "<!-- falcone-serverless:OBS-02 -->\n\n## User story\n\nAs a SRE, I want to observe load and scaling decisions, so that I can diagnose saturation before an outage.\n\n## Description\n\nDefine bounded metrics and dashboards for the complete execution path. Risk: R3 (sandbox).\n\n## Acceptance criteria\n\n- [ ] Load tests populate warm, cold-start, queue and execution histograms separately.\n- [ ] Injected broker lag, stale metrics, unavailable runtime and failed cleanup trigger the expected alerts.\n- [ ] Metric-cardinality tests reject function-supplied labels and demonstrate a bounded series budget.\n- [ ] Metrics and dashboards split by runtime mode, including an OCI cold-start breakdown of image pull, pod start, init and contract probe (ADR 0010).\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M2\n- Effort: M\n- Depends on: OBS-01\n\n## Requirements\n\n- **FR-OBS-03:** The system must measure deployed function count, connected WebSockets, ingress/egress messages, triggered invocations, execution/queue/activation latency, guest/host memory, pool capacity, retries and DLQ depth separately with bounded-cardinality metrics.\n- **FR-OBS-04:** The system must provide dashboards and alerts for unavailable runtimes, saturation, scaling failure, stale queues, security denials and failed cleanup.",
       "parent": "EP-OBS",
       "requirements": [
         "FR-OBS-03",
@@ -1255,7 +1335,7 @@
       "id": "OBS-03",
       "type": "story",
       "title": "[falcone-serverless][OBS-03] Add auditable metering and retention controls",
-      "body": "<!-- falcone-serverless:OBS-03 -->\n\n## User story\n\nAs a platform administrator, I want to reconcile usage with execution records, so that quotas and future billing use explainable data.\n\n## Description\n\nImplement idempotent usage events, audit queries and retention jobs.\n\n## Acceptance criteria\n\n- [ ] Duplicate delivery does not double-count the same billable attempt; retry charging policy is explicit.\n- [ ] Usage totals reconcile with recorded execution attempts within the agreed lag budget.\n- [ ] Retention deletes expired telemetry without deleting active workflow or legal-hold references where configured.\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M2\n- Effort: M\n- Depends on: OBS-01, STO-03, TEN-02\n\n## Requirements\n\n- **FR-OBS-05:** The system must record append-only auditable lifecycle/security events and invocation usage units with stable event IDs and reconciliation.\n- **FR-OBS-06:** The system must enforce telemetry redaction, configurable retention and per-tenant access controls; never use unbounded user input as metric labels.",
+      "body": "<!-- falcone-serverless:OBS-03 -->\n\n## User story\n\nAs a platform administrator, I want to reconcile usage with execution records, so that quotas and future billing use explainable data.\n\n## Description\n\nImplement idempotent usage events, audit queries and retention jobs. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Duplicate delivery does not double-count the same billable attempt; retry charging policy is explicit.\n- [ ] Usage totals reconcile with recorded execution attempts within the agreed lag budget.\n- [ ] Retention deletes expired telemetry without deleting active workflow or legal-hold references where configured.\n- [ ] Usage events carry the runtime mode; audit queries cover catalog and OCI authorization events (ADR 0010).\n\n## Planning\n\n- Parent: EP-OBS\n- Phase: M2\n- Effort: M\n- Depends on: OBS-01, STO-03, TEN-02\n\n## Requirements\n\n- **FR-OBS-05:** The system must record append-only auditable lifecycle/security events and invocation usage units with stable event IDs and reconciliation.\n- **FR-OBS-06:** The system must enforce telemetry redaction, configurable retention and per-tenant access controls; never use unbounded user input as metric labels.",
       "parent": "EP-OBS",
       "requirements": [
         "FR-OBS-05",
@@ -1292,7 +1372,7 @@
       "id": "OPS-01",
       "type": "story",
       "title": "[falcone-serverless][OPS-01] Package namespace-only installation and resource ownership",
-      "body": "<!-- falcone-serverless:OPS-01 -->\n\n## User story\n\nAs a platform installer, I want to deploy a supported runtime reproducibly, so that cluster setup is inspectable and repeatable.\n\n## Description\n\nDeploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation.\n\n## Acceptance criteria\n\n- [ ] Preflight using the deployment identity proves all required namespaced verbs; a rendered manifest audit contains no cluster-scoped resources, privileged pods or custom SCC/RuntimeClass.\n- [ ] Actual pod startup and invocation pass on qualified Kubernetes lines and the supplied OpenShift patch release under its existing SCC.\n- [ ] Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure.\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, WAS-01\n\n## Requirements\n\n- **FR-OPS-01:** The system must install with ordinary namespaced Helm resources and pregranted RBAC on the latest two qualified Kubernetes minor lines and OpenShift 4.20; require no CRD, cluster-role, operator, custom RuntimeClass or elevated SCC creation.\n- **FR-OPS-02:** The system must support HA control/data-plane replicas, leader election or sharding for singleton duties, disruption budgets and documented degraded behavior.",
+      "body": "<!-- falcone-serverless:OPS-01 -->\n\n## User story\n\nAs a platform installer, I want to deploy a supported runtime reproducibly, so that cluster setup is inspectable and repeatable.\n\n## Description\n\nDeploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation. Risk: R3 (sandbox, host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Preflight using the deployment identity proves all required namespaced verbs; a rendered manifest audit contains no cluster-scoped resources, privileged pods or custom SCC/RuntimeClass.\n- [ ] Actual pod startup and invocation pass on qualified Kubernetes lines and the supplied OpenShift patch release under its existing SCC.\n- [ ] Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure.\n- [ ] The serverless chart values contract v1 includes an OCI section that is disabled by default and renders no OCI resources (ADR 0010).\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M1\n- Effort: L\n- Depends on: MIG-01, WAS-01\n\n## Requirements\n\n- **FR-OPS-01:** The system must install with ordinary namespaced Helm resources and pregranted RBAC on the latest two qualified Kubernetes minor lines and OpenShift 4.20; require no CRD, cluster-role, operator, custom RuntimeClass or elevated SCC creation.\n- **FR-OPS-02:** The system must support HA control/data-plane replicas, leader election or sharding for singleton duties, disruption budgets and documented degraded behavior.",
       "parent": "EP-OPS",
       "requirements": [
         "FR-OPS-01",
@@ -1316,7 +1396,7 @@
       "id": "OPS-02",
       "type": "story",
       "title": "[falcone-serverless][OPS-02] Implement HA and the integration CI gate",
-      "body": "<!-- falcone-serverless:OPS-02 -->\n\n## User story\n\nAs a maintainer, I want to test the whole stack under failures, so that releases do not regress isolation or availability.\n\n## Description\n\nBuild real-stack CI plus multi-replica failover and GitOps workflows.\n\n## Acceptance criteria\n\n- [ ] Node/controller/router/worker restarts recover according to documented sync/async guarantees.\n- [ ] CI exercises real Keycloak, SeaweedFS, Kafka and Temporal rather than mocks alone.\n- [ ] GitOps updates use the public authority path and cannot overwrite newer generations or bypass validation.\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M2\n- Effort: L\n- Depends on: OPS-01, EVT-02, WF-02, TEN-02\n\n## Requirements\n\n- **FR-OPS-03:** The system must provide CI gates for API contracts, tenant isolation, runtime conformance, supply-chain policy and realistic integration tests with Keycloak, SeaweedFS, Kafka and Temporal.\n- **FR-OPS-04:** The system must submit function manifests through the authoritative Falcone API; keep PostgreSQL as desired-state authority and let one namespaced reconciler own standard worker-pool resources without custom Kubernetes resources.",
+      "body": "<!-- falcone-serverless:OPS-02 -->\n\n## User story\n\nAs a maintainer, I want to test the whole stack under failures, so that releases do not regress isolation or availability.\n\n## Description\n\nBuild real-stack CI plus multi-replica failover and GitOps workflows. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Node/controller/router/worker restarts recover according to documented sync/async guarantees.\n- [ ] CI exercises real Keycloak, SeaweedFS, Kafka and Temporal rather than mocks alone.\n- [ ] GitOps updates use the public authority path and cannot overwrite newer generations or bypass validation.\n- [ ] The real-stack CI suite includes an OCI function journey and an OCI authorization revocation test (ADR 0010).\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M2\n- Effort: L\n- Depends on: OPS-01, EVT-02, WF-02, TEN-02\n\n## Requirements\n\n- **FR-OPS-03:** The system must provide CI gates for API contracts, tenant isolation, runtime conformance, supply-chain policy and realistic integration tests with Keycloak, SeaweedFS, Kafka and Temporal.\n- **FR-OPS-04:** The system must submit function manifests through the authoritative Falcone API; keep PostgreSQL as desired-state authority and let one namespaced reconciler own standard worker-pool resources without custom Kubernetes resources.",
       "parent": "EP-OPS",
       "requirements": [
         "FR-OPS-03",
@@ -1342,7 +1422,7 @@
       "id": "OPS-03",
       "type": "story",
       "title": "[falcone-serverless][OPS-03] Prove restore, upgrades and safe uninstall",
-      "body": "<!-- falcone-serverless:OPS-03 -->\n\n## User story\n\nAs a SRE, I want to recover and upgrade the platform, so that operations do not destroy accepted work or rollback options.\n\n## Description\n\nCreate tested recovery points, compatibility gates and operator runbooks.\n\n## Acceptance criteria\n\n- [ ] Restore into a clean cluster reconciles resource ownership and pending invocations; measured RPO/RTO are recorded.\n- [ ] Upgrade/rollback tests cover data-format compatibility and refuse unsafe downgrades.\n- [ ] Default uninstall retains data; deletion requires explicit scoped intent and verified ownership.\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M3\n- Effort: L\n- Depends on: OPS-02, TEN-03, DEP-03\n\n## Requirements\n\n- **FR-OPS-05:** The system must provide backup/restore and disaster-recovery procedures covering PostgreSQL, SeaweedFS, broker state, secret references and runtime reconstruction, with measured RPO/RTO.\n- **FR-OPS-06:** The system must support compatible upgrades, schema evolution, rollback or forward-repair boundaries, installation preflight and retain-by-default uninstall.",
+      "body": "<!-- falcone-serverless:OPS-03 -->\n\n## User story\n\nAs a SRE, I want to recover and upgrade the platform, so that operations do not destroy accepted work or rollback options.\n\n## Description\n\nCreate tested recovery points, compatibility gates and operator runbooks. Risk: R3 (host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Restore into a clean cluster reconciles resource ownership and pending invocations; measured RPO/RTO are recorded.\n- [ ] Upgrade/rollback tests cover data-format compatibility and refuse unsafe downgrades.\n- [ ] Default uninstall retains data; deletion requires explicit scoped intent and verified ownership.\n- [ ] Restore covers the base catalog, OCI authorization records and intake-mirror references (ADR 0010).\n\n## Planning\n\n- Parent: EP-OPS\n- Phase: M3\n- Effort: L\n- Depends on: OPS-02, TEN-03, DEP-03\n\n## Requirements\n\n- **FR-OPS-05:** The system must provide backup/restore and disaster-recovery procedures covering PostgreSQL, SeaweedFS, broker state, secret references and runtime reconstruction, with measured RPO/RTO.\n- **FR-OPS-06:** The system must support compatible upgrades, schema evolution, rollback or forward-repair boundaries, installation preflight and retain-by-default uninstall.",
       "parent": "EP-OPS",
       "requirements": [
         "FR-OPS-05",
@@ -1367,7 +1447,7 @@
       "id": "EP-MIG",
       "type": "epic",
       "title": "[falcone-serverless][EP-MIG] Compatibility and Knative retirement",
-      "body": "<!-- falcone-serverless:EP-MIG -->\n\n## Goal\n\nReplace the runtime incrementally with evidence of Falcone contract parity.\n\n## Stories\n\n- MIG-01 \u2014 Freeze Falcone contracts and accept Option A architecture\n- MIG-02 \u2014 Implement backend selection and staged tenant migration\n- MIG-03 \u2014 Certify Wasm compatibility and retire owned Knative resources\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
+      "body": "<!-- falcone-serverless:EP-MIG -->\n\n## Goal\n\nReplace the runtime incrementally with evidence of Falcone contract parity; Wasm by default, OCI where authorized.\n\n## Stories\n\n- MIG-01 \u2014 Freeze Falcone contracts and accept Option A architecture\n- MIG-02 \u2014 Implement backend selection and staged tenant migration\n- MIG-03 \u2014 Certify Wasm compatibility and retire owned Knative resources\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
       "parent": null,
       "labels": [
         "falcone-serverless",
@@ -1379,7 +1459,7 @@
       "id": "MIG-01",
       "type": "story",
       "title": "[falcone-serverless][MIG-01] Freeze Falcone contracts and accept Option A architecture",
-      "body": "<!-- falcone-serverless:MIG-01 -->\n\n## User story\n\nAs a maintainer, I want to record the exact replacement boundary, so that the implementation solves the real integration problem.\n\n## Description\n\nRecord the user-selected Wasm-only tenant execution direction, scope changes and migration blockers.\n\n## Acceptance criteria\n\n- [ ] Inventory marks each Falcone contract observed, source-defined or proposed and explicitly excludes raw Knative compatibility.\n- [ ] The ADR records 20 tenants, 10,000 deployed functions, 100,000 mostly WebSocket/event messages/second, no admin sandbox and Falcone-owned quotas.\n- [ ] Existing source dependencies are classified before any migration; API compatibility never disguises an unsupported execution environment.\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M0\n- Effort: M\n- Depends on: None\n\n## Requirements\n\n- **FR-MIG-01:** The system must freeze Falcone API/URL/data/authorization/execution contracts and classify existing functions by Wasm language/package compatibility; exclude raw Knative APIs and URLs from the replacement scope.\n- **FR-MIG-02:** The system must record the accepted Option A decision and supersede native tenant-container, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification.",
+      "body": "<!-- falcone-serverless:MIG-01 -->\n\n## User story\n\nAs a maintainer, I want to record the exact replacement boundary, so that the implementation solves the real integration problem.\n\n## Description\n\nRecord the user-selected Wasm-default tenant execution direction, the superadmin-authorized OCI mode of ADR 0010, scope changes and migration blockers. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Inventory marks each Falcone contract observed, source-defined or proposed and explicitly excludes raw Knative compatibility.\n- [ ] The ADR records 20 tenants, 10,000 deployed functions, 100,000 mostly WebSocket/event messages/second, no admin sandbox and Falcone-owned quotas.\n- [ ] Existing source dependencies are classified before any migration; API compatibility never disguises an unsupported execution environment.\n- [ ] The ADR scope note cites ADR 0010; classification records a Wasm verdict and an OCI verdict for each function.\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M0\n- Effort: M\n- Depends on: None\n\n## Requirements\n\n- **FR-MIG-01:** The system must freeze Falcone API/URL/data/authorization/execution contracts and classify existing functions by Wasm language/package compatibility; exclude raw Knative APIs and URLs from the replacement scope.\n- **FR-MIG-02:** The system must record the accepted Option A decision as amended by ADR 0010 (superadmin-authorized OCI mode and base catalog); supersede silent native-fallback, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification.",
       "parent": "EP-MIG",
       "requirements": [
         "FR-MIG-01",
@@ -1400,7 +1480,7 @@
       "id": "MIG-02",
       "type": "story",
       "title": "[falcone-serverless][MIG-02] Implement backend selection and staged tenant migration",
-      "body": "<!-- falcone-serverless:MIG-02 -->\n\n## User story\n\nAs a platform operator, I want to move selected workloads between backends, so that I can evaluate the new runtime with a rollback path.\n\n## Description\n\nAdd backend drivers and generation-fenced route/trigger ownership.\n\n## Acceptance criteria\n\n- [ ] One public function identity can switch backend while keeping URLs, permissions and history.\n- [ ] At every cutover point only one backend owns production trigger delivery; non-idempotent traffic is never shadow-executed.\n- [ ] A failed canary can return to a retained compatible backend, with in-flight work drained or explicitly reconciled.\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M3\n- Effort: L\n- Depends on: DEP-02, WF-02, EVT-02, API-03\n\n## Requirements\n\n- **FR-MIG-03:** The system must implement interchangeable Knative and native backend adapters with per-resource backend selection and exactly one active traffic/trigger owner.\n- **FR-MIG-04:** The system must preserve public identifiers, URLs, permissions, versions and activation history during migration; never double-execute side-effecting shadow traffic.",
+      "body": "<!-- falcone-serverless:MIG-02 -->\n\n## User story\n\nAs a platform operator, I want to move selected workloads between backends, so that I can evaluate the new runtime with a rollback path.\n\n## Description\n\nAdd backend drivers and generation-fenced route/trigger ownership. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] One public function identity can switch backend while keeping URLs, permissions and history.\n- [ ] At every cutover point only one backend owns production trigger delivery; non-idempotent traffic is never shadow-executed.\n- [ ] A failed canary can return to a retained compatible backend, with in-flight work drained or explicitly reconciled.\n- [ ] Backend selection targets OCI mode only by explicit choice through the guard, which requires an oci-candidate verdict and an OCI-authorized project (ADR 0010).\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M3\n- Effort: L\n- Depends on: DEP-02, WF-02, EVT-02, API-03\n\n## Requirements\n\n- **FR-MIG-03:** The system must implement interchangeable Knative and native backend adapters with per-resource backend selection, an explicit target runtime mode and exactly one active traffic/trigger owner.\n- **FR-MIG-04:** The system must preserve public identifiers, URLs, permissions, versions and activation history during migration; never double-execute side-effecting shadow traffic.",
       "parent": "EP-MIG",
       "requirements": [
         "FR-MIG-03",
@@ -1426,7 +1506,7 @@
       "id": "MIG-03",
       "type": "story",
       "title": "[falcone-serverless][MIG-03] Certify Wasm compatibility and retire owned Knative resources",
-      "body": "<!-- falcone-serverless:MIG-03 -->\n\n## User story\n\nAs a platform owner, I want to remove Knative after proven compatibility, so that Falcone no longer requires its serving stack.\n\n## Description\n\nQualify actual existing workloads and retire only after all consumers have a supported execution path.\n\n## Acceptance criteria\n\n- [ ] All mandatory public contracts and all in-scope migrated function/package cases pass; unsupported workloads remain explicit cutover blockers.\n- [ ] WebSockets, guest isolation, long-job checkpoint/recovery and any deployed MCP journeys pass; expected SLOs are measured rather than assumed.\n- [ ] No live workload or workflow pin depends on Knative; only proven-owned removable resources are retired through the authorized lifecycle path.\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M3\n- Effort: L\n- Depends on: MIG-02, INV-03, OPS-03, TEN-03, JOB-03, WAS-03\n\n## Requirements\n\n- **FR-MIG-05:** The system must validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration.\n- **FR-MIG-06:** The system must retire Knative/Kourier only after a dependency inventory is empty, in-flight and retained-workflow references are resolved, rollback policy is met and resource ownership is verified.",
+      "body": "<!-- falcone-serverless:MIG-03 -->\n\n## User story\n\nAs a platform owner, I want to remove Knative after proven compatibility, so that Falcone no longer requires its serving stack.\n\n## Description\n\nQualify actual existing workloads and retire only after all consumers have a supported execution path. Risk: R3 (tenant isolation).\n\n## Acceptance criteria\n\n- [ ] All mandatory public contracts and all in-scope migrated function/package cases pass; unsupported workloads remain explicit cutover blockers.\n- [ ] WebSockets, guest isolation, long-job checkpoint/recovery and any deployed MCP journeys pass; expected SLOs are measured rather than assumed.\n- [ ] No live workload or workflow pin depends on Knative; only proven-owned removable resources are retired through the authorized lifecycle path.\n- [ ] Certification and retirement count OCI-migrated workloads; workloads without a candidate verdict in either mode remain blockers (ADR 0010).\n\n## Planning\n\n- Parent: EP-MIG\n- Phase: M3\n- Effort: L\n- Depends on: MIG-02, INV-03, OPS-03, TEN-03, JOB-03, WAS-03\n\n## Requirements\n\n- **FR-MIG-05:** The system must validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration, and move a workload to OCI mode only by explicit choice with an oci-candidate verdict in an authorized project.\n- **FR-MIG-06:** The system must retire Knative/Kourier only after a dependency inventory is empty, in-flight and retained-workflow references are resolved, rollback policy is met and resource ownership is verified.",
       "parent": "EP-MIG",
       "requirements": [
         "FR-MIG-05",
@@ -1466,7 +1546,7 @@
       "id": "WAS-01",
       "type": "story",
       "title": "[falcone-serverless][WAS-01] Prove restricted OpenShift execution feasibility",
-      "body": "<!-- falcone-serverless:WAS-01 -->\n\n## User story\n\nAs a platform engineer, I want to validate Wasmtime under existing corporate policies, so that implementation starts from a deployable foundation.\n\n## Description\n\nBuild a minimal disposable qualification fixture and collect actual admission/runtime evidence.\n\n## Acceptance criteria\n\n- [ ] The deployment identity can install the fixture and execute/interrupt a guest without cluster-scoped writes, elevated SCC or custom RuntimeClass.\n- [ ] Compile/load behavior, executable-memory needs, arbitrary UID, read-only filesystem and temporary storage work under the actual policy; failures are reported without escalation or native fallback.\n- [ ] The exact OpenShift/Kubernetes versions and available namespaced permissions are recorded; absent access means unverified, not passed.\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M0\n- Effort: L\n- Depends on: MIG-01\n\n## Requirements\n\n- **FR-WAS-01:** The system must demonstrate Wasmtime startup, guest execution, interruption and compilation under the existing OpenShift SCC and namespace identity without additional administrator privileges.\n- **FR-WAS-02:** The system must pin engine, architecture, WASI interface and compiler versions; test qualified Kubernetes 1.37/1.36 lines and the exact OpenShift 4.20 patch reported by the operator, without assuming CRI-O patch numbers identify Kubernetes patches.",
+      "body": "<!-- falcone-serverless:WAS-01 -->\n\n## User story\n\nAs a platform engineer, I want to validate Wasmtime under existing corporate policies, so that implementation starts from a deployable foundation.\n\n## Description\n\nBuild a minimal disposable qualification fixture and collect actual admission/runtime evidence. Risk: R3 (sandbox, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] The deployment identity can install the fixture and execute/interrupt a guest without cluster-scoped writes, elevated SCC or custom RuntimeClass.\n- [ ] Compile/load behavior, executable-memory needs, arbitrary UID, read-only filesystem and temporary storage work under the actual policy; failures are reported without escalation or native fallback.\n- [ ] The exact OpenShift/Kubernetes versions and available namespaced permissions are recorded; absent access means unverified, not passed.\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M0\n- Effort: L\n- Depends on: MIG-01\n\n## Requirements\n\n- **FR-WAS-01:** The system must demonstrate Wasmtime startup, guest execution, interruption and compilation under the existing OpenShift SCC and namespace identity without additional administrator privileges.\n- **FR-WAS-02:** The system must pin engine, architecture, WASI interface and compiler versions; test qualified Kubernetes 1.37/1.36 lines and the exact OpenShift 4.20 patch reported by the operator, without assuming CRI-O patch numbers identify Kubernetes patches.",
       "parent": "EP-WAS",
       "requirements": [
         "FR-WAS-01",
@@ -1489,7 +1569,7 @@
       "id": "WAS-02",
       "type": "story",
       "title": "[falcone-serverless][WAS-02] Specify host capabilities and safe artifact loading",
-      "body": "<!-- falcone-serverless:WAS-02 -->\n\n## User story\n\nAs a security engineer, I want to control every sandbox escape hatch, so that tenant modules have only explicitly granted authority.\n\n## Description\n\nDefine the WIT/host API contract, invocation capability context and bounded compiler/cache path.\n\n## Acceptance criteria\n\n- [ ] Deny-by-default import tests and scope-bound storage/event/workflow/HTTP capability tests pass.\n- [ ] Tenant-provided native precompiled caches and arbitrary host-call implementations are rejected; only trusted locally generated caches are loaded.\n- [ ] Compiler CPU/memory limits, guest/host buffer limits and cancellation boundaries are part of the contract and have executable fixtures.\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M1\n- Effort: L\n- Depends on: WAS-01\n\n## Requirements\n\n- **FR-WAS-03:** The system must define versioned, capability-controlled Falcone storage, HTTP, event and workflow host interfaces; deny undeclared imports and ambient filesystem/network authority.\n- **FR-WAS-04:** The system must keep untrusted raw Wasm validation, bounded compilation and trusted native cache generation separate; never deserialize a tenant-supplied native compiled artifact.",
+      "body": "<!-- falcone-serverless:WAS-02 -->\n\n## User story\n\nAs a security engineer, I want to control every sandbox escape hatch, so that tenant modules have only explicitly granted authority.\n\n## Description\n\nDefine the WIT/host API contract, invocation capability context and bounded compiler/cache path. Risk: R3 (sandbox, host capabilities, tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Deny-by-default import tests and scope-bound storage/event/workflow/HTTP capability tests pass.\n- [ ] Tenant-provided native precompiled caches and arbitrary host-call implementations are rejected; only trusted locally generated caches are loaded.\n- [ ] Compiler CPU/memory limits, guest/host buffer limits and cancellation boundaries are part of the contract and have executable fixtures.\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M1\n- Effort: L\n- Depends on: WAS-01\n\n## Requirements\n\n- **FR-WAS-03:** The system must define versioned, capability-controlled Falcone storage, HTTP, event and workflow host interfaces; deny undeclared imports and ambient filesystem/network authority.\n- **FR-WAS-04:** The system must keep untrusted raw Wasm validation, bounded compilation and trusted native cache generation separate; never deserialize a tenant-supplied native compiled artifact.",
       "parent": "EP-WAS",
       "requirements": [
         "FR-WAS-03",
@@ -1512,7 +1592,7 @@
       "id": "WAS-03",
       "type": "story",
       "title": "[falcone-serverless][WAS-03] Qualify language profiles and legacy compatibility",
-      "body": "<!-- falcone-serverless:WAS-03 -->\n\n## User story\n\nAs a function developer, I want to know which code and packages are supported, so that I can deploy without hidden compatibility changes.\n\n## Description\n\nTest representative legacy JavaScript, real Python analysis dependencies and Go modules before enabling a profile.\n\n## Acceptance criteria\n\n- [ ] Each enabled language has exact runtime/compiler/package versions, allowed interfaces, tested examples and unsupported-feature diagnostics.\n- [ ] The selected legacy JavaScript function and representative Python analysis pass expected results and dependency behavior; a failure blocks that profile or migration claim.\n- [ ] Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement.\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M1\n- Effort: L\n- Depends on: WAS-02\n\n## Requirements\n\n- **FR-WAS-05:** The system must publish exact JavaScript, Python and Go profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks unless a future separately reviewed capability explicitly supports them.\n- **FR-WAS-06:** The system must run adversarial guest and host-interface tests covering memory/CPU exhaustion, malformed artifacts, cross-tenant handles, denial of service and worker recovery, and retain security-review evidence.",
+      "body": "<!-- falcone-serverless:WAS-03 -->\n\n## User story\n\nAs a function developer, I want to know which code and packages are supported, so that I can deploy without hidden compatibility changes.\n\n## Description\n\nTest representative legacy JavaScript, real Python analysis dependencies and Go modules before enabling a profile. Risk: R3 (sandbox, host capabilities).\n\n## Acceptance criteria\n\n- [ ] Each enabled language has exact runtime/compiler/package versions, allowed interfaces, tested examples and unsupported-feature diagnostics.\n- [ ] The selected legacy JavaScript function and representative Python analysis pass expected results and dependency behavior; a failure blocks that profile or migration claim.\n- [ ] Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement.\n- [ ] Matrix entries reserve a catalog entry id; compatibility diagnostics may name OCI as an explicit alternative but never select it (ADR 0010).\n\n## Planning\n\n- Parent: EP-WAS\n- Phase: M1\n- Effort: L\n- Depends on: WAS-02\n\n## Requirements\n\n- **FR-WAS-05:** The system must publish exact JavaScript, Python and Go Wasm-mode profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks in mode=wasm unless a future separately reviewed capability explicitly supports them.\n- **FR-WAS-06:** The system must run adversarial guest and host-interface tests covering memory/CPU exhaustion, malformed artifacts, cross-tenant handles, denial of service and worker recovery, and retain security-review evidence.",
       "parent": "EP-WAS",
       "requirements": [
         "FR-WAS-05",
@@ -1547,7 +1627,7 @@
       "id": "JOB-01",
       "type": "story",
       "title": "[falcone-serverless][JOB-01] Implement asynchronous analysis jobs and checkpoint contracts",
-      "body": "<!-- falcone-serverless:JOB-01 -->\n\n## User story\n\nAs a data analyst, I want to save progress during extended executions, so that a pod restart does not require recomputing all completed work.\n\n## Description\n\nDefine job lifecycle, progress and explicit checkpoint/resume SDK contracts.\n\n## Acceptance criteria\n\n- [ ] Submission returns a durable job ID; progress and cancellation are scoped to the submitting tenant/workspace.\n- [ ] Checkpoint objects include revision/input/schema identifiers and cannot be written by a stale fenced attempt.\n- [ ] A sample analysis saves and reloads a checkpoint; an uncheckpointed job clearly reports that recovery restarts computation.\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M2\n- Effort: L\n- Depends on: WF-01, STO-01, RUN-02\n\n## Requirements\n\n- **FR-JOB-01:** The system must provide asynchronous job submission/status/progress APIs through Falcone with tenant-scoped cancellation and configurable duration limits separate from HTTP connection deadlines.\n- **FR-JOB-02:** The system must persist explicit application checkpoints in SeaweedFS with pinned revision, schema version, input digest and fenced attempt identity; never advertise transparent arbitrary-memory restoration.",
+      "body": "<!-- falcone-serverless:JOB-01 -->\n\n## User story\n\nAs a data analyst, I want to save progress during extended executions, so that a pod restart does not require recomputing all completed work.\n\n## Description\n\nDefine job lifecycle, progress and explicit checkpoint/resume SDK contracts. Risk: R3 (host capabilities).\n\n## Acceptance criteria\n\n- [ ] Submission returns a durable job ID; progress and cancellation are scoped to the submitting tenant/workspace.\n- [ ] Checkpoint objects include revision/input/schema identifiers and cannot be written by a stale fenced attempt.\n- [ ] A sample analysis saves and reloads a checkpoint; an uncheckpointed job clearly reports that recovery restarts computation.\n- [ ] OCI jobs report progress and checkpoints through the shim; `max_runtime` is set per profile and runtime mode (ADR 0010).\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M2\n- Effort: L\n- Depends on: WF-01, STO-01, RUN-02\n\n## Requirements\n\n- **FR-JOB-01:** The system must provide asynchronous job submission/status/progress APIs through Falcone with tenant-scoped cancellation and configurable duration limits separate from HTTP connection deadlines.\n- **FR-JOB-02:** The system must persist explicit application checkpoints in SeaweedFS with pinned revision, schema version, input digest and fenced attempt identity; never advertise transparent arbitrary-memory restoration.",
       "parent": "EP-JOB",
       "requirements": [
         "FR-JOB-01",
@@ -1572,7 +1652,7 @@
       "id": "JOB-02",
       "type": "story",
       "title": "[falcone-serverless][JOB-02] Recover and cancel analysis jobs through Temporal",
-      "body": "<!-- falcone-serverless:JOB-02 -->\n\n## User story\n\nAs a workflow author, I want to resume or stop analysis safely, so that long executions remain operable during failures.\n\n## Description\n\nCoordinate attempts, pins and checkpoints through existing Temporal Activities.\n\n## Acceptance criteria\n\n- [ ] Terminate a worker during a checkpoint-aware job and verify resumption from the last committed checkpoint with the same revision.\n- [ ] Retry ownership prevents nested retry storms; uncertain external effects are recorded and require application idempotency.\n- [ ] Cancellation tests cover compute loops and blocked host I/O, with a bounded process-termination fallback and explicit final status.\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M2\n- Effort: L\n- Depends on: JOB-01, WF-02\n\n## Requirements\n\n- **FR-JOB-03:** The system must resume checkpoint-aware jobs after worker/pod interruption using Temporal coordination and a single retry owner, with documented restart behavior for jobs without checkpoints.\n- **FR-JOB-04:** The system must propagate cancellation to guest computation and blocking host calls, record acknowledged/uncertain states and enforce profile-specific termination budgets without claiming side-effect rollback.",
+      "body": "<!-- falcone-serverless:JOB-02 -->\n\n## User story\n\nAs a workflow author, I want to resume or stop analysis safely, so that long executions remain operable during failures.\n\n## Description\n\nCoordinate attempts, pins and checkpoints through existing Temporal Activities. Risk: R3 (host capabilities).\n\n## Acceptance criteria\n\n- [ ] Terminate a worker during a checkpoint-aware job and verify resumption from the last committed checkpoint with the same revision.\n- [ ] Retry ownership prevents nested retry storms; uncertain external effects are recorded and require application idempotency.\n- [ ] Cancellation tests cover compute loops and blocked host I/O, with a bounded process-termination fallback and explicit final status.\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M2\n- Effort: L\n- Depends on: JOB-01, WF-02\n\n## Requirements\n\n- **FR-JOB-03:** The system must resume checkpoint-aware jobs after worker/pod interruption using Temporal coordination and a single retry owner, with documented restart behavior for jobs without checkpoints.\n- **FR-JOB-04:** The system must propagate cancellation to guest computation and blocking host calls, record acknowledged/uncertain states and enforce profile-specific termination budgets without claiming side-effect rollback.",
       "parent": "EP-JOB",
       "requirements": [
         "FR-JOB-03",
@@ -1596,7 +1676,7 @@
       "id": "JOB-03",
       "type": "story",
       "title": "[falcone-serverless][JOB-03] Qualify mixed interactive and long-running load",
-      "body": "<!-- falcone-serverless:JOB-03 -->\n\n## User story\n\nAs a SRE, I want to protect interactive work while analysis runs, so that batch jobs cannot monopolize shared capacity.\n\n## Description\n\nEstablish separate budgets and measure representative long-job performance and recovery.\n\n## Acceptance criteria\n\n- [ ] Run a declared hours-long analysis fixture with measured memory/CPU/checkpoint costs; no native dependency fallback occurs.\n- [ ] A mixed-load test enforces configured interactive and batch reservations and reports queueing when quotas are exhausted.\n- [ ] Worker scale-down respects jobs/checkpoints, and a failure exercise meets the agreed checkpoint-loss and recovery bounds.\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M3\n- Effort: L\n- Depends on: JOB-02, TEN-02, OBS-02\n\n## Requirements\n\n- **FR-JOB-05:** The system must reserve separate interactive and long-running capacity within Falcone quotas, enforce fair admission and include checkpoint/drain state in worker scale-down decisions.\n- **FR-JOB-06:** The system must benchmark representative hours-long, memory-intensive analysis and failure recovery, publishing wall time, CPU, memory, checkpoint overhead and restored progress on the supported runtime profile.",
+      "body": "<!-- falcone-serverless:JOB-03 -->\n\n## User story\n\nAs a SRE, I want to protect interactive work while analysis runs, so that batch jobs cannot monopolize shared capacity.\n\n## Description\n\nEstablish separate budgets and measure representative long-job performance and recovery. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).\n\n## Acceptance criteria\n\n- [ ] Run a declared hours-long analysis fixture with measured memory/CPU/checkpoint costs; no native dependency fallback occurs.\n- [ ] A mixed-load test enforces configured interactive and batch reservations and reports queueing when quotas are exhausted.\n- [ ] Worker scale-down respects jobs/checkpoints, and a failure exercise meets the agreed checkpoint-loss and recovery bounds.\n- [ ] The mixed-load test includes OCI pools drawing on the shared tenant slots (ADR 0010).\n\n## Planning\n\n- Parent: EP-JOB\n- Phase: M3\n- Effort: L\n- Depends on: JOB-02, TEN-02, OBS-02\n\n## Requirements\n\n- **FR-JOB-05:** The system must reserve separate interactive and long-running capacity within Falcone quotas, enforce fair admission and include checkpoint/drain state in worker scale-down decisions.\n- **FR-JOB-06:** The system must benchmark representative hours-long, memory-intensive analysis and failure recovery, publishing wall time, CPU, memory, checkpoint overhead and restored progress on the supported runtime profile.",
       "parent": "EP-JOB",
       "requirements": [
         "FR-JOB-05",
@@ -1615,6 +1695,429 @@
         "area:job",
         "phase:m3",
         "effort:l"
+      ]
+    },
+    {
+      "id": "EP-OCI",
+      "type": "epic",
+      "title": "[falcone-serverless][EP-OCI] OCI image execution mode",
+      "body": "<!-- falcone-serverless:EP-OCI -->\n\n## Goal\n\nLet authorized projects choose per function to run a catalog-derived OCI image in restricted pods, with Falcone-owned admission and no fallback.\n\n## Stories\n\n- OCI-01 \u2014 Authorize OCI mode per tenant and project\n- OCI-02 \u2014 Declare runtime mode and the OCI function contract\n- OCI-03 \u2014 Intake catalog-derived and BYO images\n- OCI-04 \u2014 Serve OCI invocations through a trusted shim\n- OCI-05 \u2014 Reconcile restricted single-revision OCI pools\n- OCI-06 \u2014 Give OCI functions capabilities without credentials\n- OCI-07 \u2014 Qualify OCI isolation and record the accepted risk\n- OCI-08 \u2014 Meter, limit and observe OCI execution\n- OCI-09 \u2014 Use OCI as the explicit migration path\n- OCI-10 \u2014 Develop and deploy OCI functions\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
+      "parent": null,
+      "labels": [
+        "falcone-serverless",
+        "type:epic",
+        "area:oci"
+      ]
+    },
+    {
+      "id": "OCI-01",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-01] Authorize OCI mode per tenant and project",
+      "body": "<!-- falcone-serverless:OCI-01 -->\n\n## User story\n\nAs a platform superadmin, I want to authorize none, all or selected projects of a tenant for OCI mode, so that only approved projects can run container functions.\n\n## Description\n\nAdd the superadmin-only OCI authorization (ctr-oci-authorization) that Falcone admission enforces, with revocation drain, BYO flags and an acknowledged residual-risk version. A project is a Falcone workspace. Risk: R3 (tenant isolation and authorization).\n\n## Acceptance criteria\n\n- [ ] Only the superadmin role can read and write the setting; tenant admins see the effective state read-only, and persona tests deny every other role.\n- [ ] Deploy, promotion and every admission path (sync, async, events, Temporal, jobs, retries) reject `oci` for unauthorized projects with `oci_not_authorized`; the Wasm path is unaffected.\n- [ ] Revocation drains in an fs-test run: new OCI deploys and promotions are denied at once, new invocations are denied after the superadmin-chosen grace window, in-flight attempts finish within the drain budget or are cancelled, queued work fails non-retryable, triggers pause, and pools are dematerialized while revisions and images are retained; re-authorization restores service.\n- [ ] Every change emits an audit event with actor, before/after state, grace window and the acknowledged residual-risk text version.\n- [ ] ADR 0010 is recorded.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: MIG-01, SEC-01, TEN-01, SEC-03\n\n## Requirements\n\n- **FR-OCI-01:** The system must let only the platform superadmin authorize OCI mode per tenant for none, all or selected projects (workspaces); enforce it at deploy, promotion and every admission path, audit each change with the acknowledged residual-risk version, and drain OCI work when authorization is revoked.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-01"
+      ],
+      "dependencies": [
+        "MIG-01",
+        "SEC-01",
+        "TEN-01",
+        "SEC-03"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-02",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-02] Declare runtime mode and the OCI function contract",
+      "body": "<!-- falcone-serverless:OCI-02 -->\n\n## User story\n\nAs a function author, I want to choose `wasm` or `oci` in my manifest, so that each function runs in the mode it needs.\n\n## Description\n\nAdd `runtime.mode` to the manifest and revision, and define ctr-oci-function-contract v1 (`POST /invoke`, `GET /healthz`, `$PORT`, the legacy-compatible envelope, signals and filesystem rules). Risk: R3 (defines the tenant-code boundary).\n\n## Acceptance criteria\n\n- [ ] The manifest and Functions API accept `runtime.mode`, defaulting to `wasm`; a mode or base change creates a new revision, and no automatic mode switch exists anywhere.\n- [ ] ctr-oci-function-contract v1 (`/invoke`, `/healthz`, `$PORT`, envelope, signals, filesystem) has a conformance tester.\n- [ ] The revision records the mode, `base` as a tagged union: `{kind: catalog, id@version, digest}` or `{kind: byo, image digest, signer identity, attestation ref}`, the function image digest, and the contract and shim versions.\n- [ ] Validation before any write rejects `runtime.mode: oci` in a project without OCI authorization, a `kind: catalog` base that is absent, invisible or ineligible under the ADR 0010 D8 lifecycle rule, and a `kind: byo` base in a project without the superadmin BYO flag.\n- [ ] The Functions API facade and CLI accept `runtime.mode: oci` and a base in authorized projects, surface `oci_not_authorized` and base errors, and the legacy API fixtures pass in OCI mode.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: API-02, DEP-02, OCI-01, API-01\n\n## Requirements\n\n- **FR-OCI-02:** The system must accept an explicit per-function runtime.mode (wasm by default, or oci) recorded on the immutable revision, define a versioned OCI function container contract, and never switch a function between modes automatically.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-02"
+      ],
+      "dependencies": [
+        "API-02",
+        "DEP-02",
+        "OCI-01",
+        "API-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-03",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-03] Intake catalog-derived and BYO images",
+      "body": "<!-- falcone-serverless:OCI-03 -->\n\n## User story\n\nAs a platform operator, I want to have every function image verified and mirrored by digest, so that only known images reach nodes.\n\n## Description\n\nImplement three image paths: P1, assembled by the trusted image assembler onto a catalog base by pure layer assembly; P2, built externally FROM a catalog base digest, with layer-ancestry verification; and P3, BYO images (`base.kind: byo`) only for superadmin-flagged projects. Catalog-membership and ancestry checks apply only to P1 and P2. Every image is copied by digest into the platform intake mirror, and kubelets pull only from there. Risk: R3 (artifact loading and supply chain).\n\n## Acceptance criteria\n\n- [ ] P1, P2 and P3 follow their verification rules: P1/P2 images must derive from a visible catalog base that is eligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions), and a `kind: byo` image requires the project's superadmin BYO flag, a valid signature against the project's registered keys, a platform-mirror copy and an advisory scan record, with the signer identity and attestation ref recorded; tag-only, wrong-platform, oversized, failed-ancestry and unsigned BYO images are rejected before any pod is rendered.\n- [ ] Intake never executes image content, and tenant registry credentials are never logged.\n- [ ] Mirror images are retained while referenced and collected only after reference checks; mirror bytes count against the tenant cap.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: OCI-02, CAT-01, CAT-05, DEP-03\n\n## Requirements\n\n- **FR-OCI-03:** The system must accept only digest-pinned OCI function images assembled or built FROM a visible catalog base, or BYO images (`base.kind: byo`) in superadmin-flagged projects with a valid signature and an advisory scan record; verify and copy each image into the platform intake mirror before any pod is rendered, without executing image content.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-03"
+      ],
+      "dependencies": [
+        "OCI-02",
+        "CAT-01",
+        "CAT-05",
+        "DEP-03"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-04",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-04] Serve OCI invocations through a trusted shim",
+      "body": "<!-- falcone-serverless:OCI-04 -->\n\n## User story\n\nAs an operator, I want to put a trusted component in front of tenant containers, so that admission, identity, limits and outcomes are enforced as in Wasm mode.\n\n## Description\n\nBuild the oci-shim sidecar that serves ctr-worker-execution-api for mode oci and forwards each attempt to the function container on a separate localhost port. The dispatcher\u2192shim channel is mutually authenticated TLS. The shim's per-pod identity is a certificate or projected token mounted only into the shim container; the pod sets `automountServiceAccountToken: false`, and the tenant container has no such volume. Because containers in a pod share the network namespace, the dispatcher verifies the shim identity before it sends any credential or request, and the shim\u2192container hop never carries the credential. Risk: R3 (execution boundary).\n\n## Acceptance criteria\n\n- [ ] The shim implements ctr-worker-execution-api for mode `oci` over mutually authenticated TLS, verifies the dispatcher identity and enforces concurrency and deadlines; the dispatcher verifies the shim's per-pod identity before sending any credential or request, and no identity material is mounted into the tenant container.\n- [ ] Cancel goes to the container first, then to the liveness-restart fallback within a bounded time, with honest uncertain outcomes.\n- [ ] Progress and checkpoint relay passes the JOB-01 sample job; per-invocation logs reach the Falcone log intake, and pod-level container stdout and stderr are labelled by revision and tenant-scoped.\n- [ ] Adversarial test: a tenant container that binds the shim port first, or answers on it, causes the dispatcher to refuse delivery and record an audit or security event, and no credential is leaked.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: RUN-01, SEC-01, OCI-02, JOB-01\n\n## Requirements\n\n- **FR-OCI-04:** The system must serve OCI invocations through a trusted shim that implements the worker execution API over mutually authenticated TLS with a per-pod shim identity mounted only into the shim container, verifies the dispatcher identity, enforces concurrency and deadlines and reports honest cancellation outcomes; the dispatcher verifies the shim identity before sending any credential or request, and the shim never forwards the execution credential to the tenant container.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-04"
+      ],
+      "dependencies": [
+        "RUN-01",
+        "SEC-01",
+        "OCI-02",
+        "JOB-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-05",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-05] Reconcile restricted single-revision OCI pools",
+      "body": "<!-- falcone-serverless:OCI-05 -->\n\n## User story\n\nAs an operator, I want to materialize OCI revisions on demand under restricted PSA, so that inventory does not become pods.\n\n## Description\n\nExtend the namespaced controller to render one Deployment and one headless Service per materialized OCI revision from ctr-oci-pod-template (non-root, read-only root filesystem, all capabilities dropped, seccomp RuntimeDefault, no service-account token). Risk: R3 (sandbox configuration and tenant isolation).\n\n## Acceptance criteria\n\n- [ ] The controller renders a Deployment and a headless Service per materialized revision only in the tenant's bound OCI namespace; its write set is unchanged.\n- [ ] A controller guard refuses any pod spec that deviates from ctr-oci-pod-template.\n- [ ] Scale from zero, idle dematerialization and restart convergence pass in fs-test; a 1,000-OCI-function inventory stays within the materialization cap.\n- [ ] Restricted posture assertions (SEC-02) run against rendered OCI pod templates, and the namespace resolver refuses OCI work for a tenant without an `oci_namespace` binding.\n- [ ] Admission routes OCI revisions to their materialized pool; preflight checks the OCI prerequisites (OCI namespace, pull Secret, NetworkPolicy enforcement) and blocks OCI mode when enforcement is absent; chart values render the shim, gateway, intake and assembler images and the pull-Secret reference only when the OCI section is enabled.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: DEP-03, INV-02, SEC-02, TEN-01, OCI-04, OPS-01, INV-01\n\n## Requirements\n\n- **FR-OCI-05:** The system must run OCI functions in single-revision restricted pods (non-root, read-only root filesystem, no service-account token) materialized on demand in the tenant's preprovisioned OCI namespace, with the controller's write set unchanged.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-05"
+      ],
+      "dependencies": [
+        "DEP-03",
+        "INV-02",
+        "SEC-02",
+        "TEN-01",
+        "OCI-04",
+        "OPS-01",
+        "INV-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-06",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-06] Give OCI functions capabilities without credentials",
+      "body": "<!-- falcone-serverless:OCI-06 -->\n\n## User story\n\nAs a function author, I want to use storage, events, workflows, secrets and HTTP through a local API, so that my container uses Falcone services safely.\n\n## Description\n\nAdd ctr-oci-capability-api in the shim, mirroring `falcone:host`, with opaque per-attempt handles, plus the per-namespace egress gateway and OCI-namespace NetworkPolicies. Risk: R3 (host capabilities, egress, secrets).\n\n## Acceptance criteria\n\n- [ ] Each capability works only during an attempt, with a valid handle, and is scoped from the credential.\n- [ ] Allow-listed HTTP succeeds through the egress gateway; direct internet, metadata, API-server and cross-namespace traffic are denied by NetworkPolicy.\n- [ ] Secrets arrive only as explicit narrow grants and are absent from environment variables, files, logs and images.\n- [ ] In OCI mode the shim holds the execution credential and presents it to the host storage, event and workflow APIs; capability calls are scoped by that credential and audited.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: SEC-03, STO-01, STO-02, EVT-01, WF-03, OCI-04\n\n## Requirements\n\n- **FR-OCI-06:** The system must give OCI functions storage, event, workflow, secret, logging and allow-listed HTTP access only through a localhost capability API and an egress gateway; keep the execution credential outside the tenant container and enforce OCI-namespace NetworkPolicies.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-06"
+      ],
+      "dependencies": [
+        "SEC-03",
+        "STO-01",
+        "STO-02",
+        "EVT-01",
+        "WF-03",
+        "OCI-04"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-07",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-07] Qualify OCI isolation and record the accepted risk",
+      "body": "<!-- falcone-serverless:OCI-07 -->\n\n## User story\n\nAs a security engineer, I want to gather adversarial evidence for OCI pods, so that the superadmin knows what they accept.\n\n## Description\n\nRun an adversarial isolation suite against OCI pods and keep the versioned residual-risk register that the authorization flow shows. OCI is enabled for no tenant before this evidence exists and preflight confirms NetworkPolicy enforcement. Risk: R3 (sandbox evidence).\n\n## Acceptance criteria\n\n- [ ] An fs-test suite covers privilege escalation, setuid, raw sockets, lateral and cross-tenant traffic, metadata, DNS enumeration, fork bomb, disk fill, OOM, CPU noisy neighbour and capability abuse outside attempts.\n- [ ] The residual-risk register (same kernel, restricted PSA, side channels, node patch ownership) is versioned and surfaced by OCI-01.\n- [ ] Optional `hostUsers: false` and AppArmor availability is recorded as evidence, never assumed.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: L\n- Depends on: OCI-05, OCI-06, SEC-02\n\n## Requirements\n\n- **FR-OCI-07:** The system must qualify OCI isolation with adversarial evidence before enabling OCI for any tenant, and publish a versioned residual-risk register covering the shared kernel, restricted PSA, side channels and node patch ownership.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-07"
+      ],
+      "dependencies": [
+        "OCI-05",
+        "OCI-06",
+        "SEC-02"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-08",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-08] Meter, limit and observe OCI execution",
+      "body": "<!-- falcone-serverless:OCI-08 -->\n\n## User story\n\nAs a platform administrator, I want to see per-mode usage and caps, so that OCI capacity is fair and explainable.\n\n## Description\n\nApply shared tenant slots plus OCI caps, record OCI usage and add the `runtime_mode` metric dimension. Risk: R2 (quota and metering, no boundary change).\n\n## Acceptance criteria\n\n- [ ] OCI executions consume tenant slots; caps on materialized revisions, warm replicas, pod memory, image bytes and builds are enforced across routers.\n- [ ] Usage records for pod-seconds, cold start, idle warm time and image storage reconcile with attempts.\n- [ ] Metrics carry `runtime_mode`; a benchmark reports image pull, pod start, init and probe separately against the provisional OCI targets (cold p95 \u226410 s for a node-cached image under 250 MB; warm platform overhead p95 \u226425 ms).\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M3\n- Effort: L\n- Depends on: TEN-02, OBS-02, OBS-03, OCI-05\n\n## Requirements\n\n- **FR-OCI-08:** The system must charge OCI executions against the shared tenant execution slots plus OCI caps on materialized revisions, warm replicas, pod memory, image bytes and builds, and record per-mode usage and metrics.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-08"
+      ],
+      "dependencies": [
+        "TEN-02",
+        "OBS-02",
+        "OBS-03",
+        "OCI-05"
+      ],
+      "phase": "M3",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m3",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "OCI-09",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-09] Use OCI as the explicit migration path",
+      "body": "<!-- falcone-serverless:OCI-09 -->\n\n## User story\n\nAs a platform operator, I want to move legacy functions that fail Wasm qualification to OCI only by explicit choice, so that Knative can retire without hidden fallback.\n\n## Description\n\nExtend migration classification and the backend guard with per-mode verdicts and an explicit target mode. Risk: R2 (migration control in Falcone).\n\n## Acceptance criteria\n\n- [ ] Classification records the wasm and oci verdicts and the target_mode.\n- [ ] The MIG-02 guard allows target `oci` only with an oci-candidate verdict and an authorized project; otherwise the function stays a blocker.\n- [ ] MIG-03 retirement counts OCI-migrated workloads and lists remaining blockers.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M3\n- Effort: M\n- Depends on: MIG-01, MIG-02, OCI-01, OCI-03\n\n## Requirements\n\n- **FR-OCI-09:** The system must offer OCI as an explicit migration target only for workloads with an oci-candidate verdict in an authorized project, and keep workloads without a candidate verdict in either mode as Knative retirement blockers.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-09"
+      ],
+      "dependencies": [
+        "MIG-01",
+        "MIG-02",
+        "OCI-01",
+        "OCI-03"
+      ],
+      "phase": "M3",
+      "effort": "M",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m3",
+        "effort:m"
+      ]
+    },
+    {
+      "id": "OCI-10",
+      "type": "story",
+      "title": "[falcone-serverless][OCI-10] Develop and deploy OCI functions",
+      "body": "<!-- falcone-serverless:OCI-10 -->\n\n## User story\n\nAs a developer, I want to use CLI, console and starter support for OCI, so that I can build FROM a catalog base and test locally.\n\n## Description\n\nAdd OCI options to the CLI and console, an OCI starter and documentation of the OCI semantics. Risk: R1 (developer experience).\n\n## Acceptance criteria\n\n- [ ] CLI and console show mode, base, intake status and the warm-reuse notice; OCI options appear only in authorized projects.\n- [ ] A starter shows P1 and P2 (`FROM <catalog digest>`) and runs the contract tester locally.\n- [ ] Docs state the OCI semantics and that Wasm stays the default.\n\n## Planning\n\n- Parent: EP-OCI\n- Phase: M2\n- Effort: M\n- Depends on: API-01, API-02, API-03, OCI-02\n\n## Requirements\n\n- **FR-OCI-10:** The system must provide CLI, console, starter and documentation support for OCI functions, including the warm-reuse notice, and show OCI options only in authorized projects.",
+      "parent": "EP-OCI",
+      "requirements": [
+        "FR-OCI-10"
+      ],
+      "dependencies": [
+        "API-01",
+        "API-02",
+        "API-03",
+        "OCI-02"
+      ],
+      "phase": "M2",
+      "effort": "M",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:oci",
+        "phase:m2",
+        "effort:m"
+      ]
+    },
+    {
+      "id": "EP-CAT",
+      "type": "epic",
+      "title": "[falcone-serverless][EP-CAT] Superadmin base image catalog",
+      "body": "<!-- falcone-serverless:EP-CAT -->\n\n## Goal\n\nKeep one global, audited catalog of Wasm profile components and OCI base images that functions build on and revisions pin.\n\n## Stories\n\n- CAT-01 \u2014 Model the global catalog with visibility\n- CAT-02 \u2014 Select existing bases\n- CAT-03 \u2014 Create bases from recipes\n- CAT-04 \u2014 Manage base lifecycle and versions\n- CAT-05 \u2014 Use catalog bases in functions and revisions\n- CAT-06 \u2014 Superadmin catalog console\n\n## Completion\n\nAll child acceptance criteria and linked requirements pass on the agreed support matrix.\n",
+      "parent": null,
+      "labels": [
+        "falcone-serverless",
+        "type:epic",
+        "area:cat"
+      ]
+    },
+    {
+      "id": "CAT-01",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-01] Model the global catalog with visibility",
+      "body": "<!-- falcone-serverless:CAT-01 -->\n\n## User story\n\nAs a platform superadmin, I want to keep one catalog with tenant/project visibility, so that I control which bases each tenant can use.\n\n## Description\n\nDefine ctr-base-catalog v1 and its Falcone-owned persistence for both entry kinds (`wasm-profile` and `oci-base`). Risk: R3 (controls code that runs in all tenants).\n\n## Acceptance criteria\n\n- [ ] Entries hold kind, name@version, digest, source, verification record, status, window, replacement, visibility and defaults; versions are immutable.\n- [ ] Only the superadmin mutates entries; reads are filtered by visibility, so no tenant learns of invisible entries.\n- [ ] Every mutation emits an audit event.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M2\n- Effort: L\n- Depends on: SEC-01, TEN-01\n\n## Requirements\n\n- **FR-CAT-01:** The system must maintain one global, superadmin-managed base catalog of Wasm profile components and OCI base images with immutable name@version entries bound to one digest and visibility filtered by tenant and project.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-01"
+      ],
+      "dependencies": [
+        "SEC-01",
+        "TEN-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "CAT-02",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-02] Select existing bases",
+      "body": "<!-- falcone-serverless:CAT-02 -->\n\n## User story\n\nAs a platform superadmin, I want to register a base by digest-pinned reference, so that vetted upstream images and components can be used.\n\n## Description\n\nRegister Wasm components through artifact validation and OCI bases through image intake into the mirror. Signature verification is optional per entry, and its result is recorded and shown. Risk: R3 (artifact loading).\n\n## Acceptance criteria\n\n- [ ] A tag resolves to a digest once and is stored as that digest.\n- [ ] Wasm components pass artifact validation; OCI bases pass intake; optional signature and provenance results are recorded.\n- [ ] A Wasm base is enabled only with WAS-03 qualification evidence for its profile.\n- [ ] Registered Wasm components are stored by digest under the `catalog-base` retention class, and each matrix-qualified WAS-03 profile is registered as a catalog Wasm entry.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M2\n- Effort: L\n- Depends on: CAT-01, WAS-02, WAS-03, OCI-03, STO-01\n\n## Requirements\n\n- **FR-CAT-02:** The system must let the superadmin register existing bases by digest-pinned reference after artifact validation or image intake, record optional signature and provenance results, and enable a Wasm base only with profile qualification evidence.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-02"
+      ],
+      "dependencies": [
+        "CAT-01",
+        "WAS-02",
+        "WAS-03",
+        "OCI-03",
+        "STO-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "CAT-03",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-03] Create bases from recipes",
+      "body": "<!-- falcone-serverless:CAT-03 -->\n\n## User story\n\nAs a platform superadmin, I want to build a base from a recipe through the trusted build service, so that bases are reproducible.\n\n## Description\n\nDefine ctr-base-recipe v1: a Wasm toolchain/profile spec, and a declarative OCI spec without RUN (FROM a registered digest, layers from approved refs, packages from a pinned repository without maintainer scripts, ENV, numeric non-root USER, WORKDIR, ENTRYPOINT/CMD, LABEL). Risk: R3 (trusted build path).\n\n## Acceptance criteria\n\n- [ ] ctr-base-recipe v1 covers the Wasm toolchain/profile spec and the declarative no-RUN OCI spec; RUN is rejected.\n- [ ] Builds run in confined trusted builders with build credentials and produce SBOM and provenance.\n- [ ] Results land as draft entries until verification and qualification pass.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M2\n- Effort: L\n- Depends on: CAT-01, DEP-01\n\n## Requirements\n\n- **FR-CAT-03:** The system must let the superadmin create bases from versioned recipes built by confined trusted builders with SBOM and provenance, and reject RUN steps in OCI recipes in v1.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-03"
+      ],
+      "dependencies": [
+        "CAT-01",
+        "DEP-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "CAT-04",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-04] Manage base lifecycle and versions",
+      "body": "<!-- falcone-serverless:CAT-04 -->\n\n## User story\n\nAs a platform superadmin, I want to enable, disable, deprecate and set defaults for bases, so that I can patch bases without breaking functions silently.\n\n## Description\n\nImplement the lifecycle draft \u2192 enabled \u2192 deprecated (window end, replacement) \u2192 retired, plus disabled with optional `block_invocations`, with a provisional 90-day default deprecation window. Risk: R2 (product lifecycle; the block path is reviewed under CAT-05).\n\n## Acceptance criteria\n\n- [ ] The lifecycle state machine is enforced for `base.kind: catalog` revisions in both runtime modes (Wasm profile and OCI base entries) at deploy, promotion and, for `block_invocations`, invoke; deprecation and retirement do not apply to BYO revisions. Base eligibility follows the lifecycle: a new function, or a function switching base, needs an `enabled` base visible to the project; a new revision of a function already pinned to a base may keep that base while it is `deprecated`, until `window_end`; `retired` and `disabled` bases are refused for new revisions, and `disabled` with `block_invocations` also denies invocations of pinned revisions (`base_disabled`).\n- [ ] There is no auto-rebase; a replacement creates candidate revisions that owners must promote.\n- [ ] The default alias always targets an `enabled` base and is resolved and pinned at deploy.\n- [ ] Lifecycle tests: a grandfathered new revision of a function pinned to a deprecated base is accepted before `window_end` and refused after it; a new function selecting a deprecated base is refused.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M3\n- Effort: M\n- Depends on: CAT-01, DEP-02\n\n## Requirements\n\n- **FR-CAT-04:** The system must enforce the base lifecycle (draft, enabled, deprecated, retired, and disabled with optional invocation blocking) and default aliases without ever rebasing a revision automatically; in both runtime modes, a new function or a base switch needs an enabled base, a deprecated base stays eligible only for new revisions of functions already pinned to it until its window end, and retired and disabled bases are refused for new revisions.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-04"
+      ],
+      "dependencies": [
+        "CAT-01",
+        "DEP-02"
+      ],
+      "phase": "M3",
+      "effort": "M",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m3",
+        "effort:m"
+      ]
+    },
+    {
+      "id": "CAT-05",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-05] Use catalog bases in functions and revisions",
+      "body": "<!-- falcone-serverless:CAT-05 -->\n\n## User story\n\nAs a developer, I want to pick a base or get my mode's default, so that my builds are reproducible.\n\n## Description\n\nResolve the selected base, or the per-mode and per-language default alias, at deploy and pin it on the revision; admission enforces visibility, lifecycle eligibility and OCI authorization. Risk: R3 (cross-tenant authorization).\n\n## Acceptance criteria\n\n- [ ] The manifest selects a catalog base or gets the default; revisions with `base.kind: catalog` pin id@version and digest, and a `kind: byo` revision never requires a catalog base.\n- [ ] Admission rejects a catalog base that is absent, invisible or ineligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions), in both runtime modes,\n- [ ] The worker refuses a Wasm revision whose profile component digest differs from its pin.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M2\n- Effort: L\n- Depends on: CAT-01, API-02, DEP-01, OCI-01\n\n## Requirements\n\n- **FR-CAT-05:** The system must pin the selected or default catalog base by id@version and digest on every revision with `base.kind: catalog`, and reject absent, invisible, lifecycle-ineligible or unauthorized catalog bases at deploy, promotion and invoke; BYO revisions need no catalog base.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-05"
+      ],
+      "dependencies": [
+        "CAT-01",
+        "API-02",
+        "DEP-01",
+        "OCI-01"
+      ],
+      "phase": "M2",
+      "effort": "L",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m2",
+        "effort:l"
+      ]
+    },
+    {
+      "id": "CAT-06",
+      "type": "story",
+      "title": "[falcone-serverless][CAT-06] Superadmin catalog console",
+      "body": "<!-- falcone-serverless:CAT-06 -->\n\n## User story\n\nAs a platform superadmin, I want to manage the catalog and OCI authorization in console pages, so that I can manage both without calling the API.\n\n## Description\n\nAdd superadmin console pages for the catalog and the OCI authorization editor, and a tenant base selector. Risk: R2 (UI over R3 APIs).\n\n## Acceptance criteria\n\n- [ ] Pages cover list, register, build, verification results, lifecycle, visibility and defaults; destructive actions use the existing confirmation pattern; states are accessible.\n- [ ] The tenant view shows a base selector and deprecation notices only for visible bases.\n- [ ] UI tests cover persona gating; server-side checks remain authoritative.\n\n## Planning\n\n- Parent: EP-CAT\n- Phase: M3\n- Effort: M\n- Depends on: CAT-01, CAT-04, API-03, OCI-01\n\n## Requirements\n\n- **FR-CAT-06:** The system must audit every catalog and OCI authorization mutation, and provide superadmin console pages plus a tenant base selector filtered by visibility.",
+      "parent": "EP-CAT",
+      "requirements": [
+        "FR-CAT-06"
+      ],
+      "dependencies": [
+        "CAT-01",
+        "CAT-04",
+        "API-03",
+        "OCI-01"
+      ],
+      "phase": "M3",
+      "effort": "M",
+      "labels": [
+        "falcone-serverless",
+        "type:story",
+        "area:cat",
+        "phase:m3",
+        "effort:m"
       ]
     }
   ]

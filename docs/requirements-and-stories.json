@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "project": "falcone-serverless",
-  "date": "2026-10-21",
+  "date": "2026-10-27",
   "baseline_commit": "bde62dd1e2e91f957b1dc6b8212dfbbaee977a7f",
   "categories": [
     {
@@ -11,8 +11,8 @@
       "requirements": [
         "Preserve inventoried Falcone Functions routes, API versions, request/response schemas, error codes, pagination and idempotency behavior through a compatibility adapter.",
         "Provide authenticated REST and CLI operations to create, inspect, update, invoke, roll back and delete functions and inspect activations.",
-        "Provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment.",
-        "Accept a versioned declarative function manifest, validate it before deployment and return field-specific errors without partial mutations.",
+        "Provide JavaScript, Python and Go starters only for qualified Wasm/WASI profiles, plus an OCI starter built FROM a catalog base for OCI-authorized projects, with pinned supported dependencies and a local invocation command; show unsupported capabilities before deployment.",
+        "Accept a versioned declarative function manifest, including runtime mode, catalog base and OCI image fields; validate it, including OCI authorization and base visibility and state, before deployment and return field-specific errors without partial mutations.",
         "Expose runtime readiness and deployment progress in the existing console with role-appropriate detail and accessible failure states.",
         "Publish machine-readable OpenAPI schemas and run generated-client contract tests against every supported API version."
       ],
@@ -23,11 +23,12 @@
           "developer",
           "manage functions through familiar API and CLI operations",
           "existing applications continue to work",
-          "Implement the public facade and CLI against the same validated contracts.",
+          "Implement the public facade and CLI against the same validated contracts. Risk: R3 (tenant isolation).",
           [
             "Legacy API fixtures pass against both backends, including status and error envelopes.",
             "CLI deploy/invoke/logs/rollback/delete works with Keycloak credentials; replaying a mutation idempotency key creates no duplicate resource.",
-            "Unauthorized requests and tenant-scoped reads retain the baseline behavior."
+            "Unauthorized requests and tenant-scoped reads retain the baseline behavior.",
+            "The Functions API contract v1 defines `runtime.mode` (default `wasm`), the `base` field and the `oci_not_authorized` and base error codes; the legacy fixtures pass in Wasm mode (ADR 0010)."
           ],
           "L",
           "M1",
@@ -42,11 +43,12 @@
           "function author",
           "develop locally and deploy a validated manifest",
           "development matches hosted execution",
-          "Add three starter templates, local runner and schema validation.",
+          "Add three starter templates, local runner and schema validation. Manifest v1 adds `runtime.mode` (default `wasm`), `base` as a tagged union: `{kind: catalog, id@version, digest}` or `{kind: byo, image digest, signer identity, attestation ref}`, `image` and an OCI resources block, and an OCI starter is added (ADR 0010). Risk: R3 (host capabilities).",
           [
             "Go, Python and JavaScript examples pass the same inputs locally and remotely.",
             "Unsupported runtime versions, reserved environment variables and malformed manifests fail before a build or runtime write.",
-            "Manifest schema versions and defaults are documented and covered by compatibility fixtures."
+            "Manifest schema versions and defaults are documented and covered by compatibility fixtures.",
+            "The manifest schema v1 defines `runtime.mode` and the `base` tagged union with fixtures for both kinds; OCI-mode validation (authorization, catalog and BYO checks) is delivered by OCI-02 (ADR 0010)."
           ],
           "M",
           "M2",
@@ -61,11 +63,12 @@
           "workspace administrator",
           "see reliable status and typed APIs",
           "I can diagnose deployments without learning Kubernetes",
-          "Wire the existing console and OpenAPI generation to the backend-neutral status model.",
+          "Wire the existing console and OpenAPI generation to the backend-neutral status model. Risk: R3 (tenant isolation).",
           [
             "Console distinguishes disabled, unavailable, deploying, active and deletion_pending; retry controls remain keyboard accessible.",
             "Tenant views contain no other-tenant resources or cluster internals; operator views are separately authorized.",
-            "Generated client tests cover successful and unavailable runtime responses."
+            "Generated client tests cover successful and unavailable runtime responses.",
+            "The status model and console show the runtime mode and the OCI and base failure reasons; superadmin OCI authorization and catalog pages are delivered with CAT-06 (ADR 0010)."
           ],
           "M",
           "M2",
@@ -79,13 +82,13 @@
     {
       "code": "RUN",
       "name": "Runtime and execution",
-      "goal": "Run qualified Wasm functions while preserving supported legacy source contracts.",
+      "goal": "Run qualified Wasm functions while preserving supported legacy source contracts; Wasm by default, OCI where authorized.",
       "requirements": [
-        "Execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; reject arbitrary native tenant binaries and OCI container execution.",
+        "Execute validated WebAssembly modules/components using a pinned Wasmtime worker and versioned Falcone host interfaces; in mode=wasm, reject arbitrary native tenant binaries and OCI container execution, which run only through the superadmin-authorized OCI mode of ADR 0010.",
         "Preserve main(params), result/status/log envelopes and scoped invocation verification for qualified legacy functions; detect unsupported libraries or OS behavior and block migration rather than silently altering semantics.",
         "Enforce guest memory, host-buffer, compiler, CPU, payload, execution-time and concurrency budgets; report the specific exceeded limit.",
         "Provide worker readiness/startup probes, bounded draining, guest interruption and host-call cancellation; reject new executions on draining workers.",
-        "Create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files.",
+        "In mode=wasm, create fresh guest state for each invocation; reuse only validated compiled code, never another invocation\u2019s memory, file handles, credentials or temporary files. OCI mode follows the documented warm-reuse semantics of ADR 0010.",
         "Publish a pinned engine/WASI/language/package support matrix and EOL policy; block unsupported combinations before deployment without silently changing revisions."
       ],
       "stories": [
@@ -95,11 +98,11 @@
           "function author",
           "run supported Wasm and legacy source functions",
           "I can migrate without rewriting handlers",
-          "Build the Rust/Wasmtime worker, beginning with JavaScript contract qualification; Go and Python profiles are enabled only after matrix tests.",
+          "Build the Rust/Wasmtime worker, beginning with JavaScript contract qualification; Go and Python profiles are enabled only after matrix tests. Risk: R3 (sandbox, host capabilities).",
           [
-            "Validated Wasm artifacts execute in fresh instances using the declared imports; native executable and arbitrary tenant-image submissions are rejected.",
+            "In mode `wasm`, validated Wasm artifacts execute in fresh instances using the declared imports; native executable and arbitrary tenant-image submissions are rejected, and the Wasm worker refuses any revision whose runtime mode is not `wasm` (ADR 0010).",
             "Qualified main(params), status/result/logs and invocation-identity fixtures pass unchanged; incompatible legacy functions are explicitly blocked from cutover.",
-            "Each activation records function revision, raw artifact digest, Wasmtime version, language profile and interface version."
+            "Each activation records function revision, runtime mode, raw artifact digest, base digest when the revision pins one, Wasmtime version, language profile and interface version."
           ],
           "L",
           "M1",
@@ -115,7 +118,7 @@
           "operator",
           "bound each execution and stop it predictably",
           "one function cannot exhaust the service",
-          "Enforce deadlines and memory budgets in both guest execution and Falcone host operations.",
+          "Enforce deadlines and memory budgets in both guest execution and Falcone host operations. Risk: R3 (sandbox, host capabilities).",
           [
             "Infinite loops, guest allocation, host-buffer growth, compilation exhaustion and oversized I/O hit documented limits without exhausting the worker pool.",
             "Guest interruption and blocked storage/network host-call cancellation are independently tested; kill fallback replaces only the affected execution process.",
@@ -134,11 +137,11 @@
           "operator",
           "manage supported runtimes and storage bindings",
           "upgrades do not change function behavior unexpectedly",
-          "Keep compiled-code caching separate from tenant execution state.",
+          "Keep compiled-code caching separate from tenant execution state. Risk: R3 (host capabilities).",
           [
-            "Sequential executions cannot observe prior guest memory, handles, environment or temporary files, including after traps and cancellation.",
+            "In mode `wasm`, sequential executions cannot observe prior guest memory, handles, environment or temporary files, including after traps and cancellation.",
             "Artifact caches use digest, engine, architecture and interface-version keys; user-supplied native precompiled caches are rejected.",
-            "Unsupported package/profile versions fail deployment with actionable diagnostics; upgrades preserve immutable revision references."
+            "Unsupported package/profile versions fail deployment with actionable diagnostics; a supported profile comes only from a catalog Wasm entry that is eligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions); upgrades preserve immutable revision references."
           ],
           "M",
           "M2",
@@ -154,11 +157,11 @@
       "name": "Build, revisions and deployment",
       "goal": "Produce traceable artifacts and safe, repeatable rollouts.",
       "requirements": [
-        "Build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host.",
+        "In mode=wasm, build supported source into Wasm with approved toolchains and dependency catalogues, or accept validated raw Wasm artifacts; never execute tenant-provided native install hooks, Dockerfiles or build scripts in an unsandboxed host. OCI function images are assembled or verified FROM catalog bases without tenant build hooks.",
         "Generate SBOM/provenance for function artifacts and trusted worker images, verify signatures, validate Wasm imports/features and pin every runtime/artifact dependency by digest.",
         "Create an immutable revision for code, engine/profile, host-interface or effective configuration changes and retain all artifact references.",
         "Deploy a revision only after readiness succeeds; support weighted canary traffic and atomic rollback to a retained revision.",
-        "Reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function.",
+        "Reconcile tenant worker pools and routing generations after restarts; represent deployed functions as metadata/artifacts without allocating one pod or Service per function, and materialize single-revision OCI pools only on demand within a per-tenant bound on materialized OCI revisions.",
         "Garbage-collect obsolete images, revisions and build artifacts only after checking active routes, in-flight invocations, rollback retention and workflow pins."
       ],
       "stories": [
@@ -168,11 +171,12 @@
           "developer",
           "build trusted Wasm artifacts from source or submit a module",
           "deployments are reproducible and traceable",
-          "Use approved language toolchains and package catalogues; isolate compilation and prohibit native dependency hooks.",
+          "Use approved language toolchains and package catalogues; isolate compilation and prohibit native dependency hooks. Source builds compose onto the selected catalog Wasm base; for OCI, the trusted image assembler layers source or a prebuilt artifact onto a catalog base without RUN steps or tenant hooks (ADR 0010). Risk: R3 (sandbox, host capabilities, secrets, tenant isolation).",
           [
             "Supported source and uploaded raw Wasm produce validated digest-pinned revisions with SBOM, provenance and declared imports.",
             "Disallowed imports/features, invalid signatures, native executables and submitted native compiled caches are rejected before worker execution.",
-            "Build hooks cannot execute arbitrary native code; malicious compilation inputs are bounded and cannot read another tenant\u2019s artifacts or credentials."
+            "Build hooks cannot execute arbitrary native code; malicious compilation inputs are bounded and cannot read another tenant\u2019s artifacts or credentials.",
+            "A build composes only onto its pinned catalog base digest and fails with `base_mismatch` otherwise; the OCI assembler path runs no tenant hook."
           ],
           "L",
           "M2",
@@ -189,11 +193,12 @@
           "developer",
           "release gradually and roll back",
           "faulty code affects fewer users",
-          "Add immutable revisions and route-generation updates.",
+          "Add immutable revisions and route-generation updates. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "A bad readiness probe never receives production traffic.",
             "Configured canary weights meet the test tolerance over the agreed request sample; rollback restores the previous target without rebuilding.",
-            "Concurrent updates use compare-and-swap; requests already admitted retain their revision."
+            "Concurrent updates use compare-and-swap; requests already admitted retain their revision.",
+            "Revision identity includes runtime mode and base and image digests; promotion re-checks OCI authorization and base state; a cross-mode canary runs only when the rollout explicitly opts in (ADR 0010)."
           ],
           "L",
           "M2",
@@ -208,11 +213,12 @@
           "operator",
           "recover drift and remove unused artifacts",
           "restarts do not leak or destroy workloads",
-          "Reconcile standard namespaced workloads and reference-aware artifact/cache cleanup.",
+          "Reconcile standard namespaced workloads and reference-aware artifact/cache cleanup. Risk: R3 (host capabilities, tenant isolation).",
           [
             "A controller restart converges to one owned worker-pool configuration and routing generation; stale updates cannot overwrite newer state.",
             "A 10,000-deployed-function inventory does not create 10,000 pods or per-function Services; worker count follows admitted compute demand.",
-            "GC retains active, workflow-pinned, in-flight and rollback-protected artifacts and removes only expired owned data."
+            "GC retains active, workflow-pinned, in-flight and rollback-protected artifacts and removes only expired owned data.",
+            "Single-revision OCI pools are materialized only within the per-tenant bound; GC also covers intake-mirror images and catalog bases after reference checks (ADR 0010)."
           ],
           "L",
           "M2",
@@ -228,10 +234,10 @@
       "name": "Invocation, routing and autoscaling",
       "goal": "Provide controlled synchronous and asynchronous execution, including scale from zero.",
       "requirements": [
-        "Route synchronous invocations to authorized tenant-scoped Wasm workers with a pinned immutable function revision and a configured end-to-end deadline.",
+        "Route synchronous invocations by the pinned revision's runtime mode to authorized tenant-scoped Wasm workers or OCI revision pools, with a pinned immutable function revision and a configured end-to-end deadline.",
         "Accept asynchronous invocations only after durable persistence, return an activation ID, and expose terminal status and result retrieval.",
         "Enforce per-pod hard concurrency and tenant-wide admission limits across multiple router replicas; bound queue length and waiting time.",
-        "Scale tenant/profile worker pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate.",
+        "Scale tenant/profile worker pools and single-revision OCI pools between configured minimum and maximum replicas from execution demand and admitted backlog; support idle scale-to-zero without tying replica count to deployed function count or raw message rate.",
         "Prevent scale-down from discarding admitted work, account for long-running jobs, use stabilization and metric freshness, and maintain exactly one scaling owner per worker pool.",
         "Preserve existing WebSocket URLs, authentication, ordering rules, backpressure, reconnect and draining semantics at a trusted gateway; separate connection/message capacity from guest execution slots."
       ],
@@ -242,11 +248,12 @@
           "application developer",
           "invoke synchronously or submit durable work",
           "I can choose the right response model",
-          "Build router admission, activation records and transactional outbox submission.",
+          "Build router admission, activation records and transactional outbox submission. Risk: R3 (tenant isolation).",
           [
             "Sync calls return the existing envelope; async returns 202 plus an activation ID only after the acceptance transaction commits.",
             "Crashes before/after outbox publication do not lose accepted work; duplicate delivery maps to one logical invocation.",
-            "A gateway timeout after dispatch is recorded as uncertain where necessary and never automatically retried as a safe read."
+            "A gateway timeout after dispatch is recorded as uncertain where necessary and never automatically retried as a safe read.",
+            "The dispatch contract carries the pinned revision's runtime mode; until EP-OCI delivers OCI pools, admission refuses a revision that is not in mode `wasm` with a non-retryable error (ADR 0010)."
           ],
           "L",
           "M1",
@@ -262,11 +269,12 @@
           "operator",
           "scale with demand within quotas",
           "bursts remain controlled and idle functions release capacity",
-          "Scale tenant/profile pools from execution demand while keeping deployment metadata independent of worker capacity.",
+          "Scale tenant/profile pools from execution demand while keeping deployment metadata independent of worker capacity. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "A zero-replica tenant/profile pool wakes for admitted execution and returns bounded cold-start or queue errors.",
             "Multi-router tests enforce configurable tenant quotas; the initial default is 20 simultaneous executions per tenant, not a throughput guarantee.",
-            "The pool scaler never follows raw WebSocket message count directly; stale metrics and long-running jobs cannot cause unsafe scale-down."
+            "The pool scaler never follows raw WebSocket message count directly; stale metrics and long-running jobs cannot cause unsafe scale-down.",
+            "The demand signal and scaler include per-revision OCI pools, which scale to zero when idle (ADR 0010)."
           ],
           "L",
           "M2",
@@ -282,7 +290,7 @@
           "MCP application developer",
           "keep streaming and sessions working",
           "runtime migration does not interrupt tools",
-          "Separate trusted WebSocket gateway capacity from Wasm execution and qualify an explicit traffic profile.",
+          "Separate trusted WebSocket gateway capacity from Wasm execution and qualify an explicit traffic profile. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Compatibility tests cover authentication, ordering, backpressure, reconnect and draining; existing deployed MCP behavior, if found, is inventoried separately.",
             "Benchmark 100,000 aggregate ingress messages/second with declared payload size, open connections, fan-out, durability and function-trigger fraction; distinguish input from output deliveries.",
@@ -317,7 +325,7 @@
           "integration developer",
           "connect authorized event sources to functions",
           "I can react to platform changes",
-          "Add Kafka, storage and webhook adapters plus trigger lifecycle APIs.",
+          "Add Kafka, storage and webhook adapters plus trigger lifecycle APIs. Risk: R3 (host capabilities).",
           [
             "Fixtures for each source produce the versioned envelope and validated resource ownership.",
             "Forged payload tenant IDs cannot change the destination scope.",
@@ -337,7 +345,7 @@
           "operator",
           "recover failed deliveries visibly",
           "events are not silently lost",
-          "Build delivery-attempt records, fenced claims and explicit redrive controls.",
+          "Build delivery-attempt records, fenced claims and explicit redrive controls. Risk: R3 (tenant isolation).",
           [
             "Crash-after-handler-success/before-ack causes a traceable possible duplicate, never an exactly-once claim.",
             "Retries stop at the configured limit, persist to DLQ and can be replayed by an authorized operator.",
@@ -356,7 +364,7 @@
           "workspace administrator",
           "schedule work and choose event ordering",
           "automation runs predictably",
-          "Reuse Falcone scheduling ownership and partition-aware delivery.",
+          "Reuse Falcone scheduling ownership and partition-aware delivery. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Cron fixtures cover DST transitions, timezones, missed executions and overlap policies.",
             "Two scheduler instances cannot create two logical occurrences for one schedule timestamp.",
@@ -390,11 +398,12 @@
           "workflow author",
           "invoke the new backend from existing Flows",
           "my workflows retain their behavior",
-          "Adapt the existing worker activity, preserving workspace binding and failure classification.",
+          "Adapt the existing worker activity, preserving workspace binding and failure classification. Risk: R3 (tenant isolation).",
           [
             "Existing functions.invoke tests pass, including non-retryable missing-function/runtime errors and retryable timeouts.",
             "A task input cannot override the credential-bound workspace.",
-            "Retries share a logical key while recording separate attempt IDs and the same pinned revision."
+            "Retries share a logical key while recording separate attempt IDs and the same pinned revision.",
+            "`functions.invoke` covers both runtime modes; `oci_not_authorized` and `base_disabled` map to non-retryable errors (ADR 0010)."
           ],
           "L",
           "M2",
@@ -409,7 +418,7 @@
           "workflow author",
           "resume safely after failures",
           "recovery does not unexpectedly execute new code",
-          "Define retry ownership and preserve activation/pin state across worker restarts.",
+          "Define retry ownership and preserve activation/pin state across worker restarts. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Deploying a new function during an Activity retry does not change the pinned revision.",
             "A worker crash resumes/polls the same accepted invocation when its result is unresolved; a known retryable failure creates a new recorded attempt.",
@@ -429,7 +438,7 @@
           "function author",
           "start and signal workflows safely",
           "functions can participate in durable processes",
-          "Add a narrow capability-controlled bridge and large-payload references.",
+          "Add a narrow capability-controlled bridge and large-payload references. Risk: R3 (host capabilities, tenant isolation).",
           [
             "Allowed workflow starts/signals succeed with idempotent request IDs and audit records.",
             "Cross-tenant targets and unlisted workflow types are denied even with forged input fields.",
@@ -448,12 +457,12 @@
     {
       "code": "SEC",
       "name": "Identity and security",
-      "goal": "Enforce verified identities and safe execution at every trust boundary.",
+      "goal": "Enforce verified identities and safe execution at every trust boundary; Wasm by default, OCI where authorized.",
       "requirements": [
         "Validate Keycloak issuer, audience, signature, allowed algorithms and token lifetime using an explicit realm allow-list and bounded JWKS caching/rotation.",
         "Authorize every management, invoke, log, result, secret and trigger operation using Falcone's verified tenant/workspace roles and capability policies; ignore spoofed identity headers.",
         "Run trusted Falcone worker images under restricted non-root, arbitrary-UID-compatible policies without privilege escalation, host mounts/networking or automatic API tokens in guest workers.",
-        "Execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native execution.",
+        "In mode=wasm, execute untrusted tenant code only in the qualified application-level Wasmtime sandbox; require no custom RuntimeClass, cluster CRDs, operator installation or elevated SCC, and never fall back to native or OCI execution. OCI mode runs only in superadmin-authorized projects, in restricted pods, under ADR 0010.",
         "Authenticate service calls and issue short-lived, audience-bound execution credentials; keep signing keys and broad service credentials out of guests and scope each host operation to verified tenant/workspace context.",
         "Enforce tenant network isolation and destination policies, block metadata/private-network SSRF except explicitly authorized bindings, and audit security-sensitive actions without recording secrets."
       ],
@@ -464,11 +473,12 @@
           "security engineer",
           "verify identity and scope at each API boundary",
           "tenant claims cannot be forged",
-          "Reuse Falcone's realm/trust policy and test public and internal entry points.",
+          "Reuse Falcone's realm/trust policy and test public and internal entry points. Risk: R3 (secrets, tenant isolation).",
           [
             "Expired, wrong-audience, wrong-issuer, forged and untrusted-realm tokens are rejected.",
             "JWKS rotation succeeds within the configured cache budget; unknown keys fail closed during outages.",
-            "Tenant, workspace, platform-reader and mutation persona tests match the existing authorization matrix."
+            "Tenant, workspace, platform-reader and mutation persona tests match the existing authorization matrix.",
+            "The platform service identity contract v1 reserves the `oci-shim`, `image-intake` and `image-assembler` callee audiences and the dispatcher\u2192shim mutual-TLS identity (ADR 0010)."
           ],
           "L",
           "M1",
@@ -482,7 +492,7 @@
           "platform operator",
           "run untrusted modules under the approved application sandbox",
           "tenant code cannot obtain host privileges",
-          "Run trusted worker processes and untrusted Wasm guests under existing corporate policy.",
+          "Run trusted worker processes and untrusted Wasm guests under existing corporate policy. Risk: R3 (sandbox, host capabilities).",
           [
             "Installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass.",
             "Guests cannot invoke native processes, load native libraries or obtain Kubernetes/admin credentials; dangerous imports are rejected.",
@@ -501,11 +511,12 @@
           "security engineer",
           "bind internal requests to a scoped identity",
           "a compromised function cannot impersonate another tenant",
-          "Implement the privileged host-operation boundary separately from guest code.",
+          "Implement the privileged host-operation boundary separately from guest code. Risk: R3 (host capabilities, egress, secrets, tenant isolation).",
           [
             "Every host call verifies execution scope and capability grants; guessed object IDs, credential handles and forged tenant fields fail.",
             "Metadata endpoints, DNS rebinding, redirects to forbidden destinations and unauthorized cross-tenant traffic are denied, including through host-call proxies.",
-            "Secrets and signing keys are absent from guest artifacts and telemetry; exposing a secret to guest code requires an explicit narrow grant."
+            "Secrets and signing keys are absent from guest artifacts and telemetry; exposing a secret to guest code requires an explicit narrow grant.",
+            "The execution credential and audit event contracts v1 allow the trusted OCI shim as a credential holder, never the tenant container, and define the `oci_authorization.*` and `catalog.*` audit events (ADR 0010)."
           ],
           "L",
           "M1",
@@ -535,11 +546,12 @@
           "tenant administrator",
           "have resources isolated by tenant and workspace",
           "other customers cannot observe or alter them",
-          "Use existing identity scope plus an operator-owned namespace resolver.",
+          "Use existing identity scope plus an operator-owned namespace resolver. Risk: R3 (host capabilities, tenant isolation).",
           [
             "SQL/RLS, API, log, artifact and activation tests reject adjacent tenants and unauthorized sibling workspaces.",
             "Same function name in two tenants produces distinct owned runtime resources.",
-            "Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace."
+            "Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace.",
+            "The namespace-bindings contract v1 includes an optional preprovisioned `oci_namespace` per tenant (ADR 0010)."
           ],
           "L",
           "M1",
@@ -554,7 +566,7 @@
           "platform operator",
           "apply plans and fair capacity limits",
           "one tenant cannot consume all shared capacity",
-          "Keep all accounting and policy in Falcone; distinguish messages/connections, executions and long-running work.",
+          "Keep all accounting and policy in Falcone; distinguish messages/connections, executions and long-running work. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Multi-router tests never exceed the configured aggregate tenant limits, initially 20 execution slots per tenant where enabled.",
             "Interactive and batch budgets prevent analysis jobs starving interactive traffic; expired reservations recover with fenced ownership.",
@@ -573,11 +585,12 @@
           "tenant administrator",
           "suspend and remove workloads reliably",
           "disabled tenants stop consuming services",
-          "Unify suspension, deletion and tenant teardown around durable owner-checked cleanup.",
+          "Unify suspension, deletion and tenant teardown around durable owner-checked cleanup. Risk: R3 (tenant isolation).",
           [
             "Suspension stops new admissions and trigger delivery; queued/in-flight policy is applied and audited.",
             "Deletion during an outage returns deletion_pending and resumes idempotently after recovery.",
-            "UID/resourceVersion/ownership mismatch retains the resource and raises a repair condition; completion requires verified absence."
+            "UID/resourceVersion/ownership mismatch retains the resource and raises a repair condition; completion requires verified absence.",
+            "Suspension and deletion cover OCI pools and intake-mirror images; revoking OCI authorization drains through the same in-flight and queued-work policy (ADR 0010)."
           ],
           "L",
           "M3",
@@ -608,11 +621,12 @@
           "function author",
           "access artifacts and application objects securely",
           "my function can use Falcone storage",
-          "Reuse Falcone storage through capability-controlled host operations.",
+          "Reuse Falcone storage through capability-controlled host operations. Risk: R3 (host capabilities, secrets, tenant isolation).",
           [
             "Required upload/download, multipart, signed-URL and checksum cases pass against both pinned SeaweedFS releases.",
             "Guessed keys, path traversal and signed-URL requests cannot cross tenant/workspace boundaries; guest access uses narrow grants.",
-            "Retention preserves workflow-pinned artifacts, live payloads and resumable checkpoints; current notifications are preserved and regression-tested."
+            "Retention preserves workflow-pinned artifacts, live payloads and resumable checkpoints; current notifications are preserved and regression-tested.",
+            "The host storage API contract v1 adds the `catalog-base` retention class and accepts the execution credential from any verified holder, including the trusted OCI shim (ADR 0010)."
           ],
           "M",
           "M1",
@@ -627,11 +641,12 @@
           "integration developer",
           "receive object events and use rotating secrets",
           "storage automation remains secure",
-          "Qualify the actual SeaweedFS notification/feed path and preserve OpenBao references.",
+          "Qualify the actual SeaweedFS notification/feed path and preserve OpenBao references. Risk: R3 (host capabilities, secrets, tenant isolation).",
           [
             "PUT, multipart completion and DELETE through direct S3 clients produce normalized events according to the pinned-version contract.",
             "Disconnect/reconnect tests establish replay checkpoints and any source-side loss window; unsupported guarantees block release of the corresponding trigger.",
-            "Secret rotation updates only authorized consumers and never writes values into revision manifests, telemetry or build outputs."
+            "Secret rotation updates only authorized consumers and never writes values into revision manifests, telemetry or build outputs.",
+            "In OCI mode, a secret reaches code only as an explicit narrow guest grant fetched per attempt, never through environment variables, files or the image (ADR 0010)."
           ],
           "L",
           "M2",
@@ -646,7 +661,7 @@
           "operator",
           "persist accepted work and recover dispatcher failures",
           "acknowledged submissions survive restarts",
-          "Add scoped PostgreSQL schemas, outbox/inbox processing and fenced leases.",
+          "Add scoped PostgreSQL schemas, outbox/inbox processing and fenced leases. Risk: R3 (tenant isolation).",
           [
             "A transaction atomically persists activation plus outbox before returning accepted.",
             "Crash tests at commit/publish/consume/complete boundaries recover pending work and reconcile duplicates.",
@@ -680,11 +695,12 @@
           "developer",
           "trace one invocation across services",
           "I can locate failures quickly",
-          "Instrument runtime and Falcone adapters with OpenTelemetry and structured logs.",
+          "Instrument runtime and Falcone adapters with OpenTelemetry and structured logs. Risk: R3 (tenant isolation).",
           [
             "An HTTP and a Temporal-triggered invocation can each be followed across their full path.",
             "Log/result/trace queries reject cross-tenant and unauthorized sibling-workspace access.",
-            "Tokens, secret values and request bodies are excluded or redacted according to policy."
+            "Tokens, secret values and request bodies are excluded or redacted according to policy.",
+            "The telemetry context contract v1 carries `runtime_mode` and base and image digests (ADR 0010)."
           ],
           "M",
           "M1",
@@ -699,11 +715,12 @@
           "SRE",
           "observe load and scaling decisions",
           "I can diagnose saturation before an outage",
-          "Define bounded metrics and dashboards for the complete execution path.",
+          "Define bounded metrics and dashboards for the complete execution path. Risk: R3 (sandbox).",
           [
             "Load tests populate warm, cold-start, queue and execution histograms separately.",
             "Injected broker lag, stale metrics, unavailable runtime and failed cleanup trigger the expected alerts.",
-            "Metric-cardinality tests reject function-supplied labels and demonstrate a bounded series budget."
+            "Metric-cardinality tests reject function-supplied labels and demonstrate a bounded series budget.",
+            "Metrics and dashboards split by runtime mode, including an OCI cold-start breakdown of image pull, pod start, init and contract probe (ADR 0010)."
           ],
           "M",
           "M2",
@@ -717,11 +734,12 @@
           "platform administrator",
           "reconcile usage with execution records",
           "quotas and future billing use explainable data",
-          "Implement idempotent usage events, audit queries and retention jobs.",
+          "Implement idempotent usage events, audit queries and retention jobs. Risk: R3 (tenant isolation).",
           [
             "Duplicate delivery does not double-count the same billable attempt; retry charging policy is explicit.",
             "Usage totals reconcile with recorded execution attempts within the agreed lag budget.",
-            "Retention deletes expired telemetry without deleting active workflow or legal-hold references where configured."
+            "Retention deletes expired telemetry without deleting active workflow or legal-hold references where configured.",
+            "Usage events carry the runtime mode; audit queries cover catalog and OCI authorization events (ADR 0010)."
           ],
           "M",
           "M2",
@@ -752,11 +770,12 @@
           "platform installer",
           "deploy a supported runtime reproducibly",
           "cluster setup is inspectable and repeatable",
-          "Deploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation.",
+          "Deploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation. Risk: R3 (sandbox, host capabilities, tenant isolation).",
           [
             "Preflight using the deployment identity proves all required namespaced verbs; a rendered manifest audit contains no cluster-scoped resources, privileged pods or custom SCC/RuntimeClass.",
             "Actual pod startup and invocation pass on qualified Kubernetes lines and the supplied OpenShift patch release under its existing SCC.",
-            "Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure."
+            "Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure.",
+            "The serverless chart values contract v1 includes an OCI section that is disabled by default and renders no OCI resources (ADR 0010)."
           ],
           "L",
           "M1",
@@ -771,11 +790,12 @@
           "maintainer",
           "test the whole stack under failures",
           "releases do not regress isolation or availability",
-          "Build real-stack CI plus multi-replica failover and GitOps workflows.",
+          "Build real-stack CI plus multi-replica failover and GitOps workflows. Risk: R3 (tenant isolation).",
           [
             "Node/controller/router/worker restarts recover according to documented sync/async guarantees.",
             "CI exercises real Keycloak, SeaweedFS, Kafka and Temporal rather than mocks alone.",
-            "GitOps updates use the public authority path and cannot overwrite newer generations or bypass validation."
+            "GitOps updates use the public authority path and cannot overwrite newer generations or bypass validation.",
+            "The real-stack CI suite includes an OCI function journey and an OCI authorization revocation test (ADR 0010)."
           ],
           "L",
           "M2",
@@ -792,11 +812,12 @@
           "SRE",
           "recover and upgrade the platform",
           "operations do not destroy accepted work or rollback options",
-          "Create tested recovery points, compatibility gates and operator runbooks.",
+          "Create tested recovery points, compatibility gates and operator runbooks. Risk: R3 (host capabilities, tenant isolation).",
           [
             "Restore into a clean cluster reconciles resource ownership and pending invocations; measured RPO/RTO are recorded.",
             "Upgrade/rollback tests cover data-format compatibility and refuse unsafe downgrades.",
-            "Default uninstall retains data; deletion requires explicit scoped intent and verified ownership."
+            "Default uninstall retains data; deletion requires explicit scoped intent and verified ownership.",
+            "Restore covers the base catalog, OCI authorization records and intake-mirror references (ADR 0010)."
           ],
           "L",
           "M3",
@@ -811,13 +832,13 @@
     {
       "code": "MIG",
       "name": "Compatibility and Knative retirement",
-      "goal": "Replace the runtime incrementally with evidence of Falcone contract parity.",
+      "goal": "Replace the runtime incrementally with evidence of Falcone contract parity; Wasm by default, OCI where authorized.",
       "requirements": [
         "Freeze Falcone API/URL/data/authorization/execution contracts and classify existing functions by Wasm language/package compatibility; exclude raw Knative APIs and URLs from the replacement scope.",
-        "Record the accepted Option A decision and supersede native tenant-container, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification.",
-        "Implement interchangeable Knative and native backend adapters with per-resource backend selection and exactly one active traffic/trigger owner.",
+        "Record the accepted Option A decision as amended by ADR 0010 (superadmin-authorized OCI mode and base catalog); supersede silent native-fallback, CRD-controller and administrator-installed sandbox assumptions; distinguish design approval from implementation/security qualification.",
+        "Implement interchangeable Knative and native backend adapters with per-resource backend selection, an explicit target runtime mode and exactly one active traffic/trigger owner.",
         "Preserve public identifiers, URLs, permissions, versions and activation history during migration; never double-execute side-effecting shadow traffic.",
-        "Validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration.",
+        "Validate qualified Function lifecycle, WebSocket behavior, Flows, failures, isolation and any actually deployed MCP contracts before cutover; list unsupported legacy workloads and block their migration, and move a workload to OCI mode only by explicit choice with an oci-candidate verdict in an authorized project.",
         "Retire Knative/Kourier only after a dependency inventory is empty, in-flight and retained-workflow references are resolved, rollback policy is met and resource ownership is verified."
       ],
       "stories": [
@@ -827,11 +848,12 @@
           "maintainer",
           "record the exact replacement boundary",
           "the implementation solves the real integration problem",
-          "Record the user-selected Wasm-only tenant execution direction, scope changes and migration blockers.",
+          "Record the user-selected Wasm-default tenant execution direction, the superadmin-authorized OCI mode of ADR 0010, scope changes and migration blockers. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Inventory marks each Falcone contract observed, source-defined or proposed and explicitly excludes raw Knative compatibility.",
             "The ADR records 20 tenants, 10,000 deployed functions, 100,000 mostly WebSocket/event messages/second, no admin sandbox and Falcone-owned quotas.",
-            "Existing source dependencies are classified before any migration; API compatibility never disguises an unsupported execution environment."
+            "Existing source dependencies are classified before any migration; API compatibility never disguises an unsupported execution environment.",
+            "The ADR scope note cites ADR 0010; classification records a Wasm verdict and an OCI verdict for each function."
           ],
           "M",
           "M0",
@@ -843,11 +865,12 @@
           "platform operator",
           "move selected workloads between backends",
           "I can evaluate the new runtime with a rollback path",
-          "Add backend drivers and generation-fenced route/trigger ownership.",
+          "Add backend drivers and generation-fenced route/trigger ownership. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "One public function identity can switch backend while keeping URLs, permissions and history.",
             "At every cutover point only one backend owns production trigger delivery; non-idempotent traffic is never shadow-executed.",
-            "A failed canary can return to a retained compatible backend, with in-flight work drained or explicitly reconciled."
+            "A failed canary can return to a retained compatible backend, with in-flight work drained or explicitly reconciled.",
+            "Backend selection targets OCI mode only by explicit choice through the guard, which requires an oci-candidate verdict and an OCI-authorized project (ADR 0010)."
           ],
           "L",
           "M3",
@@ -864,11 +887,12 @@
           "platform owner",
           "remove Knative after proven compatibility",
           "Falcone no longer requires its serving stack",
-          "Qualify actual existing workloads and retire only after all consumers have a supported execution path.",
+          "Qualify actual existing workloads and retire only after all consumers have a supported execution path. Risk: R3 (tenant isolation).",
           [
             "All mandatory public contracts and all in-scope migrated function/package cases pass; unsupported workloads remain explicit cutover blockers.",
             "WebSockets, guest isolation, long-job checkpoint/recovery and any deployed MCP journeys pass; expected SLOs are measured rather than assumed.",
-            "No live workload or workflow pin depends on Knative; only proven-owned removable resources are retired through the authorized lifecycle path."
+            "No live workload or workflow pin depends on Knative; only proven-owned removable resources are retired through the authorized lifecycle path.",
+            "Certification and retirement count OCI-migrated workloads; workloads without a candidate verdict in either mode remain blockers (ADR 0010)."
           ],
           "L",
           "M3",
@@ -892,7 +916,7 @@
         "Pin engine, architecture, WASI interface and compiler versions; test qualified Kubernetes 1.37/1.36 lines and the exact OpenShift 4.20 patch reported by the operator, without assuming CRI-O patch numbers identify Kubernetes patches.",
         "Define versioned, capability-controlled Falcone storage, HTTP, event and workflow host interfaces; deny undeclared imports and ambient filesystem/network authority.",
         "Keep untrusted raw Wasm validation, bounded compilation and trusted native cache generation separate; never deserialize a tenant-supplied native compiled artifact.",
-        "Publish exact JavaScript, Python and Go profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks unless a future separately reviewed capability explicitly supports them.",
+        "Publish exact JavaScript, Python and Go Wasm-mode profile/package capabilities and compatibility diagnostics; reject unsupported native libraries, GPU access, process spawning or install hooks in mode=wasm unless a future separately reviewed capability explicitly supports them.",
         "Run adversarial guest and host-interface tests covering memory/CPU exhaustion, malformed artifacts, cross-tenant handles, denial of service and worker recovery, and retain security-review evidence."
       ],
       "stories": [
@@ -902,7 +926,7 @@
           "platform engineer",
           "validate Wasmtime under existing corporate policies",
           "implementation starts from a deployable foundation",
-          "Build a minimal disposable qualification fixture and collect actual admission/runtime evidence.",
+          "Build a minimal disposable qualification fixture and collect actual admission/runtime evidence. Risk: R3 (sandbox, tenant isolation).",
           [
             "The deployment identity can install the fixture and execute/interrupt a guest without cluster-scoped writes, elevated SCC or custom RuntimeClass.",
             "Compile/load behavior, executable-memory needs, arbitrary UID, read-only filesystem and temporary storage work under the actual policy; failures are reported without escalation or native fallback.",
@@ -920,7 +944,7 @@
           "security engineer",
           "control every sandbox escape hatch",
           "tenant modules have only explicitly granted authority",
-          "Define the WIT/host API contract, invocation capability context and bounded compiler/cache path.",
+          "Define the WIT/host API contract, invocation capability context and bounded compiler/cache path. Risk: R3 (sandbox, host capabilities, tenant isolation).",
           [
             "Deny-by-default import tests and scope-bound storage/event/workflow/HTTP capability tests pass.",
             "Tenant-provided native precompiled caches and arbitrary host-call implementations are rejected; only trusted locally generated caches are loaded.",
@@ -938,11 +962,12 @@
           "function developer",
           "know which code and packages are supported",
           "I can deploy without hidden compatibility changes",
-          "Test representative legacy JavaScript, real Python analysis dependencies and Go modules before enabling a profile.",
+          "Test representative legacy JavaScript, real Python analysis dependencies and Go modules before enabling a profile. Risk: R3 (sandbox, host capabilities).",
           [
             "Each enabled language has exact runtime/compiler/package versions, allowed interfaces, tested examples and unsupported-feature diagnostics.",
             "The selected legacy JavaScript function and representative Python analysis pass expected results and dependency behavior; a failure blocks that profile or migration claim.",
-            "Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement."
+            "Host-interface fuzz/adversarial tests, fresh-instance leakage tests and a worker-crash recovery exercise are recorded before untrusted production enablement.",
+            "Matrix entries reserve a catalog entry id; compatibility diagnostics may name OCI as an explicit alternative but never select it (ADR 0010)."
           ],
           "L",
           "M1",
@@ -971,11 +996,12 @@
           "data analyst",
           "save progress during extended executions",
           "a pod restart does not require recomputing all completed work",
-          "Define job lifecycle, progress and explicit checkpoint/resume SDK contracts.",
+          "Define job lifecycle, progress and explicit checkpoint/resume SDK contracts. Risk: R3 (host capabilities).",
           [
             "Submission returns a durable job ID; progress and cancellation are scoped to the submitting tenant/workspace.",
             "Checkpoint objects include revision/input/schema identifiers and cannot be written by a stale fenced attempt.",
-            "A sample analysis saves and reloads a checkpoint; an uncheckpointed job clearly reports that recovery restarts computation."
+            "A sample analysis saves and reloads a checkpoint; an uncheckpointed job clearly reports that recovery restarts computation.",
+            "OCI jobs report progress and checkpoints through the shim; `max_runtime` is set per profile and runtime mode (ADR 0010)."
           ],
           "L",
           "M2",
@@ -991,7 +1017,7 @@
           "workflow author",
           "resume or stop analysis safely",
           "long executions remain operable during failures",
-          "Coordinate attempts, pins and checkpoints through existing Temporal Activities.",
+          "Coordinate attempts, pins and checkpoints through existing Temporal Activities. Risk: R3 (host capabilities).",
           [
             "Terminate a worker during a checkpoint-aware job and verify resumption from the last committed checkpoint with the same revision.",
             "Retry ownership prevents nested retry storms; uncertain external effects are recorded and require application idempotency.",
@@ -1010,11 +1036,12 @@
           "SRE",
           "protect interactive work while analysis runs",
           "batch jobs cannot monopolize shared capacity",
-          "Establish separate budgets and measure representative long-job performance and recovery.",
+          "Establish separate budgets and measure representative long-job performance and recovery. Risk: R2 (no plan task changes the sandbox, host capabilities, egress, secrets or tenant isolation).",
           [
             "Run a declared hours-long analysis fixture with measured memory/CPU/checkpoint costs; no native dependency fallback occurs.",
             "A mixed-load test enforces configured interactive and batch reservations and reports queueing when quotas are exhausted.",
-            "Worker scale-down respects jobs/checkpoints, and a failure exercise meets the agreed checkpoint-loss and recovery bounds."
+            "Worker scale-down respects jobs/checkpoints, and a failure exercise meets the agreed checkpoint-loss and recovery bounds.",
+            "The mixed-load test includes OCI pools drawing on the shared tenant slots (ADR 0010)."
           ],
           "L",
           "M3",
@@ -1025,8 +1052,387 @@
           ]
         ]
       ]
+    },
+    {
+      "code": "OCI",
+      "name": "OCI image execution mode",
+      "goal": "Let authorized projects choose per function to run a catalog-derived OCI image in restricted pods, with Falcone-owned admission and no fallback.",
+      "requirements": [
+        "Let only the platform superadmin authorize OCI mode per tenant for none, all or selected projects (workspaces); enforce it at deploy, promotion and every admission path, audit each change with the acknowledged residual-risk version, and drain OCI work when authorization is revoked.",
+        "Accept an explicit per-function runtime.mode (wasm by default, or oci) recorded on the immutable revision, define a versioned OCI function container contract, and never switch a function between modes automatically.",
+        "Accept only digest-pinned OCI function images assembled or built FROM a visible catalog base, or BYO images (`base.kind: byo`) in superadmin-flagged projects with a valid signature and an advisory scan record; verify and copy each image into the platform intake mirror before any pod is rendered, without executing image content.",
+        "Serve OCI invocations through a trusted shim that implements the worker execution API over mutually authenticated TLS with a per-pod shim identity mounted only into the shim container, verifies the dispatcher identity, enforces concurrency and deadlines and reports honest cancellation outcomes; the dispatcher verifies the shim identity before sending any credential or request, and the shim never forwards the execution credential to the tenant container.",
+        "Run OCI functions in single-revision restricted pods (non-root, read-only root filesystem, no service-account token) materialized on demand in the tenant's preprovisioned OCI namespace, with the controller's write set unchanged.",
+        "Give OCI functions storage, event, workflow, secret, logging and allow-listed HTTP access only through a localhost capability API and an egress gateway; keep the execution credential outside the tenant container and enforce OCI-namespace NetworkPolicies.",
+        "Qualify OCI isolation with adversarial evidence before enabling OCI for any tenant, and publish a versioned residual-risk register covering the shared kernel, restricted PSA, side channels and node patch ownership.",
+        "Charge OCI executions against the shared tenant execution slots plus OCI caps on materialized revisions, warm replicas, pod memory, image bytes and builds, and record per-mode usage and metrics.",
+        "Offer OCI as an explicit migration target only for workloads with an oci-candidate verdict in an authorized project, and keep workloads without a candidate verdict in either mode as Knative retirement blockers.",
+        "Provide CLI, console, starter and documentation support for OCI functions, including the warm-reuse notice, and show OCI options only in authorized projects."
+      ],
+      "stories": [
+        [
+          "01",
+          "Authorize OCI mode per tenant and project",
+          "platform superadmin",
+          "authorize none, all or selected projects of a tenant for OCI mode",
+          "only approved projects can run container functions",
+          "Add the superadmin-only OCI authorization (ctr-oci-authorization) that Falcone admission enforces, with revocation drain, BYO flags and an acknowledged residual-risk version. A project is a Falcone workspace. Risk: R3 (tenant isolation and authorization).",
+          [
+            "Only the superadmin role can read and write the setting; tenant admins see the effective state read-only, and persona tests deny every other role.",
+            "Deploy, promotion and every admission path (sync, async, events, Temporal, jobs, retries) reject `oci` for unauthorized projects with `oci_not_authorized`; the Wasm path is unaffected.",
+            "Revocation drains in an fs-test run: new OCI deploys and promotions are denied at once, new invocations are denied after the superadmin-chosen grace window, in-flight attempts finish within the drain budget or are cancelled, queued work fails non-retryable, triggers pause, and pools are dematerialized while revisions and images are retained; re-authorization restores service.",
+            "Every change emits an audit event with actor, before/after state, grace window and the acknowledged residual-risk text version.",
+            "ADR 0010 is recorded."
+          ],
+          "L",
+          "M2",
+          [
+            "MIG-01",
+            "SEC-01",
+            "TEN-01",
+            "SEC-03"
+          ]
+        ],
+        [
+          "02",
+          "Declare runtime mode and the OCI function contract",
+          "function author",
+          "choose `wasm` or `oci` in my manifest",
+          "each function runs in the mode it needs",
+          "Add `runtime.mode` to the manifest and revision, and define ctr-oci-function-contract v1 (`POST /invoke`, `GET /healthz`, `$PORT`, the legacy-compatible envelope, signals and filesystem rules). Risk: R3 (defines the tenant-code boundary).",
+          [
+            "The manifest and Functions API accept `runtime.mode`, defaulting to `wasm`; a mode or base change creates a new revision, and no automatic mode switch exists anywhere.",
+            "ctr-oci-function-contract v1 (`/invoke`, `/healthz`, `$PORT`, envelope, signals, filesystem) has a conformance tester.",
+            "The revision records the mode, `base` as a tagged union: `{kind: catalog, id@version, digest}` or `{kind: byo, image digest, signer identity, attestation ref}`, the function image digest, and the contract and shim versions.",
+            "Validation before any write rejects `runtime.mode: oci` in a project without OCI authorization, a `kind: catalog` base that is absent, invisible or ineligible under the ADR 0010 D8 lifecycle rule, and a `kind: byo` base in a project without the superadmin BYO flag.",
+            "The Functions API facade and CLI accept `runtime.mode: oci` and a base in authorized projects, surface `oci_not_authorized` and base errors, and the legacy API fixtures pass in OCI mode."
+          ],
+          "L",
+          "M2",
+          [
+            "API-02",
+            "DEP-02",
+            "OCI-01",
+            "API-01"
+          ]
+        ],
+        [
+          "03",
+          "Intake catalog-derived and BYO images",
+          "platform operator",
+          "have every function image verified and mirrored by digest",
+          "only known images reach nodes",
+          "Implement three image paths: P1, assembled by the trusted image assembler onto a catalog base by pure layer assembly; P2, built externally FROM a catalog base digest, with layer-ancestry verification; and P3, BYO images (`base.kind: byo`) only for superadmin-flagged projects. Catalog-membership and ancestry checks apply only to P1 and P2. Every image is copied by digest into the platform intake mirror, and kubelets pull only from there. Risk: R3 (artifact loading and supply chain).",
+          [
+            "P1, P2 and P3 follow their verification rules: P1/P2 images must derive from a visible catalog base that is eligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions), and a `kind: byo` image requires the project's superadmin BYO flag, a valid signature against the project's registered keys, a platform-mirror copy and an advisory scan record, with the signer identity and attestation ref recorded; tag-only, wrong-platform, oversized, failed-ancestry and unsigned BYO images are rejected before any pod is rendered.",
+            "Intake never executes image content, and tenant registry credentials are never logged.",
+            "Mirror images are retained while referenced and collected only after reference checks; mirror bytes count against the tenant cap."
+          ],
+          "L",
+          "M2",
+          [
+            "OCI-02",
+            "CAT-01",
+            "CAT-05",
+            "DEP-03"
+          ]
+        ],
+        [
+          "04",
+          "Serve OCI invocations through a trusted shim",
+          "operator",
+          "put a trusted component in front of tenant containers",
+          "admission, identity, limits and outcomes are enforced as in Wasm mode",
+          "Build the oci-shim sidecar that serves ctr-worker-execution-api for mode oci and forwards each attempt to the function container on a separate localhost port. The dispatcher\u2192shim channel is mutually authenticated TLS. The shim's per-pod identity is a certificate or projected token mounted only into the shim container; the pod sets `automountServiceAccountToken: false`, and the tenant container has no such volume. Because containers in a pod share the network namespace, the dispatcher verifies the shim identity before it sends any credential or request, and the shim\u2192container hop never carries the credential. Risk: R3 (execution boundary).",
+          [
+            "The shim implements ctr-worker-execution-api for mode `oci` over mutually authenticated TLS, verifies the dispatcher identity and enforces concurrency and deadlines; the dispatcher verifies the shim's per-pod identity before sending any credential or request, and no identity material is mounted into the tenant container.",
+            "Cancel goes to the container first, then to the liveness-restart fallback within a bounded time, with honest uncertain outcomes.",
+            "Progress and checkpoint relay passes the JOB-01 sample job; per-invocation logs reach the Falcone log intake, and pod-level container stdout and stderr are labelled by revision and tenant-scoped.",
+            "Adversarial test: a tenant container that binds the shim port first, or answers on it, causes the dispatcher to refuse delivery and record an audit or security event, and no credential is leaked."
+          ],
+          "L",
+          "M2",
+          [
+            "RUN-01",
+            "SEC-01",
+            "OCI-02",
+            "JOB-01"
+          ]
+        ],
+        [
+          "05",
+          "Reconcile restricted single-revision OCI pools",
+          "operator",
+          "materialize OCI revisions on demand under restricted PSA",
+          "inventory does not become pods",
+          "Extend the namespaced controller to render one Deployment and one headless Service per materialized OCI revision from ctr-oci-pod-template (non-root, read-only root filesystem, all capabilities dropped, seccomp RuntimeDefault, no service-account token). Risk: R3 (sandbox configuration and tenant isolation).",
+          [
+            "The controller renders a Deployment and a headless Service per materialized revision only in the tenant's bound OCI namespace; its write set is unchanged.",
+            "A controller guard refuses any pod spec that deviates from ctr-oci-pod-template.",
+            "Scale from zero, idle dematerialization and restart convergence pass in fs-test; a 1,000-OCI-function inventory stays within the materialization cap.",
+            "Restricted posture assertions (SEC-02) run against rendered OCI pod templates, and the namespace resolver refuses OCI work for a tenant without an `oci_namespace` binding.",
+            "Admission routes OCI revisions to their materialized pool; preflight checks the OCI prerequisites (OCI namespace, pull Secret, NetworkPolicy enforcement) and blocks OCI mode when enforcement is absent; chart values render the shim, gateway, intake and assembler images and the pull-Secret reference only when the OCI section is enabled."
+          ],
+          "L",
+          "M2",
+          [
+            "DEP-03",
+            "INV-02",
+            "SEC-02",
+            "TEN-01",
+            "OCI-04",
+            "OPS-01",
+            "INV-01"
+          ]
+        ],
+        [
+          "06",
+          "Give OCI functions capabilities without credentials",
+          "function author",
+          "use storage, events, workflows, secrets and HTTP through a local API",
+          "my container uses Falcone services safely",
+          "Add ctr-oci-capability-api in the shim, mirroring `falcone:host`, with opaque per-attempt handles, plus the per-namespace egress gateway and OCI-namespace NetworkPolicies. Risk: R3 (host capabilities, egress, secrets).",
+          [
+            "Each capability works only during an attempt, with a valid handle, and is scoped from the credential.",
+            "Allow-listed HTTP succeeds through the egress gateway; direct internet, metadata, API-server and cross-namespace traffic are denied by NetworkPolicy.",
+            "Secrets arrive only as explicit narrow grants and are absent from environment variables, files, logs and images.",
+            "In OCI mode the shim holds the execution credential and presents it to the host storage, event and workflow APIs; capability calls are scoped by that credential and audited."
+          ],
+          "L",
+          "M2",
+          [
+            "SEC-03",
+            "STO-01",
+            "STO-02",
+            "EVT-01",
+            "WF-03",
+            "OCI-04"
+          ]
+        ],
+        [
+          "07",
+          "Qualify OCI isolation and record the accepted risk",
+          "security engineer",
+          "gather adversarial evidence for OCI pods",
+          "the superadmin knows what they accept",
+          "Run an adversarial isolation suite against OCI pods and keep the versioned residual-risk register that the authorization flow shows. OCI is enabled for no tenant before this evidence exists and preflight confirms NetworkPolicy enforcement. Risk: R3 (sandbox evidence).",
+          [
+            "An fs-test suite covers privilege escalation, setuid, raw sockets, lateral and cross-tenant traffic, metadata, DNS enumeration, fork bomb, disk fill, OOM, CPU noisy neighbour and capability abuse outside attempts.",
+            "The residual-risk register (same kernel, restricted PSA, side channels, node patch ownership) is versioned and surfaced by OCI-01.",
+            "Optional `hostUsers: false` and AppArmor availability is recorded as evidence, never assumed."
+          ],
+          "L",
+          "M2",
+          [
+            "OCI-05",
+            "OCI-06",
+            "SEC-02"
+          ]
+        ],
+        [
+          "08",
+          "Meter, limit and observe OCI execution",
+          "platform administrator",
+          "see per-mode usage and caps",
+          "OCI capacity is fair and explainable",
+          "Apply shared tenant slots plus OCI caps, record OCI usage and add the `runtime_mode` metric dimension. Risk: R2 (quota and metering, no boundary change).",
+          [
+            "OCI executions consume tenant slots; caps on materialized revisions, warm replicas, pod memory, image bytes and builds are enforced across routers.",
+            "Usage records for pod-seconds, cold start, idle warm time and image storage reconcile with attempts.",
+            "Metrics carry `runtime_mode`; a benchmark reports image pull, pod start, init and probe separately against the provisional OCI targets (cold p95 \u226410 s for a node-cached image under 250 MB; warm platform overhead p95 \u226425 ms)."
+          ],
+          "L",
+          "M3",
+          [
+            "TEN-02",
+            "OBS-02",
+            "OBS-03",
+            "OCI-05"
+          ]
+        ],
+        [
+          "09",
+          "Use OCI as the explicit migration path",
+          "platform operator",
+          "move legacy functions that fail Wasm qualification to OCI only by explicit choice",
+          "Knative can retire without hidden fallback",
+          "Extend migration classification and the backend guard with per-mode verdicts and an explicit target mode. Risk: R2 (migration control in Falcone).",
+          [
+            "Classification records the wasm and oci verdicts and the target_mode.",
+            "The MIG-02 guard allows target `oci` only with an oci-candidate verdict and an authorized project; otherwise the function stays a blocker.",
+            "MIG-03 retirement counts OCI-migrated workloads and lists remaining blockers."
+          ],
+          "M",
+          "M3",
+          [
+            "MIG-01",
+            "MIG-02",
+            "OCI-01",
+            "OCI-03"
+          ]
+        ],
+        [
+          "10",
+          "Develop and deploy OCI functions",
+          "developer",
+          "use CLI, console and starter support for OCI",
+          "I can build FROM a catalog base and test locally",
+          "Add OCI options to the CLI and console, an OCI starter and documentation of the OCI semantics. Risk: R1 (developer experience).",
+          [
+            "CLI and console show mode, base, intake status and the warm-reuse notice; OCI options appear only in authorized projects.",
+            "A starter shows P1 and P2 (`FROM <catalog digest>`) and runs the contract tester locally.",
+            "Docs state the OCI semantics and that Wasm stays the default."
+          ],
+          "M",
+          "M2",
+          [
+            "API-01",
+            "API-02",
+            "API-03",
+            "OCI-02"
+          ]
+        ]
+      ]
+    },
+    {
+      "code": "CAT",
+      "name": "Superadmin base image catalog",
+      "goal": "Keep one global, audited catalog of Wasm profile components and OCI base images that functions build on and revisions pin.",
+      "requirements": [
+        "Maintain one global, superadmin-managed base catalog of Wasm profile components and OCI base images with immutable name@version entries bound to one digest and visibility filtered by tenant and project.",
+        "Let the superadmin register existing bases by digest-pinned reference after artifact validation or image intake, record optional signature and provenance results, and enable a Wasm base only with profile qualification evidence.",
+        "Let the superadmin create bases from versioned recipes built by confined trusted builders with SBOM and provenance, and reject RUN steps in OCI recipes in v1.",
+        "Enforce the base lifecycle (draft, enabled, deprecated, retired, and disabled with optional invocation blocking) and default aliases without ever rebasing a revision automatically; in both runtime modes, a new function or a base switch needs an enabled base, a deprecated base stays eligible only for new revisions of functions already pinned to it until its window end, and retired and disabled bases are refused for new revisions.",
+        "Pin the selected or default catalog base by id@version and digest on every revision with `base.kind: catalog`, and reject absent, invisible, lifecycle-ineligible or unauthorized catalog bases at deploy, promotion and invoke; BYO revisions need no catalog base.",
+        "Audit every catalog and OCI authorization mutation, and provide superadmin console pages plus a tenant base selector filtered by visibility."
+      ],
+      "stories": [
+        [
+          "01",
+          "Model the global catalog with visibility",
+          "platform superadmin",
+          "keep one catalog with tenant/project visibility",
+          "I control which bases each tenant can use",
+          "Define ctr-base-catalog v1 and its Falcone-owned persistence for both entry kinds (`wasm-profile` and `oci-base`). Risk: R3 (controls code that runs in all tenants).",
+          [
+            "Entries hold kind, name@version, digest, source, verification record, status, window, replacement, visibility and defaults; versions are immutable.",
+            "Only the superadmin mutates entries; reads are filtered by visibility, so no tenant learns of invisible entries.",
+            "Every mutation emits an audit event."
+          ],
+          "L",
+          "M2",
+          [
+            "SEC-01",
+            "TEN-01"
+          ]
+        ],
+        [
+          "02",
+          "Select existing bases",
+          "platform superadmin",
+          "register a base by digest-pinned reference",
+          "vetted upstream images and components can be used",
+          "Register Wasm components through artifact validation and OCI bases through image intake into the mirror. Signature verification is optional per entry, and its result is recorded and shown. Risk: R3 (artifact loading).",
+          [
+            "A tag resolves to a digest once and is stored as that digest.",
+            "Wasm components pass artifact validation; OCI bases pass intake; optional signature and provenance results are recorded.",
+            "A Wasm base is enabled only with WAS-03 qualification evidence for its profile.",
+            "Registered Wasm components are stored by digest under the `catalog-base` retention class, and each matrix-qualified WAS-03 profile is registered as a catalog Wasm entry."
+          ],
+          "L",
+          "M2",
+          [
+            "CAT-01",
+            "WAS-02",
+            "WAS-03",
+            "OCI-03",
+            "STO-01"
+          ]
+        ],
+        [
+          "03",
+          "Create bases from recipes",
+          "platform superadmin",
+          "build a base from a recipe through the trusted build service",
+          "bases are reproducible",
+          "Define ctr-base-recipe v1: a Wasm toolchain/profile spec, and a declarative OCI spec without RUN (FROM a registered digest, layers from approved refs, packages from a pinned repository without maintainer scripts, ENV, numeric non-root USER, WORKDIR, ENTRYPOINT/CMD, LABEL). Risk: R3 (trusted build path).",
+          [
+            "ctr-base-recipe v1 covers the Wasm toolchain/profile spec and the declarative no-RUN OCI spec; RUN is rejected.",
+            "Builds run in confined trusted builders with build credentials and produce SBOM and provenance.",
+            "Results land as draft entries until verification and qualification pass."
+          ],
+          "L",
+          "M2",
+          [
+            "CAT-01",
+            "DEP-01"
+          ]
+        ],
+        [
+          "04",
+          "Manage base lifecycle and versions",
+          "platform superadmin",
+          "enable, disable, deprecate and set defaults for bases",
+          "I can patch bases without breaking functions silently",
+          "Implement the lifecycle draft \u2192 enabled \u2192 deprecated (window end, replacement) \u2192 retired, plus disabled with optional `block_invocations`, with a provisional 90-day default deprecation window. Risk: R2 (product lifecycle; the block path is reviewed under CAT-05).",
+          [
+            "The lifecycle state machine is enforced for `base.kind: catalog` revisions in both runtime modes (Wasm profile and OCI base entries) at deploy, promotion and, for `block_invocations`, invoke; deprecation and retirement do not apply to BYO revisions. Base eligibility follows the lifecycle: a new function, or a function switching base, needs an `enabled` base visible to the project; a new revision of a function already pinned to a base may keep that base while it is `deprecated`, until `window_end`; `retired` and `disabled` bases are refused for new revisions, and `disabled` with `block_invocations` also denies invocations of pinned revisions (`base_disabled`).",
+            "There is no auto-rebase; a replacement creates candidate revisions that owners must promote.",
+            "The default alias always targets an `enabled` base and is resolved and pinned at deploy.",
+            "Lifecycle tests: a grandfathered new revision of a function pinned to a deprecated base is accepted before `window_end` and refused after it; a new function selecting a deprecated base is refused."
+          ],
+          "M",
+          "M3",
+          [
+            "CAT-01",
+            "DEP-02"
+          ]
+        ],
+        [
+          "05",
+          "Use catalog bases in functions and revisions",
+          "developer",
+          "pick a base or get my mode's default",
+          "my builds are reproducible",
+          "Resolve the selected base, or the per-mode and per-language default alias, at deploy and pin it on the revision; admission enforces visibility, lifecycle eligibility and OCI authorization. Risk: R3 (cross-tenant authorization).",
+          [
+            "The manifest selects a catalog base or gets the default; revisions with `base.kind: catalog` pin id@version and digest, and a `kind: byo` revision never requires a catalog base.",
+            "Admission rejects a catalog base that is absent, invisible or ineligible under the ADR 0010 D8 lifecycle rule (`enabled` for a new function or a base switch; `enabled`, or `deprecated` until `window_end`, for a new revision of a function already pinned to that base; `retired` and `disabled` refused for new revisions), in both runtime modes,",
+            "The worker refuses a Wasm revision whose profile component digest differs from its pin."
+          ],
+          "L",
+          "M2",
+          [
+            "CAT-01",
+            "API-02",
+            "DEP-01",
+            "OCI-01"
+          ]
+        ],
+        [
+          "06",
+          "Superadmin catalog console",
+          "platform superadmin",
+          "manage the catalog and OCI authorization in console pages",
+          "I can manage both without calling the API",
+          "Add superadmin console pages for the catalog and the OCI authorization editor, and a tenant base selector. Risk: R2 (UI over R3 APIs).",
+          [
+            "Pages cover list, register, build, verification results, lifecycle, visibility and defaults; destructive actions use the existing confirmation pattern; states are accessible.",
+            "The tenant view shows a base selector and deprecation notices only for visible bases.",
+            "UI tests cover persona gating; server-side checks remain authoritative."
+          ],
+          "M",
+          "M3",
+          [
+            "CAT-01",
+            "CAT-04",
+            "API-03",
+            "OCI-01"
+          ]
+        ]
+      ]
     }
   ],
-  "decision": "Option A accepted: application-level WebAssembly/WASI sandbox inside restricted pods",
-  "planning_revision": "option-a-v2"
+  "decision": "Option A accepted: application-level WebAssembly/WASI sandbox inside restricted pods; ADR 0010 adds a superadmin-authorized OCI execution mode and a global base catalog",
+  "planning_revision": "option-a-v3-adr0010"
 }

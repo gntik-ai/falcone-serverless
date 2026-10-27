@@ -25,3 +25,9 @@ Recommend preflight evidence for both namespaced permissions and actual deny/all
 ## Consequences
 
 The proposed deployment needs verified corporate network prerequisites and may constrain allowable destinations. Egress failures must be diagnosable without exposing credentials. Acceptance would require joint host and network evidence; neither layer's effectiveness is asserted here.
+
+## Amended by ADR 0010
+
+2026-10-27. For OCI mode ([ADR 0010](0010-oci-execution-mode-and-base-catalog.md)), NetworkPolicy is a *primary* control, not a supplement. OCI pods egress only to Falcone host APIs, the per-namespace egress gateway and DNS. Allow-listed HTTP goes through the shim to the egress gateway, which applies the host-layer checks. If preflight cannot confirm NetworkPolicy enforcement, OCI mode is blocked. This note does not change this ADR's Proposed status or its R3 review requirement.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

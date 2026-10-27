@@ -25,3 +25,9 @@ Recommend requiring expand/contract compatibility, fenced attempt ownership, sco
 ## Consequences
 
 Acceptance would assign one schema authority and require versioned cross-repository contracts. Runtime delivery would depend on coordinated Falcone migrations and restore evidence. No schema is inspected, created or changed here, and MIG-01's contract inventory and dependency classification remain outstanding.
+
+## Amended by ADR 0010
+
+2026-10-27. Under [ADR 0010](0010-oci-execution-mode-and-base-catalog.md), Falcone owns the OCI authorization records, the base catalog and the revision mode/base columns, and their schema migrations.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

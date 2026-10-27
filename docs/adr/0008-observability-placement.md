@@ -25,3 +25,9 @@ Recommend that the platform operator specify backend placement, retention, outag
 ## Consequences
 
 Existing infrastructure reuse would reduce runtime deployment scope but create an explicit operational prerequisite. Exact backends, storage budgets, retention and SLOs remain unverified until the platform operator supplies evidence. No instrumentation or external service is changed by this ADR.
+
+## Amended by ADR 0010
+
+2026-10-27. [ADR 0010](0010-oci-execution-mode-and-base-catalog.md) adds a `runtime_mode` dimension with two values (`wasm`, `oci`). OCI container stdout and stderr are pod-level, labelled by revision and tenant-scoped through this ADR's path. Per-invocation OCI logs go through the shim's capability API.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.

@@ -29,3 +29,9 @@ Implementation, restricted-cluster feasibility and security qualification remain
 ## Consequences
 
 Compatibility must be demonstrated for each qualified language/package profile; unsupported dependencies block migration. Startup cost, capacity and hostile-code safety need measurement and independent qualification. Accepting an architecture direction is not evidence that the implementation or performance targets work. ADRs 0003–0009 remain proposals; ADR 0002 records repository ownership separately.
+
+## Amended by ADR 0010
+
+2026-10-27. Superseded in part by [ADR 0010](0010-oci-execution-mode-and-base-catalog.md) for `runtime.mode=oci`. The Option A decision remains in force for Wasm, which is the default mode. ADR 0010 adds an explicit OCI mode that the platform superadmin authorizes per tenant and project. It is never a fallback, and the controller's write set is unchanged.
+
+Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.
