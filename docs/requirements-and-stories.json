@@ -494,7 +494,7 @@
           "tenant code cannot obtain host privileges",
           "Run trusted worker processes and untrusted Wasm guests under existing corporate policy. Risk: R3 (sandbox, host capabilities).",
           [
-            "Installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass.",
+            "In default namespaceMode=preprovisioned, installation and workload startup pass with the actual namespace identity and existing SCC, without cluster writes, host privileges or custom RuntimeClass; proposed create/shared placement is governed by ADR 0011.",
             "Guests cannot invoke native processes, load native libraries or obtain Kubernetes/admin credentials; dangerous imports are rejected.",
             "Sandbox failure or unsupported features stop execution; there is no native fallback. Worker and compilation isolation tests are documented."
           ],
@@ -533,7 +533,7 @@
       "goal": "Preserve Falcone's tenant contract and bound noisy-neighbor effects.",
       "requirements": [
         "Persist tenant_id and workspace_id on every business resource, activation, artifact binding and audit record, with database enforcement and authorization-scoped lookups.",
-        "Use administrator-preprovisioned namespaces and explicit namespaced RBAC; isolate tenant worker pools by verified mappings without requiring namespace creation or treating labels as a security boundary.",
+        "Use namespaceMode=preprovisioned by default with administrator-provided namespaces, explicit namespaced RBAC and verified tenant mappings; Proposed ADR 0011 describes create after namespace/RBAC permission preflight and shared in the release namespace, pending acceptance and the operator hard-rule amendment. In proposed shared mode, per-tenant names/labels and tenant-scoped NetworkPolicies become the tenant boundary (R3), with distinct service accounts and unchanged credential/RLS checks.",
         "Obtain all quota and charging policies from Falcone, including failures, retries, startup, idle capacity, builds, storage, WebSocket connections/messages and interactive/batch execution.",
         "Enforce aggregate reservations across replicas with an initial configurable allowance of 20 executions per tenant; allocate separate interactive/batch budgets and fair queued capacity.",
         "On tenant suspension or capability disable, deny new work immediately, pause triggers and apply an explicit policy to in-flight and queued work.",
@@ -551,7 +551,7 @@
             "SQL/RLS, API, log, artifact and activation tests reject adjacent tenants and unauthorized sibling workspaces.",
             "Same function name in two tenants produces distinct owned runtime resources.",
             "Unknown namespace mappings fail before Kubernetes writes; tenant input cannot choose a privileged namespace.",
-            "The namespace-bindings contract v1 includes an optional preprovisioned `oci_namespace` per tenant (ADR 0010)."
+            "The namespace-bindings contract v1 includes an optional `oci_namespace` per tenant (ADR 0010): administrator-provided in default namespaceMode=preprovisioned; Proposed ADR 0011 describes dedicated namespaces in create after permission preflight and release-namespace bindings in shared, pending acceptance and the operator amendment. Shared OCI additionally requires per-tenant superadmin enablement and verified NetworkPolicy enforcement."
           ],
           "L",
           "M1",
@@ -756,7 +756,7 @@
       "name": "Operations, CI/CD and resilience",
       "goal": "Ship and operate a supported, reproducible serverless subsystem.",
       "requirements": [
-        "Install with ordinary namespaced Helm resources and pregranted RBAC on the latest two qualified Kubernetes minor lines and OpenShift 4.20; require no CRD, cluster-role, operator, custom RuntimeClass or elevated SCC creation.",
+        "Install with ordinary namespaced Helm resources and pregranted RBAC on the latest two qualified Kubernetes minor lines and OpenShift 4.20, with namespaceMode=preprovisioned by default; Proposed ADR 0011 describes shared without namespace creation and an explicit create exception for dedicated namespaces only after namespace/RBAC permission preflight, pending acceptance and the operator amendment. Require no CRD, ClusterRole, operator, custom RuntimeClass or elevated SCC creation in any mode.",
         "Support HA control/data-plane replicas, leader election or sharding for singleton duties, disruption budgets and documented degraded behavior.",
         "Provide CI gates for API contracts, tenant isolation, runtime conformance, supply-chain policy and realistic integration tests with Keycloak, SeaweedFS, Kafka and Temporal.",
         "Submit function manifests through the authoritative Falcone API; keep PostgreSQL as desired-state authority and let one namespaced reconciler own standard worker-pool resources without custom Kubernetes resources.",
@@ -772,9 +772,9 @@
           "cluster setup is inspectable and repeatable",
           "Deploy APIs, controller and trusted worker pools with standard resources; reject missing prerequisites without requesting privilege escalation. Risk: R3 (sandbox, host capabilities, tenant isolation).",
           [
-            "Preflight using the deployment identity proves all required namespaced verbs; a rendered manifest audit contains no cluster-scoped resources, privileged pods or custom SCC/RuntimeClass.",
+            "Preflight using the deployment identity proves all required namespaced verbs. Default namespaceMode=preprovisioned and proposed shared require no namespace creation or cluster-scoped rendered resources; proposed create (ADR 0011, pending acceptance and the operator amendment) additionally proves namespace and namespaced RBAC creation authority, failing closed with an error naming namespaceMode on denial. Its only proposed cluster-scoped exception is dedicated Namespace creation; no mode permits privileged pods or custom SCC/RuntimeClass.",
             "Actual pod startup and invocation pass on qualified Kubernetes lines and the supplied OpenShift patch release under its existing SCC.",
-            "Preprovisioned namespace, gateway, storage, broker and RBAC prerequisites are explicit; Falcone never silently creates/adopts cluster infrastructure.",
+            "Namespace prerequisites follow namespaceMode (preprovisioned by default; proposed create/shared only after ADR 0011 acceptance and the operator amendment); gateway, storage, broker and RBAC prerequisites remain explicit, with no silent creation/adoption of cluster infrastructure. Test fixtures depend only on testNamespaceMode=create (default, `fs-test-<run>`) or proposed shared (`FS_TEST_NAMESPACE`, per-run names and `falcone.test/run=<nonce>`, cleanup only by the owned run label and refusal to touch unlabelled or other-run resources); follow #121 and keep off-limits namespaces unchanged.",
             "The serverless chart values contract v1 includes an OCI section that is disabled by default and renders no OCI resources (ADR 0010)."
           ],
           "L",
@@ -1062,7 +1062,7 @@
         "Accept an explicit per-function runtime.mode (wasm by default, or oci) recorded on the immutable revision, define a versioned OCI function container contract, and never switch a function between modes automatically.",
         "Accept only digest-pinned OCI function images assembled or built FROM a visible catalog base, or BYO images (`base.kind: byo`) in superadmin-flagged projects with a valid signature and an advisory scan record; verify and copy each image into the platform intake mirror before any pod is rendered, without executing image content.",
         "Serve OCI invocations through a trusted shim that implements the worker execution API over mutually authenticated TLS with a per-pod shim identity mounted only into the shim container, verifies the dispatcher identity, enforces concurrency and deadlines and reports honest cancellation outcomes; the dispatcher verifies the shim identity before sending any credential or request, and the shim never forwards the execution credential to the tenant container.",
-        "Run OCI functions in single-revision restricted pods (non-root, read-only root filesystem, no service-account token) materialized on demand in the tenant's preprovisioned OCI namespace, with the controller's write set unchanged.",
+        "Run OCI functions in single-revision restricted pods (non-root, read-only root filesystem, no service-account token) materialized on demand in the tenant's bound OCI namespace, administrator-provided under default namespaceMode=preprovisioned; Proposed ADR 0011 describes dedicated namespaces in create after permission preflight and the release namespace in shared, pending acceptance and the operator amendment. Shared OCI requires per-tenant superadmin enablement and verified tenant-scoped NetworkPolicy enforcement; the controller's write set is unchanged.",
         "Give OCI functions storage, event, workflow, secret, logging and allow-listed HTTP access only through a localhost capability API and an egress gateway; keep the execution credential outside the tenant container and enforce OCI-namespace NetworkPolicies.",
         "Qualify OCI isolation with adversarial evidence before enabling OCI for any tenant, and publish a versioned residual-risk register covering the shared kernel, restricted PSA, side channels and node patch ownership.",
         "Charge OCI executions against the shared tenant execution slots plus OCI caps on materialized revisions, warm replicas, pod memory, image bytes and builds, and record per-mode usage and metrics.",
