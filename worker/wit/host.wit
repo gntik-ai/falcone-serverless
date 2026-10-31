@@ -1,0 +1,141 @@
+package falcone:host@0.1.0;
+
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface cancellation {
+    /// Shared failure vocabulary; errors never expose credentials or binding details.
+    variant host-error {
+        denied,
+        limit-exceeded,
+        timeout,
+        cancelled,
+    }
+
+    is-cancelled: func() -> bool;
+}
+
+/// Authorization comes only from verified invocation context, never object keys.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface storage {
+    use cancellation.{host-error};
+
+    /// An execution-scoped authorized object handle, invalid after completion.
+    resource object;
+    /// An execution-scoped checkpoint handle, invalid after completion.
+    resource checkpoint;
+
+    /// Keys are relative to the host-authorized storage binding.
+    open-object: func(key: string) -> result<object, host-error>;
+    read-object: func(handle: borrow<object>) -> result<list<u8>, host-error>;
+    write-object: func(handle: borrow<object>, data: list<u8>) -> result<_, host-error>;
+    /// Checkpoints are bound to revision, schema, input digest and fenced attempt by the host.
+    open-checkpoint: func(key: string) -> result<checkpoint, host-error>;
+    read-checkpoint: func(handle: borrow<checkpoint>) -> result<list<u8>, host-error>;
+    write-checkpoint: func(handle: borrow<checkpoint>, data: list<u8>) -> result<_, host-error>;
+}
+
+/// Only destinations allow-listed in verified invocation context may be requested.
+/// The host checks DNS rebinding, redirects, metadata/private ranges and deadlines.
+/// Credentials stay in the host binding layer; no ambient network authority is granted.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface http {
+    use cancellation.{host-error};
+
+    record header {
+        name: string,
+        value: string,
+    }
+    record response {
+        status: u16,
+        headers: list<header>,
+        body: list<u8>,
+    }
+    /// Both aggregate headers and body count towards the per-call buffer ceilings.
+    request: func(url: string, method: string, headers: list<header>, body: list<u8>) -> result<response, host-error>;
+}
+
+/// Routing and authorization come from verified invocation context.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface events {
+    use cancellation.{host-error};
+
+    /// The host resolves the logical destination within the invocation's allowed bindings.
+    publish: func(destination: string, payload: list<u8>) -> result<_, host-error>;
+}
+
+/// Starts and signals are limited to workflows allow-listed by verified invocation context.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface workflows {
+    use cancellation.{host-error};
+
+    /// An execution-scoped authorized workflow handle, invalid after completion.
+    resource execution;
+
+    start: func(workflow: string, input: list<u8>) -> result<execution, host-error>;
+    signal: func(handle: borrow<execution>, name: string, payload: list<u8>) -> result<_, host-error>;
+}
+
+/// Structured logs inherit verified invocation scope. The host redacts sensitive fields.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface logging {
+    use cancellation.{host-error};
+
+    enum level { debug, info, warn, error }
+    record field {
+        name: string,
+        value: string,
+    }
+    log: func(severity: level, message: string, fields: list<field>) -> result<_, host-error>;
+}
+
+/// Explicit application progress and checkpoint reporting, scoped by verified context.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface progress {
+    use cancellation.{host-error};
+    use storage.{checkpoint};
+
+    report: func(completed: u64, total: u64, message: string) -> result<_, host-error>;
+    report-checkpoint: func(handle: borrow<checkpoint>) -> result<_, host-error>;
+}
+
+/// Read-only identifiers from verified invocation context; these are not credentials.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface invocation-context {
+    invocation-key: func() -> string;
+    attempt-id: func() -> string;
+    idempotency-key: func() -> string;
+}
+
+world function {
+    import storage;
+    import http;
+    import events;
+    import workflows;
+    import logging;
+    import cancellation;
+    import progress;
+    import invocation-context;
+}
