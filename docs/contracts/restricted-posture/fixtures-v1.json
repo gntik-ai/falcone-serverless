@@ -1,0 +1,1190 @@
+[
+  {
+    "id": "c-worker",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "c-controller-token",
+    "role": "controller",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp01-container-override",
+    "role": "guest-worker",
+    "expect": "RP-01",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsUser": 0
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp02-init-container",
+    "role": "guest-worker",
+    "expect": "RP-02",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "initContainers": [
+              {
+                "name": "init",
+                "securityContext": {
+                  "allowPrivilegeEscalation": true,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp04-capabilities",
+    "role": "guest-worker",
+    "expect": "RP-04",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ],
+                    "add": [
+                      "NET_ADMIN"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp05-seccomp",
+    "role": "guest-worker",
+    "expect": "RP-05",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "Unconfined"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp06-root-filesystem",
+    "role": "guest-worker",
+    "expect": "RP-06",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": false
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp10-token-absent",
+    "role": "guest-worker",
+    "expect": "RP-10",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp03-privileged",
+    "role": "guest-worker",
+    "expect": "RP-03",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "privileged": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp07-host-network",
+    "role": "guest-worker",
+    "expect": "RP-07",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "hostNetwork": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp08-host-path",
+    "role": "guest-worker",
+    "expect": "RP-08",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "host",
+                "hostPath": {
+                  "path": "/"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp09-host-port",
+    "role": "guest-worker",
+    "expect": "RP-09",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                },
+                "ports": [
+                  {
+                    "containerPort": 8080,
+                    "hostPort": 8080
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp11-runtime-class",
+    "role": "guest-worker",
+    "expect": "RP-11",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "runtimeClassName": "custom"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp12-clusterrole",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "ClusterRole"
+    }
+  },
+  {
+    "id": "v-rp12-rolebinding-clusterrole",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "roleRef": {
+        "kind": "ClusterRole",
+        "apiGroup": "rbac.authorization.k8s.io",
+        "name": "admin"
+      }
+    }
+  },
+  {
+    "id": "v-rp12-no-kind",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "apps/v1"
+    }
+  },
+  {
+    "id": "c-service",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "v1",
+      "kind": "Service"
+    }
+  },
+  {
+    "id": "c-serviceaccount",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount"
+    }
+  },
+  {
+    "id": "c-lease",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "coordination.k8s.io/v1",
+      "kind": "Lease"
+    }
+  },
+  {
+    "id": "c-role",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role"
+    }
+  },
+  {
+    "id": "c-rolebinding",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "pool-controller"
+      }
+    }
+  },
+  {
+    "id": "c-controller-token-enabled",
+    "role": "controller",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": true,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "c-container-overrides-pod",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": false,
+              "seccompProfile": {
+                "type": "Unconfined"
+              },
+              "runAsUser": 0
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsNonRoot": true,
+                  "runAsUser": 10001,
+                  "seccompProfile": {
+                    "type": "RuntimeDefault"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "c-init-and-optional-fields",
+    "role": "guest-worker",
+    "expect": "pass",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ],
+                    "add": []
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "privileged": false
+                },
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ]
+              }
+            ],
+            "hostNetwork": false,
+            "hostPID": false,
+            "hostIPC": false,
+            "volumes": [
+              {
+                "name": "cache",
+                "emptyDir": {}
+              }
+            ],
+            "initContainers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ],
+                    "add": []
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "privileged": false
+                },
+                "ports": [
+                  {
+                    "containerPort": 8080
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp01-nonroot-override",
+    "role": "guest-worker",
+    "expect": "RP-01",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsNonRoot": false
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp01-null-override",
+    "role": "guest-worker",
+    "expect": "RP-01",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "runAsNonRoot": null
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp05-container-override",
+    "role": "guest-worker",
+    "expect": "RP-05",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "seccompProfile": {
+                    "type": "Unconfined"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp05-null-override",
+    "role": "guest-worker",
+    "expect": "RP-05",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "seccompProfile": null
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp05-no-profile-merge",
+    "role": "guest-worker",
+    "expect": "RP-05",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true,
+                  "seccompProfile": {}
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp07-host-pid",
+    "role": "guest-worker",
+    "expect": "RP-07",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "hostPID": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp07-host-ipc",
+    "role": "guest-worker",
+    "expect": "RP-07",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "hostIPC": true
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp08-null-host-path",
+    "role": "guest-worker",
+    "expect": "RP-08",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "volumes": [
+              {
+                "name": "host",
+                "hostPath": null
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp09-init-host-port",
+    "role": "guest-worker",
+    "expect": "RP-09",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": false,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ],
+            "initContainers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                },
+                "ports": [
+                  {
+                    "containerPort": 8080,
+                    "hostPort": 8080
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp10-token-enabled",
+    "role": "guest-worker",
+    "expect": "RP-10",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": "Deployment",
+      "spec": {
+        "template": {
+          "spec": {
+            "automountServiceAccountToken": true,
+            "securityContext": {
+              "runAsNonRoot": true,
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "containers": [
+              {
+                "name": "worker",
+                "securityContext": {
+                  "allowPrivilegeEscalation": false,
+                  "capabilities": {
+                    "drop": [
+                      "ALL"
+                    ]
+                  },
+                  "readOnlyRootFilesystem": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "v-rp12-configmap",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "v1",
+      "kind": "ConfigMap"
+    }
+  },
+  {
+    "id": "v-rp12-crd",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "apiextensions.k8s.io/v1",
+      "kind": "CustomResourceDefinition"
+    }
+  },
+  {
+    "id": "v-rp12-scc",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "security.openshift.io/v1",
+      "kind": "SecurityContextConstraints"
+    }
+  },
+  {
+    "id": "v-rp12-wrong-api-version",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "extensions/v1beta1",
+      "kind": "Deployment"
+    }
+  },
+  {
+    "id": "v-rp12-rolebinding-no-role-ref",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding"
+    }
+  },
+  {
+    "id": "v-rp12-null-kind",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": {
+      "apiVersion": "apps/v1",
+      "kind": null
+    }
+  },
+  {
+    "id": "v-rp12-not-an-object",
+    "role": "guest-worker",
+    "expect": "RP-12",
+    "object": []
+  }
+]
