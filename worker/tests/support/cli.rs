@@ -1,4 +1,4 @@
-use super::{Config, Kube, Namespace, namespace_name, pinned_image};
+use super::{Config, Kube, Namespace, NamespaceClient, namespace_name, pinned_image};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -107,7 +107,89 @@ impl Drop for Scratch {
     }
 }
 
-impl<R: Runner> Kube for Cli<R> {
+impl<R: Runner> NamespaceClient for Cli<R> {
+    fn can_create_namespace(&self) -> Result<bool, String> {
+        let response = self.runner.run(
+            "kubectl",
+            &["--request-timeout=15s", "create", "-f", "-", "-o", "json"],
+            Some(&serde_json::json!({
+                "apiVersion":"authorization.k8s.io/v1", "kind":"SelfSubjectAccessReview",
+                "spec":{"resourceAttributes":{"verb":"create", "group":"", "resource":"namespaces"}}
+            })),
+        )?;
+        let object: Value = serde_json::from_str(&response).map_err(|_| "invalid SSAR response")?;
+        Ok(object["status"]["allowed"] == true && object["status"]["denied"] != true)
+    }
+
+    fn get_namespace(&self, namespace: &Namespace) -> Result<Value, String> {
+        let response = self.runner.run(
+            "kubectl",
+            &[
+                "--request-timeout=15s",
+                "get",
+                "namespace",
+                namespace.name(),
+                "-o",
+                "json",
+            ],
+            None,
+        )?;
+        serde_json::from_str(&response).map_err(|_| "invalid namespace response".into())
+    }
+
+    fn cleanup_run(&self, namespace: &Namespace, run: &str) -> Result<(), String> {
+        Namespace::new(run)?;
+        let selector = format!("falcone.test/run={run}");
+        let get = [
+            "--request-timeout=15s",
+            "--namespace",
+            namespace.name(),
+            "get",
+            "pods",
+            "--selector",
+            &selector,
+            "-o",
+            "json",
+        ];
+        let response = self.runner.run("kubectl", &get, None)?;
+        let objects: Value =
+            serde_json::from_str(&response).map_err(|_| "invalid cleanup response")?;
+        for object in objects["items"].as_array().ok_or("cleanup list missing")? {
+            if object["metadata"]["labels"]["falcone.test/run"] != run {
+                continue;
+            }
+            let name = object["metadata"]["name"]
+                .as_str()
+                .ok_or("owned pod name missing")?;
+            if name != run {
+                return Err("unexpected run-labelled pod name".into());
+            }
+            let uid = object["metadata"]["uid"]
+                .as_str()
+                .ok_or("owned pod UID missing")?;
+            let version = object["metadata"]["resourceVersion"]
+                .as_str()
+                .ok_or("owned pod version missing")?;
+            let path = format!("/api/v1/namespaces/{}/pods/{name}", namespace.name());
+            self.runner.run("kubectl", &["--request-timeout=15s", "delete", "--raw", &path, "-f", "-"], Some(&serde_json::json!({
+                "apiVersion":"v1", "kind":"DeleteOptions", "preconditions":{"uid":uid,"resourceVersion":version}
+            })))?;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let response = self.runner.run("kubectl", &get, None)?;
+            let objects: Value =
+                serde_json::from_str(&response).map_err(|_| "invalid cleanup response")?;
+            if objects["items"].as_array().is_some_and(Vec::is_empty) {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("run-labelled pods remain".into());
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     fn create_namespace(&self, namespace: &Namespace) -> Result<(), String> {
         self.runner.run(
             "kubectl",
@@ -117,6 +199,25 @@ impl<R: Runner> Kube for Cli<R> {
         Ok(())
     }
 
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String> {
+        self.runner.run(
+            "kubectl",
+            &[
+                "--request-timeout=60s",
+                "delete",
+                "namespace",
+                namespace.name(),
+                "--ignore-not-found=true",
+                "--wait=true",
+                "--timeout=60s",
+            ],
+            None,
+        )?;
+        Ok(())
+    }
+}
+
+impl<R: Runner> Kube for Cli<R> {
     fn create_pod(&self, namespace: &Namespace, pod: &Value) -> Result<(), String> {
         let name = pod["metadata"]["name"]
             .as_str()
@@ -203,23 +304,6 @@ impl<R: Runner> Kube for Cli<R> {
             ],
             None,
         )
-    }
-
-    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String> {
-        self.runner.run(
-            "kubectl",
-            &[
-                "--request-timeout=60s",
-                "delete",
-                "namespace",
-                namespace.name(),
-                "--ignore-not-found=true",
-                "--wait=true",
-                "--timeout=60s",
-            ],
-            None,
-        )?;
-        Ok(())
     }
 }
 

@@ -1,10 +1,9 @@
-use super::{Namespace, NamespaceMode, validate_spec};
+use super::{Namespace, NamespaceClient, NamespaceGuard, NamespaceMode, validate_spec};
 use serde_json::{Value, json};
 
 use std::time::Duration;
 
-pub trait Kube {
-    fn create_namespace(&self, namespace: &Namespace) -> Result<(), String>;
+pub trait Kube: NamespaceClient {
     fn create_pod(&self, namespace: &Namespace, pod: &Value) -> Result<(), String>;
     fn wait_terminal(
         &self,
@@ -13,28 +12,18 @@ pub trait Kube {
         timeout: Duration,
     ) -> Result<String, String>;
     fn logs(&self, namespace: &Namespace, pod: &str) -> Result<String, String>;
-    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String>;
 }
 
 pub struct Session<'a, K: Kube> {
     kube: &'a K,
     namespace: Namespace,
     pod: String,
-    delete_namespace: bool,
+    guard: NamespaceGuard<'a, K>,
 }
 
 impl<'a, K: Kube> Session<'a, K> {
-    pub fn close(mut self) -> Result<(), String> {
-        if self.delete_namespace {
-            self.delete_namespace = false;
-            self.kube.delete_namespace(&self.namespace).map_err(|_| {
-                format!(
-                    "failed to delete guarded namespace {}; operator cleanup required",
-                    self.namespace.name()
-                )
-            })?;
-        }
-        Ok(())
+    pub fn close(self) -> Result<(), String> {
+        self.guard.close()
     }
 
     pub fn verify(&self) -> Result<(), String> {
@@ -62,37 +51,15 @@ impl<'a, K: Kube> Session<'a, K> {
         mode: &NamespaceMode,
     ) -> Result<Self, String> {
         validate_spec(spec)?;
-        let run = Namespace::new(name)?;
-        let namespace = match mode {
-            NamespaceMode::Create => run.clone(),
-            NamespaceMode::Shared(namespace) => namespace.clone(),
-        };
-        let delete_namespace = *mode == NamespaceMode::Create;
-        if delete_namespace {
-            kube.create_namespace(&namespace).map_err(|_| {
-                "FS_TEST_NAMESPACE_MODE=create: namespace creation denied or unavailable"
-                    .to_string()
-            })?;
-        }
+        let guard = NamespaceGuard::open(kube, name, mode)?;
         let session = Self {
             kube,
-            namespace,
+            namespace: guard.namespace.clone(),
             pod: name.into(),
-            delete_namespace,
+            guard,
         };
         kube.create_pod(&session.namespace, &json!({"apiVersion":"v1", "kind":"Pod", "metadata": {
             "name":name, "namespace":session.namespace.name(), "labels":{"falcone.test/run":name}}, "spec":spec}))?;
         Ok(session)
-    }
-}
-
-impl<K: Kube> Drop for Session<'_, K> {
-    fn drop(&mut self) {
-        if self.delete_namespace && self.kube.delete_namespace(&self.namespace).is_err() {
-            eprintln!(
-                "failed to delete guarded namespace {}; operator cleanup required",
-                self.namespace.name()
-            );
-        }
     }
 }

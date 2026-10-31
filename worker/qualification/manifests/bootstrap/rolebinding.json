@@ -1,0 +1,7 @@
+{
+  "apiVersion": "rbac.authorization.k8s.io/v1",
+  "kind": "RoleBinding",
+  "metadata": {"name": "installer"},
+  "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "installer"},
+  "subjects": [{"kind": "ServiceAccount", "name": "installer", "namespace": "fs-test-placeholder"}]
+}

@@ -1,0 +1,37 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {"name": "was01"},
+  "spec": {
+    "replicas": 1,
+    "selector": {"matchLabels": {"falcone.test/run": "placeholder"}},
+    "template": {
+      "metadata": {"labels": {"falcone.test/run": "placeholder"}},
+      "spec": {
+        "automountServiceAccountToken": false,
+        "enableServiceLinks": false,
+        "serviceAccountName": "workload",
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 10001,
+          "seccompProfile": {"type": "RuntimeDefault"}
+        },
+        "containers": [{
+          "name": "runner",
+          "image": "registry.invalid/was01@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "securityContext": {
+            "allowPrivilegeEscalation": false,
+            "readOnlyRootFilesystem": true,
+            "capabilities": {"drop": ["ALL"]}
+          },
+          "resources": {
+            "requests": {"cpu": "100m", "memory": "128Mi"},
+            "limits": {"cpu": "1", "memory": "512Mi"}
+          },
+          "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}]
+        }],
+        "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "16Mi"}}]
+      }
+    }
+  }
+}
