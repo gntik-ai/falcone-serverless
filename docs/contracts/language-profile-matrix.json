@@ -4,7 +4,7 @@
     "javascript": {
       "id": "javascript-wasi-v1",
       "status": "disabled",
-      "wasmtimeVersion": "49.0.4",
+      "wasmtimeVersion": "49.0.5",
       "wasiVersion": "unqualified",
       "toolchainVersion": "unqualified",
       "packageCatalogueVersion": "unqualified",
@@ -22,7 +22,7 @@
     "python": {
       "id": "python-wasi-v1",
       "status": "disabled",
-      "wasmtimeVersion": "49.0.4",
+      "wasmtimeVersion": "49.0.5",
       "wasiVersion": "unqualified",
       "toolchainVersion": "unqualified",
       "packageCatalogueVersion": "unqualified",
@@ -40,7 +40,7 @@
     "go": {
       "id": "go-wasi-v1",
       "status": "disabled",
-      "wasmtimeVersion": "49.0.4",
+      "wasmtimeVersion": "49.0.5",
       "wasiVersion": "unqualified",
       "toolchainVersion": "unqualified",
       "packageCatalogueVersion": "unqualified",

@@ -12,7 +12,7 @@ repository = "https://github.com/gntik-ai/falcone-serverless"
 # the newest release published before 2026-10-17; wasmparser matches the wasm-tools family
 # wasmtime uses. The worker sandbox is offline and only reads crates already in Cargo.lock.
 [workspace.dependencies]
-wasmtime = { version = "=49.0.4", default-features = false, features = ["cranelift", "runtime", "std", "wat", "component-model"] }
+wasmtime = { version = "=49.0.5", default-features = false, features = ["cranelift", "runtime", "std", "wat", "component-model"] }
 serde_json = "1.0.154"
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
 wasmparser = "=0.258.3"

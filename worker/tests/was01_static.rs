@@ -54,6 +54,9 @@ fn pinned_versions_and_inventory() {
         versions["wasmtime_version"].as_str(),
         requirement.strip_prefix('=')
     );
+    // The qualification inventory records the exact engine build, so a feature change is visible there.
+    assert_eq!(versions["wasmtime_default_features"].as_bool(), Some(false));
+    assert_eq!(versions["wasmtime_features"], dependency["features"]);
     for (key, expected) in [
         ("compilation_backend", "cranelift"),
         ("wasi_interface", "none"),
