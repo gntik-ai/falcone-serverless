@@ -1,0 +1,414 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:revision-runtime-manifest:1",
+  "title": "ctr-revision-runtime-manifest v1 (Wasm)",
+  "type": "object",
+  "additionalProperties": false,
+  "propertyNames": {
+    "$ref": "#/$defs/safeName"
+  },
+  "required": [
+    "manifestVersion",
+    "artifactDigest",
+    "languageProfile",
+    "engineVersion",
+    "wasiVersion",
+    "interfaceVersion",
+    "imports",
+    "budgets",
+    "grants",
+    "effectiveConfiguration",
+    "provenance",
+    "sbom"
+  ],
+  "properties": {
+    "manifestVersion": {
+      "const": "1"
+    },
+    "artifactDigest": {
+      "$ref": "#/$defs/digest"
+    },
+    "languageProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "engineVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "wasiVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "interfaceVersion": {
+      "const": "0.1.0"
+    },
+    "imports": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "fuel",
+        "memoryBytes",
+        "timeoutMs",
+        "maxHostCalls"
+      ],
+      "properties": {
+        "fuel": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "maxHostCalls": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "grants": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/grant"
+      }
+    },
+    "effectiveConfiguration": {
+      "type": "object",
+      "propertyNames": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/safeName"
+          },
+          {
+            "not": {
+              "pattern": "([Pp][_.-]*[Aa][_.-]*[Ss][_.-]*[Ss][_.-]*[Ww][_.-]*[Oo][_.-]*[Rr][_.-]*[Dd]|[Pp][_.-]*[Aa][_.-]*[Ss][_.-]*[Ss][_.-]*[Ww][_.-]*[Dd]|[Ss][_.-]*[Ee][_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Tt]|[Aa][_.-]*[Pp][_.-]*[Ii][_.-]*[Kk][_.-]*[Ee][_.-]*[Yy]|[Pp][_.-]*[Rr][_.-]*[Ii][_.-]*[Vv][_.-]*[Aa][_.-]*[Tt][_.-]*[Ee][_.-]*[Kk][_.-]*[Ee][_.-]*[Yy]|[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Dd][_.-]*[Ee][_.-]*[Nn][_.-]*[Tt][_.-]*[Ii][_.-]*[Aa][_.-]*[Ll]|[Aa][_.-]*[Cc][_.-]*[Cc][_.-]*[Ee][_.-]*[Ss][_.-]*[Ss][_.-]*[Tt][_.-]*[Oo][_.-]*[Kk][_.-]*[Ee][_.-]*[Nn]|[Aa][_.-]*[Uu][_.-]*[Tt][_.-]*[Hh][_.-]*[Tt][_.-]*[Oo][_.-]*[Kk][_.-]*[Ee][_.-]*[Nn]|[Bb][_.-]*[Ee][_.-]*[Aa][_.-]*[Rr][_.-]*[Ee][_.-]*[Rr][_.-]*[Tt][_.-]*[Oo][_.-]*[Kk][_.-]*[Ee][_.-]*[Nn])"
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "integer",
+          "boolean"
+        ]
+      }
+    },
+    "provenance": {
+      "$ref": "#/$defs/reference"
+    },
+    "sbom": {
+      "$ref": "#/$defs/reference"
+    }
+  },
+  "$defs": {
+    "safeName": {
+      "not": {
+        "pattern": "^([_.-]*[Vv][_.-]*[Aa][_.-]*[Ll][_.-]*[Uu][_.-]*[Ee][_.-]*|[_.-]*[Pp][_.-]*[Ll][_.-]*[Aa][_.-]*[Ii][_.-]*[Nn][_.-]*[Tt][_.-]*[Ee][_.-]*[Xx][_.-]*[Tt][_.-]*|[_.-]*[Ss][_.-]*[Ee][_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Tt][_.-]*|[_.-]*[Ss][_.-]*[Ee][_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Tt][_.-]*[Vv][_.-]*[Aa][_.-]*[Ll][_.-]*[Uu][_.-]*[Ee][_.-]*|[_.-]*[Pp][_.-]*[Aa][_.-]*[Ss][_.-]*[Ss][_.-]*[Ww][_.-]*[Oo][_.-]*[Rr][_.-]*[Dd][_.-]*|[_.-]*[Pp][_.-]*[Aa][_.-]*[Ss][_.-]*[Ss][_.-]*[Ww][_.-]*[Dd][_.-]*|[_.-]*[Tt][_.-]*[Oo][_.-]*[Kk][_.-]*[Ee][_.-]*[Nn][_.-]*|[_.-]*[Aa][_.-]*[Pp][_.-]*[Ii][_.-]*[Kk][_.-]*[Ee][_.-]*[Yy][_.-]*|[_.-]*[Pp][_.-]*[Rr][_.-]*[Ii][_.-]*[Vv][_.-]*[Aa][_.-]*[Tt][_.-]*[Ee][_.-]*[Kk][_.-]*[Ee][_.-]*[Yy][_.-]*|[_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Dd][_.-]*[Ee][_.-]*[Nn][_.-]*[Tt][_.-]*[Ii][_.-]*[Aa][_.-]*[Ll][_.-]*|[_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Dd][_.-]*[Ee][_.-]*[Nn][_.-]*[Tt][_.-]*[Ii][_.-]*[Aa][_.-]*[Ll][_.-]*[Ss][_.-]*|[_.-]*[Cc][_.-]*[Ll][_.-]*[Ii][_.-]*[Ee][_.-]*[Nn][_.-]*[Tt][_.-]*[Ss][_.-]*[Ee][_.-]*[Cc][_.-]*[Rr][_.-]*[Ee][_.-]*[Tt][_.-]*|[_.-]*[Aa][_.-]*[Cc][_.-]*[Cc][_.-]*[Ee][_.-]*[Ss][_.-]*[Ss][_.-]*[Kk][_.-]*[Ee][_.-]*[Yy][_.-]*)$"
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "ref",
+        "digest"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "secretRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storageScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "prefixes"
+      ],
+      "properties": {
+        "prefixes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "*"
+            }
+          }
+        }
+      }
+    },
+    "httpScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "hosts"
+      ],
+      "properties": {
+        "hosts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "*"
+            }
+          }
+        }
+      }
+    },
+    "eventScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "topics"
+      ],
+      "properties": {
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "*"
+            }
+          }
+        }
+      }
+    },
+    "workflowScope": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "targets"
+      ],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "not": {
+              "const": "*"
+            }
+          }
+        }
+      }
+    },
+    "grant": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {
+        "$ref": "#/$defs/safeName"
+      },
+      "required": [
+        "family",
+        "interface",
+        "scope"
+      ],
+      "properties": {
+        "family": {
+          "enum": [
+            "storage",
+            "http",
+            "event",
+            "workflow"
+          ]
+        },
+        "interface": {
+          "type": "string"
+        },
+        "scope": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/storageScope"
+            },
+            {
+              "$ref": "#/$defs/httpScope"
+            },
+            {
+              "$ref": "#/$defs/eventScope"
+            },
+            {
+              "$ref": "#/$defs/workflowScope"
+            }
+          ]
+        },
+        "secretRef": {
+          "$ref": "#/$defs/secretRef"
+        },
+        "guestGrantId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "family": {
+                "const": "storage"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "interface": {
+                "enum": [
+                  "falcone:host/storage@0.1.0"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/storageScope"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "family": {
+                "const": "http"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "interface": {
+                "enum": [
+                  "falcone:host/http@0.1.0"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/httpScope"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "family": {
+                "const": "event"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "interface": {
+                "enum": [
+                  "falcone:host/events@0.1.0"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/eventScope"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "family": {
+                "const": "workflow"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "interface": {
+                "enum": [
+                  "falcone:host/workflows@0.1.0"
+                ]
+              },
+              "scope": {
+                "$ref": "#/$defs/workflowScope"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
