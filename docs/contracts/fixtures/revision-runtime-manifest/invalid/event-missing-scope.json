@@ -1,0 +1,14 @@
+{
+  "manifestVersion": "1",
+  "artifactDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "languageProfile": {"name": "fixture-profile", "version": "1"},
+  "engineVersion": "fixture-engine-1",
+  "wasiVersion": "0.2.0",
+  "interfaceVersion": "0.1.0",
+  "imports": ["falcone:host/events@0.1.0"],
+  "budgets": {"fuel": 1000, "memoryBytes": 65536, "timeoutMs": 100, "maxHostCalls": 10},
+  "grants": [{"family": "event", "interface": "falcone:host/events@0.1.0"}],
+  "effectiveConfiguration": {"timeoutMs": 100, "maxTokens": 1.5, "logLevel": "debug", "enabled": true},
+  "provenance": {"ref": "urn:fixture:provenance", "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+  "sbom": {"ref": "urn:fixture:sbom", "digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+}
