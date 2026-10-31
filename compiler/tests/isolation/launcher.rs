@@ -28,6 +28,24 @@ fn one_control_connection_and_one_build_with_fresh_workspaces_and_cleanup() {
 }
 
 #[test]
+fn a_failed_build_does_not_make_a_confined_runner_unready() {
+    let root = TempRoot::new();
+    let mut launcher = Launcher::new(root.config(), MockKernel::default());
+    assert!(launcher.connect(1));
+    assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::Started);
+    launcher.kernel_mut().finished = Some(false);
+    assert_eq!(launcher.poll().unwrap(), BuildOutcome::Finished(false));
+    assert_eq!(
+        launcher.report(),
+        ReadinessReport {
+            ready: true,
+            failure: None
+        }
+    );
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[test]
 fn spawn_failure_and_disconnect_clean_up_and_disconnect_is_terminal() {
     let root = TempRoot::new();
     let mut launcher = Launcher::new(root.config(), MockKernel::default());
@@ -45,6 +63,34 @@ fn spawn_failure_and_disconnect_clean_up_and_disconnect_is_terminal() {
     assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::Refused);
     assert!(launcher.kernel().events.contains(&"terminate"));
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[test]
+fn disconnect_cleans_the_workspace_even_when_termination_fails() {
+    let root = TempRoot::new();
+    let mut launcher = Launcher::new(root.config(), MockKernel::default());
+    assert!(launcher.connect(1));
+    assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::Started);
+    launcher.kernel_mut().fail = Some(Failure::Spawn);
+    launcher.kernel_mut().fail_at = Some("terminate");
+    assert_eq!(launcher.disconnect(1), Err(Failure::Spawn));
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    assert!(launcher.exited());
+    assert_eq!(launcher.build(1, Profile::Go), BuildOutcome::Refused);
+}
+
+#[test]
+fn wait_failure_cleans_the_workspace_even_when_termination_fails() {
+    let root = TempRoot::new();
+    let mut launcher = Launcher::new(root.config(), MockKernel::default());
+    assert!(launcher.connect(1));
+    assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::Started);
+    // Both waiting and terminating fail at the process boundary.
+    launcher.kernel_mut().fail = Some(Failure::Spawn);
+    assert_eq!(launcher.poll(), Err(Failure::Spawn));
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    assert!(launcher.exited());
+    assert_eq!(launcher.build(1, Profile::Go), BuildOutcome::Refused);
 }
 
 #[derive(Default)]
@@ -99,6 +145,53 @@ fn transport_binds_only_abstract_name_closes_second_connection_and_exits_on_drop
         ]
     );
     assert!(launcher.exited());
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[test]
+fn abstract_transport_closes_second_connection_without_disturbing_owner() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    let root = TempRoot::new();
+    let mut config = root.config();
+    config.control_socket = root.0.file_name().unwrap().to_str().unwrap().into();
+    let address = control_address(&config.control_socket).unwrap();
+    let launcher = Launcher::new(config, MockKernel::default());
+    let mut server = ControlServer::new(launcher, AbstractControl::default());
+    server.start().unwrap();
+    let mut owner = UnixStream::connect_addr(&address).unwrap();
+    owner
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert!(server.tick().unwrap());
+    let mut connected = [0; 10];
+    owner.read_exact(&mut connected).unwrap();
+    assert_eq!(&connected, b"connected\n");
+
+    let mut second = UnixStream::connect_addr(&address).unwrap();
+    second
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    assert!(server.tick().unwrap());
+    assert_eq!(second.read(&mut [0; 1]).unwrap(), 0);
+
+    owner.write_all(b"READY\n").unwrap();
+    assert!(server.tick().unwrap());
+    let mut ready = [0; 6];
+    owner.read_exact(&mut ready).unwrap();
+    assert_eq!(&ready, b"ready\n");
+    owner.write_all(b"BUILD rust\n").unwrap();
+    assert!(server.tick().unwrap());
+    let mut started = [0; 8];
+    owner.read_exact(&mut started).unwrap();
+    assert_eq!(&started, b"started\n");
+    drop(owner);
+    assert!(!server.tick().unwrap());
+    let (launcher, _) = server.into_parts();
+    assert!(launcher.exited());
+    assert_eq!(launcher.kernel().spawned.len(), 1);
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 

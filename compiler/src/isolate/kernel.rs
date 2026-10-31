@@ -117,6 +117,21 @@ pub trait KernelInterface {
     fn terminate(&mut self, child: u64) -> Result<()>;
 }
 
+/// Shared by the listener preflight and the trusted trampoline before confinement.
+pub fn check_runner_environment(
+    kernel: &mut impl KernelInterface,
+    config: &RunnerConfig,
+) -> Result<()> {
+    config.validate()?;
+    kernel.probe_landlock(config.landlock_min_abi)?;
+    for probe in CredentialProbe::ALL {
+        if kernel.path_present(probe)? {
+            return Err(Failure::CredentialMount);
+        }
+    }
+    Ok(())
+}
+
 /// Shared by the production trampoline, its readiness probe, and mock tests.
 pub fn apply_confinement(kernel: &mut impl KernelInterface, spec: &SpawnSpec) -> Result<()> {
     kernel.no_new_privs()?;

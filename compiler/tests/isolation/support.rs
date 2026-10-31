@@ -77,7 +77,12 @@ impl MockKernel {
 impl KernelInterface for MockKernel {
     fn probe_landlock(&mut self, minimum: u32) -> Result<()> {
         self.step("abi", Failure::Landlock)?;
-        if self.abi < minimum {
+        if minimum < 6 {
+            return Err(Failure::Configuration);
+        }
+        // Match production: this probe requires V6; the disposable confinement
+        // probe checks a configured minimum above V6 when applying its plan.
+        if self.abi < 6 {
             Err(Failure::Landlock)
         } else {
             Ok(())
@@ -116,8 +121,13 @@ impl KernelInterface for MockKernel {
             Descriptors::OwnStdioPipes.after_exec(&self.descriptor_inventory)?;
         Ok(())
     }
-    fn restrict_landlock(&mut self, _: &LandlockPlan) -> Result<()> {
-        self.step("landlock", Failure::Landlock)
+    fn restrict_landlock(&mut self, plan: &LandlockPlan) -> Result<()> {
+        self.step("landlock", Failure::Landlock)?;
+        if self.abi < plan.minimum_abi {
+            Err(Failure::Landlock)
+        } else {
+            Ok(())
+        }
     }
     fn install_seccomp(&mut self, _: &SeccompPlan) -> Result<()> {
         self.step("seccomp", Failure::Seccomp)

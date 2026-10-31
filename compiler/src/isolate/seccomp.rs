@@ -5,6 +5,25 @@ use seccompiler::{
 };
 use std::collections::BTreeMap;
 
+// Linux UAPI: classic BPF opcodes, seccomp actions and the x32 syscall ABI bit.
+const BPF_RET_K: u16 = 0x06;
+const BPF_LD_W_ABS: u16 = 0x20;
+const BPF_JMP_JGE_K: u16 = 0x35;
+const SECCOMP_RET_KILL_THREAD: u32 = 0;
+const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+const SECCOMP_RET_ERRNO_EPERM: u32 = 0x0005_0001;
+const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+
+/// Select one column of the Linux UAPI table for the build architecture.
+const fn syscall_number(x86_64: i64, asm_generic: i64) -> i64 {
+    if cfg!(target_arch = "x86_64") {
+        x86_64
+    } else {
+        asm_generic
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Condition {
     Always,
@@ -28,23 +47,18 @@ impl SeccompPlan {
         let arch = std::env::consts::ARCH
             .try_into()
             .map_err(|_| Failure::Seccomp)?;
-        let (socket, socketpair) = if cfg!(target_arch = "x86_64") {
-            (41, 53)
-        } else {
-            (198, 199)
-        };
         let mut plan = Self {
             arch,
             rules: vec![
                 DenyRule {
                     syscall: "socket",
-                    number: socket,
+                    number: syscall_number(41, 198),
                     condition: Condition::Always,
                     errno: 1,
                 },
                 DenyRule {
                     syscall: "socketpair",
-                    number: socketpair,
+                    number: syscall_number(53, 199),
                     condition: Condition::ArgumentNotEqual { index: 0, value: 1 },
                     errno: 1,
                 },
@@ -85,11 +99,7 @@ impl SeccompPlan {
         plan.rules
             .extend(table.into_iter().map(|(syscall, x86, generic)| DenyRule {
                 syscall,
-                number: if cfg!(target_arch = "x86_64") {
-                    x86
-                } else {
-                    generic
-                },
+                number: syscall_number(x86, generic),
                 condition: Condition::Always,
                 errno: 1,
             }));
@@ -101,11 +111,7 @@ impl SeccompPlan {
         });
         plan.rules.push(DenyRule {
             syscall: "clone",
-            number: if cfg!(target_arch = "x86_64") {
-                56
-            } else {
-                220
-            },
+            number: syscall_number(56, 220),
             condition: Condition::ArgumentHasBits {
                 index: 0,
                 mask: 0x7e02_0080,
@@ -170,8 +176,10 @@ impl SeccompPlan {
                 .map_err(|_| Failure::Seccomp)?;
                 // Architecture mismatch must also return errno rather than kill.
                 for op in &mut program {
-                    if op.code == 0x06 && (op.k == 0 || op.k == 0x8000_0000) {
-                        op.k = 0x0005_0001;
+                    if op.code == BPF_RET_K
+                        && (op.k == SECCOMP_RET_KILL_THREAD || op.k == SECCOMP_RET_KILL_PROCESS)
+                    {
+                        op.k = SECCOMP_RET_ERRNO_EPERM;
                     }
                 }
                 if cfg!(target_arch = "x86_64") {
@@ -179,22 +187,22 @@ impl SeccompPlan {
                     // Reject the entire alternate ABI, including x32-only syscall numbers.
                     let mut prefix = vec![
                         seccompiler::sock_filter {
-                            code: 0x20,
+                            code: BPF_LD_W_ABS,
                             jt: 0,
                             jf: 0,
-                            k: 0,
+                            k: SECCOMP_DATA_SYSCALL_OFFSET,
                         },
                         seccompiler::sock_filter {
-                            code: 0x35,
+                            code: BPF_JMP_JGE_K,
                             jt: 0,
                             jf: 1,
-                            k: 0x4000_0000,
+                            k: X32_SYSCALL_BIT,
                         },
                         seccompiler::sock_filter {
-                            code: 0x06,
+                            code: BPF_RET_K,
                             jt: 0,
                             jf: 0,
-                            k: 0x0005_0001,
+                            k: SECCOMP_RET_ERRNO_EPERM,
                         },
                     ];
                     prefix.extend(program);

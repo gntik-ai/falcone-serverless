@@ -187,6 +187,9 @@ impl RunnerConfig {
                 ]
                 .iter()
                 .any(|p| root.as_path() == Path::new(p))
+                || ["/usr", "/lib", "/lib64", "/proc", "/sys", "/dev"]
+                    .iter()
+                    .any(|p| root.starts_with(p))
                 || CredentialProbe::ALL
                     .iter()
                     .any(|p| p.path().starts_with(root) || root.starts_with(p.path()))

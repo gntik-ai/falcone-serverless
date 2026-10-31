@@ -81,18 +81,8 @@ impl<K: KernelInterface> Launcher<K> {
         self.connection = Some(id);
         true
     }
-    fn preflight(&mut self) -> Result<()> {
-        self.config.validate()?;
-        self.kernel.probe_landlock(self.config.landlock_min_abi)?;
-        for probe in CredentialProbe::ALL {
-            if self.kernel.path_present(probe)? {
-                return Err(Failure::CredentialMount);
-            }
-        }
-        Ok(())
-    }
     fn prepare(&mut self, profile: Profile) -> Result<SpawnSpec> {
-        self.preflight()?;
+        check_runner_environment(&mut self.kernel, &self.config)?;
         let workspace = self.kernel.create_workspace(&self.config.workspace_root)?;
         let result = SpawnSpec::for_build(&self.config, &workspace, profile).and_then(|spec| {
             self.kernel.probe_confinement(&spec)?;
@@ -149,17 +139,12 @@ impl<K: KernelInterface> Launcher<K> {
             Ok(Some(success)) => {
                 self.kernel.remove_workspace(&active.workspace)?;
                 self.active = None;
-                if !success {
-                    self.report = ReadinessReport::from_result(Err(Failure::Spawn));
-                }
                 Ok(BuildOutcome::Finished(success))
             }
             Ok(None) => Ok(BuildOutcome::Idle),
             Err(error) => {
                 self.report = ReadinessReport::from_result(Err(error));
-                self.kernel.terminate(active.child)?;
-                self.kernel.remove_workspace(&active.workspace)?;
-                self.active = None;
+                self.stop_active()?;
                 Err(error)
             }
         }
@@ -171,11 +156,18 @@ impl<K: KernelInterface> Launcher<K> {
         self.connection = None;
         self.exited = true;
         self.report = ReadinessReport::from_result(Err(Failure::Control));
-        if let Some(active) = &self.active {
+        self.stop_active()
+    }
+    fn stop_active(&mut self) -> Result<()> {
+        if let Some(active) = self.active.take() {
             // Whole-tree termination/reaping is the separate DEP-01.t12 enablement gate.
-            self.kernel.terminate(active.child)?;
-            self.kernel.remove_workspace(&active.workspace)?;
-            self.active = None;
+            let terminated = self.kernel.terminate(active.child);
+            let removed = self.kernel.remove_workspace(&active.workspace);
+            // An uncertain child state must never allow another build on this runner.
+            if terminated.is_err() || removed.is_err() {
+                self.exited = true;
+            }
+            terminated.and(removed)?;
         }
         Ok(())
     }

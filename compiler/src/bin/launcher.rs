@@ -21,12 +21,7 @@ fn run() -> Result<()> {
         let workspace = PathBuf::from(&args[10]);
         let profile = Profile::parse(args[11].to_str().ok_or(Failure::Configuration)?)?;
         let spec = SpawnSpec::for_build(&config, &workspace, profile)?;
-        kernel.probe_landlock(config.landlock_min_abi)?;
-        for probe in CredentialProbe::ALL {
-            if kernel.path_present(probe)? {
-                return Err(Failure::CredentialMount);
-            }
-        }
+        check_runner_environment(&mut kernel, &config)?;
         if args[0] == "--probe" {
             apply_confinement(&mut kernel, &spec)
         } else {
