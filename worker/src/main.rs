@@ -3,6 +3,9 @@
 //! Placeholder binary so the workspace, CI and Hermes test commands exist before the
 //! Wasmtime host lands (EP-RUN, #18). It embeds no engine and runs no guest code yet.
 
+#[cfg_attr(not(test), allow(dead_code))]
+mod checkpoint;
+
 /// The worker's build identity, reported by `--version`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
