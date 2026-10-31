@@ -6,6 +6,9 @@
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
+#[cfg(test)]
+mod runtime_metrics;
+
 /// The worker's build identity, reported by `--version`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
