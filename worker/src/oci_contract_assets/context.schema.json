@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OCI function v1 context",
+  "type": "object",
+  "required": [
+    "handle",
+    "invocationId",
+    "deadline"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "handle": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "description": "Opaque per-attempt handle, not identity or a credential."
+    },
+    "invocationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z$"
+    }
+  }
+}
