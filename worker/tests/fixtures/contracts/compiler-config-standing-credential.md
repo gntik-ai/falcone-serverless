@@ -1,13 +1,18 @@
 # Compiler runtime configuration
 
 Contract: ctr-compiler-runtime-config
-Version: 1
+Version: 2
 
 This contract provides `ctr-compiler-runtime-config` for the compiler service,
 trusted build runner and chart. It defines configuration names and boundaries;
 it implements no parser, launcher or chart wiring. Values are deployment inputs,
 not embedded credentials. Paths below are configuration keys, with no key material,
 secret-store path or Secret value. `ctr-source-build-api` defines build behavior.
+
+Version 2 replaces the version 1 unnamed Unix socketpair control transport, which
+cannot cross containers, with an abstract Unix domain socket. It changes the meaning
+of `control_socket` and the minimum value of `landlock_min_abi`, so it is a major
+version; every other key and rule is unchanged from version 1.
 
 ## Service keys
 
@@ -56,20 +61,30 @@ compiler replicas. No pod-per-build Job or extra controller permission is requir
 | Key | Meaning |
 | --- | --- |
 | `workspace_root` | Dedicated writable workspace volume; fresh isolated directory per build, no cross-tenant state. |
-| `landlock_min_abi` | Minimum Landlock ABI required for the restrictions; insufficient Landlock or seccomp makes readiness fail closed. |
+| `landlock_min_abi` | Minimum Landlock ABI required for the restrictions; at least ABI 6 (kernel 6.12 or later), which provides abstract Unix socket scoping. A lower value, or insufficient Landlock or seccomp, makes readiness fail closed. |
 | `build_cpu_seconds` | Aggregate CPU-time ceiling for the whole build process tree. |
 | `build_max_processes` | Aggregate process-count ceiling, including every descendant. |
 | `build_output_bytes` | Aggregate output-byte ceiling. |
 | `build_wall_clock` | Wall-clock duration ceiling for the entire build. |
-| `control_socket` | Launcher-provided unnamed Unix socketpair descriptor for control, never a named filesystem or network socket. |
+| `control_socket` | Name of the service-to-launcher control socket in the Linux abstract Unix socket namespace, with no filesystem path; never a named filesystem (pathname) or network socket. |
 
 CPU and memory container limits and these build budgets are bounded by service
-policy. The launcher applies Landlock and seccomp before executing trusted
-toolchains, denies message-queue IPC and cross-process memory access, and allows
-no sockets other than unnamed Unix socketpairs. Terminate and reap all descendants
-before returning a result or collecting files. Staging and collection follow the
-descriptor-relative, no-follow, beneath-workspace single-link regular-file rules
-of the source build contract, only while the build process tree is empty.
+policy. The compiler service reaches the launcher only over the abstract Unix
+domain socket named by `control_socket`; the pod network namespace is shared, so
+the abstract namespace crosses the two containers without a filesystem path,
+shared volume or network listener. Each build child is confined by Landlock
+abstract Unix socket scoping (`LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET`, Landlock
+ABI 6 or later, kernel 6.12 or later), so it cannot connect to the control socket
+or any other abstract socket created outside its own Landlock domain. If the
+configured `landlock_min_abi` does not include this scoping, or the kernel does
+not provide it, the launcher reports not ready and builds stay disabled; there is
+no unscoped fallback. The launcher applies Landlock and seccomp before executing
+trusted toolchains, denies message-queue IPC and cross-process memory access, and
+allows toolchains no sockets other than unnamed Unix socketpairs. Terminate and
+reap all descendants before returning a result or collecting files. Staging and
+collection follow the descriptor-relative, no-follow, beneath-workspace
+single-link regular-file rules of the source build contract, only while the
+build process tree is empty.
 
 Both containers retain restricted pod posture: arbitrary non-root UID,
 read-only root filesystem except dedicated workspace/cache volumes, no privilege

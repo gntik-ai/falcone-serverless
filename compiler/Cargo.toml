@@ -1,0 +1,20 @@
+[package]
+name = "falcone-serverless-compiler"
+version = "0.1.0"
+description = "Falcone serverless source-to-Wasm compiler and build-runner launcher. Placeholder until DEP-01."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Safe wrappers for the build-runner launcher (#68): Landlock rulesets, seccomp filters,
+# prctl, resource limits and filesystem probes. `unsafe_code` stays forbidden in this crate;
+# the worker sandbox is offline and only reads crates already in Cargo.lock, so they are
+# pinned here at reviewed versions released at least two weeks ago.
+[dependencies]
+landlock = "=0.4.7"
+seccompiler = "=0.5.0"
+rustix = { version = "=1.1.5", features = ["process", "thread", "fs"] }

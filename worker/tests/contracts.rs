@@ -29,7 +29,7 @@ const OUTCOMES: &[&str] = &["limit_exceeded", "base_mismatch"];
 const RULES: &[&str] = &[
     "SB-R1", "SB-R2", "SB-R3", "SB-R4", "SB-R5", "SB-R6", "SB-R7", "SB-R8", "SB-R9", "SB-R10",
 ];
-const CONFIG_HEADER: &[&str] = &["Contract: ctr-compiler-runtime-config", "Version: 1"];
+const CONFIG_HEADER: &[&str] = &["Contract: ctr-compiler-runtime-config", "Version: 2"];
 const SERVICE_KEYS: &[&str] = &[
     "listen_port",
     "metrics_port",
