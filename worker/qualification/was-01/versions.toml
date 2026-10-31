@@ -1,0 +1,22 @@
+wasmtime_version = "49.0.4"
+compilation_backend = "cranelift"
+target_arch = "x86_64"
+target_os = "linux"
+rust_toolchain = "1.99.1"
+wasi_interface = "none"
+qualification_status = "unqualified"
+contract_inventory_path = "docs/contracts/falcone-contract-inventory.md"
+contract_inventory_sha256 = "c9c4921595cfe5e0662e082d1af860453e4c40e49e473f4baa213fa11f871973"
+kubernetes_version = "unverified"
+openshift_version = "unverified"
+namespaced_permissions = "unverified"
+
+[engine]
+consume_fuel = true
+epoch_interruption = true
+fuel_limit = 10000000
+epoch_tick_ms = 10
+epoch_deadline_ticks = 100
+# TOML integers are signed 64-bit; record these unsigned limits as decimal strings.
+epoch_run_fuel = "18446744073709551615"
+fuel_run_epoch_deadline = "18446744073709551615"
