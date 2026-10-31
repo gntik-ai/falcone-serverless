@@ -86,7 +86,44 @@ pub const FIXTURES: &[Fixture] = &[
         bytes: include_bytes!("oci_contract_assets/fixtures/valid/request.json"),
     },
 ];
-pub type Diagnostics = BTreeMap<&'static str, &'static str>;
+/// Only registered rules can reach the tester's diagnostic output.
+#[derive(Debug, Default)]
+pub struct Diagnostics(BTreeMap<&'static str, &'static str>);
+
+impl Diagnostics {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, rule: &'static str, message: &'static str) {
+        assert!(
+            RULE_IDS.contains(&rule),
+            "unknown OCI contract rule: {rule}"
+        );
+        self.0.insert(rule, message);
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.0.extend(other.0);
+    }
+
+    fn report(self) -> i32 {
+        for (rule, message) in &self.0 {
+            println!("{rule}: {message}");
+        }
+        i32::from(!self.0.is_empty())
+    }
+}
+
+// Expose map inspection without allowing unchecked mutation.
+impl std::ops::Deref for Diagnostics {
+    type Target = BTreeMap<&'static str, &'static str>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 pub fn check_request(value: &Value) -> Diagnostics {
     let schema: Value = serde_json::from_str(REQUEST_SCHEMA).expect("embedded request schema");
     let mut diagnostics = Diagnostics::new();
@@ -559,8 +596,12 @@ pub fn run(args: &[OsString]) -> i32 {
         .and_then(|s| s.parse::<u16>().ok())
         .filter(|p| *p != 0);
     let Some(port) = port else {
-        println!("OCI-V1-PORT: $PORT is mandatory, decimal 1–65535, with no default");
-        return 1;
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.insert(
+            "OCI-V1-PORT",
+            "$PORT is mandatory, decimal 1–65535, with no default",
+        );
+        return diagnostics.report();
     };
     let result = match args {
         [mode] if mode == "http" => Ok(check_http(port)),
@@ -572,12 +613,7 @@ pub fn run(args: &[OsString]) -> i32 {
         )),
     };
     match result {
-        Ok(diagnostics) => {
-            for (rule, message) in &diagnostics {
-                println!("{rule}: {message}");
-            }
-            i32::from(!diagnostics.is_empty())
-        }
+        Ok(diagnostics) => diagnostics.report(),
         Err(error) => {
             eprintln!("conformance infrastructure: {error}");
             2

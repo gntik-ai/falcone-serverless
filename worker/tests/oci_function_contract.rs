@@ -533,6 +533,13 @@ fn utc_deadlines_match_the_published_schema() {
 }
 
 #[test]
+#[should_panic(expected = "unknown OCI contract rule: OCI-V1-NEW")]
+fn diagnostics_reject_rules_outside_the_documented_registry() {
+    let mut diagnostics = contract::Diagnostics::new();
+    diagnostics.insert("OCI-V1-NEW", "undocumented tester check");
+}
+
+#[test]
 fn doc_rules_and_tester_checks_have_exact_parity() {
     use std::collections::BTreeSet;
     let documented: BTreeSet<_> = contract::DOC
@@ -543,6 +550,17 @@ fn doc_rules_and_tester_checks_have_exact_parity() {
     let checked: BTreeSet<_> = contract::RULE_IDS.iter().map(|s| (*s).to_owned()).collect();
     assert_eq!(documented, checked);
     assert_eq!(checked.len(), contract::RULE_IDS.len());
+    // Inspect the actual insertion sites, excluding fixture metadata and the
+    // registry itself, so removing a check cannot leave a stale registry entry.
+    let emitted: BTreeSet<_> = include_str!("../src/oci_contract.rs")
+        .split(".insert(")
+        .skip(1)
+        .filter_map(|call| call.trim_start().strip_prefix('"'))
+        .filter_map(|literal| literal.split('"').next())
+        .filter(|id| id.starts_with("OCI-V1-"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(documented, emitted);
 }
 
 fn fixture_pin_matches(path: &str, bytes: &[u8]) -> bool {
