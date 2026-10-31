@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OCI function v1 envelope",
+  "type": "object",
+  "required": [
+    "status",
+    "result",
+    "logs"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "success",
+        "error"
+      ]
+    },
+    "result": {
+      "x-maxSerializedBytes": 6000000
+    },
+    "logs": {
+      "type": "string",
+      "maxLength": 256000,
+      "x-maxUtf8Bytes": 256000,
+      "x-truncationMarker": "[TRUNCATED]"
+    }
+  }
+}

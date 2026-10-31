@@ -421,6 +421,7 @@ name = "falcone-serverless-worker"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
