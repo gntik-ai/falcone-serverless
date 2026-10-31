@@ -1,0 +1,83 @@
+{
+  "matrixVersion": "1",
+  "profiles": {
+    "javascript": {
+      "id": "javascript-wasi-v1",
+      "status": "enabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "0.2.0",
+      "toolchainVersion": "1.0.0",
+      "packageCatalogueVersion": "1.0.0",
+      "allowedInterfaces": [
+        "falcone:host/logging@0.1.0"
+      ],
+      "testedExamples": [
+        "fixture-only:legacy-javascript-envelope"
+      ],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Fixture only: support through 2027-12-31 with 90 days migration notice.",
+      "evidence": {
+        "compatibility": {
+          "status": "passed",
+          "artifactId": "fixture-only:compatibility",
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        "adversarial": {
+          "status": "passed",
+          "artifactId": "fixture-only:adversarial",
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        },
+        "leakage": {
+          "status": "passed",
+          "artifactId": "fixture-only:leakage"
+        },
+        "crashRecovery": {
+          "status": "passed",
+          "artifactId": "fixture-only:crashRecovery",
+          "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      }
+    },
+    "python": {
+      "id": "python-wasi-v1",
+      "status": "disabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "unqualified",
+      "toolchainVersion": "unqualified",
+      "packageCatalogueVersion": "unqualified",
+      "allowedInterfaces": [],
+      "testedExamples": [],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
+      "evidence": {}
+    },
+    "go": {
+      "id": "go-wasi-v1",
+      "status": "disabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "unqualified",
+      "toolchainVersion": "unqualified",
+      "packageCatalogueVersion": "unqualified",
+      "allowedInterfaces": [],
+      "testedExamples": [],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
+      "evidence": {}
+    }
+  }
+}

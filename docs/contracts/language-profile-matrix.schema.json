@@ -1,0 +1,302 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:language-profile-matrix:1",
+  "title": "ctr-language-profile-matrix v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "matrixVersion",
+    "profiles"
+  ],
+  "properties": {
+    "matrixVersion": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S"
+    },
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "javascript",
+        "python",
+        "go"
+      ],
+      "properties": {
+        "javascript": {
+          "$ref": "#/$defs/profile"
+        },
+        "python": {
+          "$ref": "#/$defs/profile"
+        },
+        "go": {
+          "$ref": "#/$defs/profile"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "status",
+        "wasmtimeVersion",
+        "wasiVersion",
+        "toolchainVersion",
+        "packageCatalogueVersion",
+        "allowedInterfaces",
+        "testedExamples",
+        "diagnostics",
+        "eolPolicy",
+        "evidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "status": {
+          "enum": [
+            "disabled",
+            "enabled"
+          ]
+        },
+        "wasmtimeVersion": {
+          "oneOf": [
+            {
+              "const": "unqualified"
+            },
+            {
+              "$ref": "#/$defs/exactVersion"
+            }
+          ]
+        },
+        "wasiVersion": {
+          "oneOf": [
+            {
+              "const": "unqualified"
+            },
+            {
+              "$ref": "#/$defs/exactVersion"
+            }
+          ]
+        },
+        "toolchainVersion": {
+          "oneOf": [
+            {
+              "const": "unqualified"
+            },
+            {
+              "$ref": "#/$defs/exactVersion"
+            }
+          ]
+        },
+        "packageCatalogueVersion": {
+          "oneOf": [
+            {
+              "const": "unqualified"
+            },
+            {
+              "$ref": "#/$defs/exactVersion"
+            }
+          ]
+        },
+        "allowedInterfaces": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*/[a-z][a-z0-9-]*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+          }
+        },
+        "testedExamples": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "diagnostics": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "WASM-NATIVE-LIBRARY",
+              "WASM-GPU",
+              "WASM-PROCESS-SPAWN",
+              "WASM-INSTALL-HOOK"
+            ]
+          },
+          "allOf": [
+            {
+              "contains": {
+                "const": "WASM-NATIVE-LIBRARY"
+              }
+            },
+            {
+              "contains": {
+                "const": "WASM-GPU"
+              }
+            },
+            {
+              "contains": {
+                "const": "WASM-PROCESS-SPAWN"
+              }
+            },
+            {
+              "contains": {
+                "const": "WASM-INSTALL-HOOK"
+              }
+            }
+          ]
+        },
+        "eolPolicy": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "compatibility": {
+              "$ref": "#/$defs/evidenceRecord"
+            },
+            "adversarial": {
+              "$ref": "#/$defs/evidenceRecord"
+            },
+            "leakage": {
+              "$ref": "#/$defs/evidenceRecord"
+            },
+            "crashRecovery": {
+              "$ref": "#/$defs/evidenceRecord"
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "description": "enabled-requires-evidence",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "enabled"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "evidence": {
+                "required": [
+                  "compatibility",
+                  "adversarial",
+                  "leakage",
+                  "crashRecovery"
+                ],
+                "properties": {
+                  "compatibility": {
+                    "$ref": "#/$defs/passingEvidence"
+                  },
+                  "adversarial": {
+                    "$ref": "#/$defs/passingEvidence"
+                  },
+                  "leakage": {
+                    "$ref": "#/$defs/passingEvidence"
+                  },
+                  "crashRecovery": {
+                    "$ref": "#/$defs/passingEvidence"
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "description": "enabled-requires-exact-versions-and-examples",
+          "if": {
+            "properties": {
+              "status": {
+                "const": "enabled"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "wasmtimeVersion": {
+                "$ref": "#/$defs/exactVersion"
+              },
+              "wasiVersion": {
+                "$ref": "#/$defs/exactVersion"
+              },
+              "toolchainVersion": {
+                "$ref": "#/$defs/exactVersion"
+              },
+              "packageCatalogueVersion": {
+                "$ref": "#/$defs/exactVersion"
+              },
+              "testedExamples": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "evidenceRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "artifactId",
+        "digest"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "pending",
+            "failed",
+            "passed"
+          ]
+        },
+        "artifactId": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "passingEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/evidenceRecord"
+        },
+        {
+          "properties": {
+            "status": {
+              "const": "passed"
+            }
+          }
+        }
+      ]
+    },
+    "exactVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"
+    }
+  }
+}
