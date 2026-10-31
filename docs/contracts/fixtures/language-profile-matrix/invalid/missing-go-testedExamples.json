@@ -1,0 +1,58 @@
+{
+  "matrixVersion": "1",
+  "profiles": {
+    "javascript": {
+      "id": "javascript-wasi-v1",
+      "status": "disabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "unqualified",
+      "toolchainVersion": "unqualified",
+      "packageCatalogueVersion": "unqualified",
+      "allowedInterfaces": [],
+      "testedExamples": [],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
+      "evidence": {}
+    },
+    "python": {
+      "id": "python-wasi-v1",
+      "status": "disabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "unqualified",
+      "toolchainVersion": "unqualified",
+      "packageCatalogueVersion": "unqualified",
+      "allowedInterfaces": [],
+      "testedExamples": [],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
+      "evidence": {}
+    },
+    "go": {
+      "id": "go-wasi-v1",
+      "status": "disabled",
+      "wasmtimeVersion": "49.0.4",
+      "wasiVersion": "unqualified",
+      "toolchainVersion": "unqualified",
+      "packageCatalogueVersion": "unqualified",
+      "allowedInterfaces": [],
+      "diagnostics": [
+        "WASM-NATIVE-LIBRARY",
+        "WASM-GPU",
+        "WASM-PROCESS-SPAWN",
+        "WASM-INSTALL-HOOK"
+      ],
+      "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
+      "evidence": {}
+    }
+  }
+}
