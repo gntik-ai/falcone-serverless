@@ -33,3 +33,11 @@ toml = { workspace = true }
 sha2 = { workspace = true }
 # Language profile matrix schema checks (#97); no remote/file reference resolution.
 jsonschema = { version = "0.59.0", default-features = false }
+# Restricted fs-test cluster harness (#121): Kubernetes client (rustls + ring, no OpenSSL),
+# async runtime and RNG for the UID chooser. Test-only; reviewed versions >= 2 weeks old.
+# kube 3.1 rather than 4.x: kube 4 pulls serde-saphyr, which caps smallvec below 1.16 and
+# would downgrade the smallvec that the production Wasmtime/Cranelift build uses.
+kube = { version = "=3.1.0", default-features = false, features = ["client", "rustls-tls", "ring"] }
+k8s-openapi = { version = "=0.27.1", default-features = false, features = ["std", "v1_35"] }
+tokio = { version = "=1.53.3", features = ["rt", "macros", "time"] }
+rand = "=0.10.3"
