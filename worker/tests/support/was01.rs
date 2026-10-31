@@ -3,7 +3,9 @@ use super::{Namespace, NamespaceClient, pinned_image};
 use falcone_serverless_worker::{Role, check};
 use serde_json::{Value, json};
 
-pub const IMAGE_UID: u32 = 65532;
+pub fn image_uid() -> Result<u64, String> {
+    super::final_uid(include_str!("../../qualification/Containerfile"))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Identity {
@@ -28,7 +30,7 @@ pub trait QualificationClient: NamespaceClient {
     /// Request an ephemeral installer token; never return it to the caller.
     fn token_request(&self, namespace: &Namespace, serviceaccount: &str) -> Result<(), String>;
     fn installer_can_create(&self, group: &str, resource: &str) -> Result<bool, String>;
-    /// First-run, exit-zero logs only. Restarts/nonzero exits/timeouts are errors.
+    /// First-run, exit-zero logs only; a single restart may expose them as previous logs.
     fn observe(&self, plan: &Plan) -> Result<String, String>;
 }
 
@@ -43,7 +45,7 @@ pub struct Plan {
 impl Plan {
     pub fn new(namespace: Namespace, run: &str, image: &str, uid: u32) -> Result<Self, String> {
         Namespace::new(run)?;
-        if !pinned_image(image) || uid == 0 || uid == IMAGE_UID {
+        if !pinned_image(image) || uid == 0 || u64::from(uid) == image_uid()? {
             return Err(
                 "UNVERIFIED: digest-pinned FS_TEST_WAS01_IMAGE and arbitrary non-root UID required"
                     .into(),
@@ -239,7 +241,7 @@ pub fn execute(
             guard.namespace.clone(),
             &guard.run,
             image,
-            super::choose_uid(IMAGE_UID),
+            super::choose_uid(image_uid()?),
         )?;
         let mut records = vec![
             json!({"phase":"Namespace", "namespace":guard.namespace.name(), "run":guard.run,
@@ -403,34 +405,72 @@ impl Settings {
     }
 }
 
-/// A fast one-shot may exit before a poll observes Ready. Only its first run counts.
-pub fn first_run(pod: &Value) -> Result<Option<String>, String> {
+/// The exact container whose first-run logs must be collected.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FirstRun {
+    pub container_id: String,
+    pub previous: bool,
+}
+
+/// A Deployment restarts its one-shot runner. Only the first exit and its logs count;
+/// after a second restart Kubernetes no longer retains that first-run evidence.
+pub fn first_run(pod: &Value) -> Result<Option<FirstRun>, String> {
     let Some(statuses) = pod["status"]["containerStatuses"].as_array() else {
         return Ok(None);
     };
-    if statuses.len() != 1 {
-        return Err("unexpected container status count".into());
+    if statuses.len() != 1 || statuses[0]["name"] != "runner" {
+        return Err("unexpected container status".into());
     }
     let status = &statuses[0];
-    if status["name"] != "runner"
-        || status["restartCount"] != 0
-        || status
-            .get("lastState")
-            .is_some_and(|last| last.as_object().is_none_or(|map| !map.is_empty()))
-    {
-        return Err("runner restarted or has unverified first-run status".into());
-    }
-    if let Some(terminated) = status["state"].get("terminated") {
-        if terminated["exitCode"] != 0 {
-            return Err("runner exited nonzero".into());
+    let (terminated, previous) = match status["restartCount"].as_u64() {
+        Some(0) => {
+            if status
+                .get("lastState")
+                .is_some_and(|last| last.as_object().is_none_or(|map| !map.is_empty()))
+            {
+                return Err("runner has unverified first-run status".into());
+            }
+            let Some(terminated) = status["state"].get("terminated") else {
+                return Ok(None);
+            };
+            (terminated, false)
         }
-        return status["containerID"]
-            .as_str()
-            .filter(|id| !id.is_empty())
-            .map(|id| Some(id.into()))
-            .ok_or_else(|| "runner container identity missing".into());
+        Some(1) => {
+            // Waiting/backoff may already describe the second termination, so it
+            // cannot prove which run Kubernetes' previous-log endpoint retains.
+            if !status["state"]["running"].is_object() && !status["state"]["terminated"].is_object()
+            {
+                return Err("runner is waiting/backing off; first-run evidence unverified".into());
+            }
+            let terminated = status["lastState"]
+                .get("terminated")
+                .ok_or("first-run termination missing")?;
+            if status["containerID"]
+                .as_str()
+                .is_none_or(|id| id.is_empty() || Some(id) == terminated["containerID"].as_str())
+            {
+                return Err("restarted runner container identity unverified".into());
+            }
+            (terminated, true)
+        }
+        _ => return Err("runner restarted more than once or restart count is unverified".into()),
+    };
+    if terminated["exitCode"] != 0 {
+        return Err("runner first run exited nonzero".into());
     }
-    Ok(None)
+    let id = if previous {
+        &terminated["containerID"]
+    } else {
+        &status["containerID"]
+    };
+    let container_id = id
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("first-run container identity missing")?;
+    Ok(Some(FirstRun {
+        container_id: container_id.into(),
+        previous,
+    }))
 }
 
 // Permit server defaults, but never remove/change requested fields or append to

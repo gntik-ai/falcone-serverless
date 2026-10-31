@@ -1,5 +1,5 @@
 //! Opt-in Kubernetes transport. No tokens in argv, logs, errors or persisted evidence.
-use super::was01::{Identity, Plan, QualificationClient, first_run};
+use super::was01::{Identity, Plan, QualificationClient};
 use super::{Namespace, NamespaceClient};
 use k8s_openapi::api::{
     authentication::v1::{TokenRequest, TokenRequestSpec},
@@ -8,15 +8,12 @@ use k8s_openapi::api::{
 };
 use kube::{
     Api, Client, Config,
-    api::{DeleteParams, DynamicObject, ListParams, LogParams, PostParams, Preconditions},
+    api::{DeleteParams, DynamicObject, ListParams, PostParams},
     config::{AuthInfo, KubeConfigOptions},
     core::{ApiResource, GroupVersionKind},
 };
 use serde_json::Value;
-use std::{
-    cell::RefCell,
-    time::{Duration, Instant},
-};
+use std::{cell::RefCell, time::Duration};
 use tokio::runtime::Runtime;
 
 pub struct Live {
@@ -27,14 +24,6 @@ pub struct Live {
 }
 
 const API_ERROR: &str = "Kubernetes request failed; response and credentials suppressed";
-const OWNED_KINDS: [(&str, &str, &str); 6] = [
-    ("apps", "v1", "Deployment"),
-    ("apps", "v1", "ReplicaSet"),
-    ("", "v1", "Pod"),
-    ("rbac.authorization.k8s.io", "v1", "RoleBinding"),
-    ("rbac.authorization.k8s.io", "v1", "Role"),
-    ("", "v1", "ServiceAccount"),
-];
 
 impl Live {
     pub fn new() -> Result<Self, String> {
@@ -155,74 +144,8 @@ impl NamespaceClient for Live {
     }
 
     fn cleanup_run(&self, namespace: &Namespace, run: &str) -> Result<(), String> {
-        Namespace::new(run)?;
-        let params = ListParams::default().labels(&format!("falcone.test/run={run}"));
-        self.runtime.block_on(async {
-            for (group, version, kind) in OWNED_KINDS {
-                let api = self.api(self.admin.clone(), namespace, group, version, kind);
-                let list = api.list(&params).await.map_err(|_| API_ERROR)?;
-                for object in list.items {
-                    if object
-                        .metadata
-                        .labels
-                        .as_ref()
-                        .and_then(|labels| labels.get("falcone.test/run"))
-                        .map(String::as_str)
-                        != Some(run)
-                    {
-                        continue;
-                    }
-                    let name = object
-                        .metadata
-                        .name
-                        .as_deref()
-                        .ok_or("owned object name missing")?;
-                    let uid = object
-                        .metadata
-                        .uid
-                        .clone()
-                        .ok_or("owned object UID missing")?;
-                    let version = object
-                        .metadata
-                        .resource_version
-                        .clone()
-                        .ok_or("owned object version missing")?;
-                    let delete = DeleteParams {
-                        preconditions: Some(Preconditions {
-                            uid: Some(uid),
-                            resource_version: Some(version),
-                        }),
-                        ..DeleteParams::background()
-                    };
-                    // UID + resourceVersion prevent deletion after replacement/relabeling.
-                    match api.delete(name, &delete).await {
-                        Ok(_) => {}
-                        Err(kube::Error::Api(error)) if error.code == 404 => {}
-                        Err(_) => return Err(API_ERROR.into()),
-                    }
-                }
-            }
-            let deadline = Instant::now() + Duration::from_secs(60);
-            loop {
-                let mut remaining = false;
-                for (group, version, kind) in OWNED_KINDS {
-                    let api = self.api(self.admin.clone(), namespace, group, version, kind);
-                    remaining |= !api
-                        .list(&params)
-                        .await
-                        .map_err(|_| API_ERROR)?
-                        .items
-                        .is_empty();
-                }
-                if !remaining {
-                    return Ok(());
-                }
-                if Instant::now() >= deadline {
-                    return Err("run-labelled objects remain after cleanup".into());
-                }
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-        })
+        self.runtime
+            .block_on(super::cleanup::cleanup_run(self, namespace, run))
     }
 }
 
@@ -290,52 +213,62 @@ impl QualificationClient for Live {
 
     fn observe(&self, plan: &Plan) -> Result<String, String> {
         let namespace = &plan.namespace;
-        let run = &plan.run;
         let client = self.client(Identity::Installer)?;
         let api: Api<Pod> = Api::namespaced(client, namespace.name());
-        let params = ListParams::default().labels(&format!("falcone.test/run={run}"));
-        self.runtime.block_on(async {
-            let deadline = Instant::now() + Duration::from_secs(180);
-            loop {
-                let pods = api.list(&params).await.map_err(|_| API_ERROR)?;
-                if pods.items.len() > 1 {
-                    return Err("more than one qualification pod exists".into());
-                }
-                if let Some(pod) = pods.items.first() {
-                    let object = serde_json::to_value(pod).map_err(|_| API_ERROR)?;
-                    plan.validate_pod(&object)?;
-                    if let Some(container_id) = first_run(&object)? {
-                        let name = pod.metadata.name.as_deref().ok_or("pod name missing")?;
-                        let logs = api
-                            .logs(
-                                name,
-                                &LogParams {
-                                    container: Some("runner".into()),
-                                    limit_bytes: Some(65536),
-                                    ..Default::default()
-                                },
-                            )
-                            .await
-                            .map_err(|_| API_ERROR)?;
-                        let after = api.get(name).await.map_err(|_| API_ERROR)?;
-                        let after_value = serde_json::to_value(&after).map_err(|_| API_ERROR)?;
-                        plan.validate_pod(&after_value)?;
-                        if after.metadata.uid != pod.metadata.uid
-                            || first_run(&after_value)? != Some(container_id)
-                        {
-                            return Err(
-                                "runner restarted/replaced while collecting first-run evidence"
-                                    .into(),
-                            );
-                        }
-                        return Ok(logs);
-                    }
-                }
-                if Instant::now() >= deadline {
-                    return Err("runner startup/first-run completion timed out".into());
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        })
+        self.runtime
+            .block_on(super::observation::observe(&api, plan))
+    }
+}
+
+impl super::cleanup::CleanupClient for Live {
+    async fn list(
+        &self,
+        namespace: &Namespace,
+        resource: (&str, &str, &str),
+        params: &ListParams,
+    ) -> Result<kube::core::ObjectList<DynamicObject>, kube::Error> {
+        self.api(
+            self.admin.clone(),
+            namespace,
+            resource.0,
+            resource.1,
+            resource.2,
+        )
+        .list(params)
+        .await
+    }
+    async fn get(
+        &self,
+        namespace: &Namespace,
+        resource: (&str, &str, &str),
+        name: &str,
+    ) -> Result<Option<DynamicObject>, kube::Error> {
+        self.api(
+            self.admin.clone(),
+            namespace,
+            resource.0,
+            resource.1,
+            resource.2,
+        )
+        .get_opt(name)
+        .await
+    }
+    async fn delete(
+        &self,
+        namespace: &Namespace,
+        resource: (&str, &str, &str),
+        name: &str,
+        params: &DeleteParams,
+    ) -> Result<(), kube::Error> {
+        self.api(
+            self.admin.clone(),
+            namespace,
+            resource.0,
+            resource.1,
+            resource.2,
+        )
+        .delete(name, params)
+        .await
+        .map(|_| ())
     }
 }

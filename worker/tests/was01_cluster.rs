@@ -432,7 +432,18 @@ fn five_phases_use_separate_identities_and_cleanup_even_on_phase_four_panic() {
                 assert!(fake.objects.borrow().is_empty());
             }
             assert!(events.iter().any(|e| e == "Installer ServiceAccount"));
-            assert!(!events.iter().any(|e| e == "Admin Deployment"));
+            let token = events
+                .iter()
+                .position(|event| event == "TokenRequest")
+                .unwrap();
+            assert!(
+                events[token + 1..events.len() - 1]
+                    .iter()
+                    .all(|event| event.starts_with("Installer ")
+                        || event.starts_with("installer SSAR ")
+                        || event == "observe"),
+                "every fixture-phase operation must use the installer identity: {events:?}"
+            );
         }
     }
 }
@@ -552,12 +563,18 @@ fn opt_in_and_prerequisite_denials_are_unverified_and_apply_no_fixture() {
 }
 
 #[test]
-fn one_shot_startup_evidence_rejects_restarts_and_nonzero_exits() {
+fn one_shot_startup_requires_verified_first_exit() {
     use support::was01::first_run;
     let mut pod = json!({"metadata":{"name":"runner-pod"},"status":{
         "containerStatuses":[{"name":"runner","restartCount":0,"containerID":"containerd://first","state":{"terminated":{"exitCode":0}}}]
     }});
-    assert_eq!(first_run(&pod).unwrap(), Some("containerd://first".into()));
+    assert_eq!(
+        first_run(&pod).unwrap(),
+        Some(support::was01::FirstRun {
+            container_id: "containerd://first".into(),
+            previous: false
+        })
+    );
     pod["status"]["containerStatuses"][0]["restartCount"] = json!(1);
     assert!(first_run(&pod).is_err());
     pod["status"]["containerStatuses"][0]["restartCount"] = json!(0);
@@ -723,4 +740,52 @@ fn shared_mode_creates_only_suffixed_owned_objects_and_preserves_foreign_objects
             .is_err()
     );
     assert!(clean.created.borrow().is_empty());
+}
+
+#[test]
+fn one_shot_startup_retains_successful_first_run_after_one_restart() {
+    let mut pod = json!({"status":{"containerStatuses":[{
+        "name":"runner","restartCount":1,"containerID":"containerd://second",
+        "state":{"running":{}},
+        "lastState":{"terminated":{"exitCode":0,"containerID":"containerd://first"}}
+    }]}});
+    assert_eq!(
+        support::was01::first_run(&pod).unwrap(),
+        Some(support::was01::FirstRun {
+            container_id: "containerd://first".into(),
+            previous: true
+        })
+    );
+    for (field, value) in [
+        ("/status/containerStatuses/0/restartCount", json!(2)),
+        (
+            "/status/containerStatuses/0/lastState/terminated/exitCode",
+            json!(1),
+        ),
+        (
+            "/status/containerStatuses/0/lastState/terminated/containerID",
+            Value::Null,
+        ),
+        ("/status/containerStatuses/0/lastState", json!({})),
+    ] {
+        let mut changed = pod.clone();
+        *changed.pointer_mut(field).unwrap() = value;
+        assert!(support::was01::first_run(&changed).is_err(), "{field}");
+    }
+    pod["status"]["containerStatuses"][0]["state"] =
+        json!({"waiting":{"reason":"CrashLoopBackOff"}});
+    assert!(support::was01::first_run(&pod).is_err());
+}
+
+#[test]
+fn was01_uid_chooser_uses_the_committed_qualification_image_user() {
+    let source = fs::read_to_string(qualification().join("Containerfile")).unwrap();
+    let image_uid = support::final_uid(&source).unwrap();
+    // The production WAS-01 path must derive its exclusion from this image.
+    assert_eq!(support::was01::image_uid().unwrap(), image_uid);
+    for _ in 0..1000 {
+        let uid = support::choose_uid(support::was01::image_uid().unwrap());
+        assert_ne!(uid, 0);
+        assert_ne!(u64::from(uid), image_uid);
+    }
 }

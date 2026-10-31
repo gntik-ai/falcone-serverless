@@ -39,8 +39,10 @@ neither. The namespace must exist and enforce restricted admission. Only
 No namespace is created, patched, labelled or deleted. Each created object has a
 random run suffix and `falcone.test/run=<run-id>`. Creation is POST-only, so name
 collisions are refused rather than adopted. Cleanup selects only this run's
-labelled objects and verifies that none remain. Never remove foreign objects to
-make the test pass.
+labelled objects and verifies that none remain. On deletion conflicts it rechecks
+ownership and retries with the original UID and a fresh resource version. It
+attempts every resource kind, including installer RBAC, and reports failures
+together. Never remove foreign objects to make the test pass.
 
 An authorized operator runs one test (choose the mode explicitly when shared):
 
@@ -68,8 +70,15 @@ UNVERIFIED and still cleans up.
 
 The Deployment is one-shot. Exit code 0 with all nine complete runner JSON records
 from the **first** container run is accepted as startup evidence, even when a poll
-misses its transient Ready condition. Any restart, nonzero exit, missing/failed/
-unverified check, wrong effective UID, timeout or admission error fails the test.
+misses its transient Ready condition. With restartCount 0 the harness reads current
+logs; with restartCount 1 it requires a successful lastState termination plus a
+running or terminated second container with a distinct ID, and reads
+`previous=true` logs for the first container ID. Waiting/backoff is unverified.
+It checks Pod UID and first-run container ID again after fetching logs. If a restart races current-log retrieval,
+those logs are discarded and previous logs are fetched instead. A second restart
+loses first-run evidence and fails qualification, even if a later run succeeds.
+Nonzero first exit, missing/failed/unverified checks, wrong effective UID, timeout
+or admission error also fail the test.
 The test records compile/load/executable-memory, result 42, epoch/fuel interruption,
 root filesystem read-only and writable `/tmp` evidence. The chosen nonzero UID
 differs from image USER 65532. Installer SSARs must deny create on clusterroles,

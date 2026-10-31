@@ -17,10 +17,10 @@ pub fn final_uid(containerfile: &str) -> Result<u64, String> {
         .ok_or_else(|| "final-stage USER must be a numeric non-zero UID".into())
 }
 
-pub fn choose_uid(image_uid: u32) -> u32 {
+pub fn choose_uid(image_uid: u64) -> u32 {
     loop {
         let uid = rand::random_range(10000..=2_000_000_000);
-        if uid != image_uid {
+        if u64::from(uid) != image_uid {
             return uid;
         }
     }
@@ -35,7 +35,7 @@ pub fn pod_spec(image: &str) -> Result<Value, String> {
         "automountServiceAccountToken": false,
         "enableServiceLinks": false,
         "securityContext": {
-            "runAsNonRoot": true, "runAsUser": choose_uid(65532),
+            "runAsNonRoot": true, "runAsUser": choose_uid(final_uid(include_str!("../../Containerfile"))?),
             "seccompProfile": {"type": "RuntimeDefault"}
         },
         "containers": [{"name": "worker", "image": image,
@@ -80,9 +80,10 @@ pub(super) fn validate_spec(spec: &Value) -> Result<(), String> {
                 .join(", ")
         ));
     }
+    let image_uid = final_uid(include_str!("../../Containerfile"))?;
     if !spec["securityContext"]["runAsUser"]
         .as_u64()
-        .is_some_and(|uid| uid > 0 && uid != 65532)
+        .is_some_and(|uid| uid > 0 && uid != image_uid)
         || spec["containers"].as_array().is_some_and(|containers| {
             containers.iter().any(|container| {
                 container["securityContext"]

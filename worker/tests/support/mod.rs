@@ -1,8 +1,10 @@
 //! Test-only worker image qualification; no runtime code or credential handling.
 
+mod cleanup;
 pub mod cli;
 mod config;
 mod namespace;
+mod observation;
 mod pod;
 mod session;
 
