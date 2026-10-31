@@ -1,4 +1,2 @@
-//! Falcone serverless compiler: the source-to-Wasm build service and the
-//! build-runner launcher that confines trusted toolchains (DEP-01).
-//!
-//! This crate is a placeholder; it holds no logic yet.
+//! Trusted source-build runner. Source builds remain disabled pending DEP-01.t10.
+pub mod isolate;
