@@ -18,7 +18,7 @@ The workload assumptions are **20 tenants**, **10,000 deployed functions**, and 
 
 A Rust execution worker embeds Wasmtime. A Go namespaced pool controller writes only Deployments, Services and Leases, with exclusive replica-count ownership. Guests reach the platform only through versioned WIT/WASI capabilities. No arbitrary tenant native execution, native fallback or tenant-produced precompiled artifact deserialization is permitted; trusted compilation starts from validated Wasm.
 
-Implementation, restricted-cluster feasibility and security qualification remain **unverified until WAS-01 (#51)** supplies the relevant evidence; later host/profile security gates still apply. This ADR satisfies only MIG-01 criterion (2). Contract inventory (1) and dependency classification (3) remain open and gate MIG-01 and, through it, WAS-01. Recording the decision does not authorize implementation past those gates.
+Implementation, restricted-cluster feasibility and security qualification remain **unverified until WAS-01 (#51)** supplies the relevant evidence; later host/profile security gates still apply. This ADR satisfies MIG-01 criterion (2) and the scope-note half of criterion (4). Contract inventory (1), dependency classification (3) and the classification half of criterion (4) remain open and gate MIG-01 and, through it, WAS-01. Recording the decision does not authorize implementation past those gates.
 
 ## Alternatives
 
@@ -33,5 +33,9 @@ Compatibility must be demonstrated for each qualified language/package profile; 
 ## Amended by ADR 0010
 
 2026-10-27. Superseded in part by [ADR 0010](0010-oci-execution-mode-and-base-catalog.md) for `runtime.mode=oci`. The Option A decision remains in force for Wasm, which is the default mode. ADR 0010 adds an explicit OCI mode that the platform superadmin authorizes per tenant and project. It is never a fallback, and the controller's write set is unchanged.
+
+Option A as amended by ADR 0010 supersedes the silent native-fallback, CRD-controller and administrator-installed sandbox assumptions.
+
+Approving the amended design is not implementation or security qualification. Those remain gated on WAS-01 (#51) and later qualification gates.
 
 Line citations above to the design and `AGENTS.md` refer to their versions before ADR 0010 (commit `d459340`); the ADR 0010 revision shifts them.
