@@ -5,6 +5,7 @@ Updated 27 October 2026. Option A is selected: Wasmtime/WASI inside restricted p
 ## Contents
 
 - `falcone-serverless-design.md`: complete six-section report, including 100 requirements and 58 stories under 16 epics.
+- `contracts/falcone-contract-inventory.md`: frozen Falcone contract inventory v1.
 - `backlog.md`: standalone human-readable backlog.
 - `backlog.json`: issue payloads, parent IDs, dependencies, labels and requirement traceability.
 - `import_github.py`: Python 3 importer using your authenticated GitHub CLI.
