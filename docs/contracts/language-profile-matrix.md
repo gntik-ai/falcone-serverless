@@ -23,7 +23,7 @@ Enabled profiles require exact versions in three-part version notation, with
 optional prerelease/build identifiers, for the runtime, WASI, toolchain and
 package catalogue. Ranges and floating aliases are rejected. Disabled profiles
 may use the literal `unqualified` for choices not yet made. The seeds' Wasmtime
-version is `49.0.4`, cross-checked against the workspace's exact dependency pin;
+version is `49.0.5`, cross-checked against the workspace's exact dependency pin;
 this pin alone makes no language compatibility claim. A package catalogue
 revision must identify an immutable list of supported packages and exact package
 versions; unsupported packages are rejected, never installed through a hook.
