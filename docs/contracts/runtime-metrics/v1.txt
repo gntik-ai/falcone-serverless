@@ -1,0 +1,6 @@
+# The budget counts label combinations (2 x 4) before histogram buckets.
+contract ctr-runtime-metrics v1
+label runtime_mode wasm oci
+label phase image_pull pod_start init contract_probe
+series falcone_serverless_cold_start_phase_seconds histogram seconds runtime_mode phase
+budget 8
