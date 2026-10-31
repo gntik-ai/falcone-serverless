@@ -7,6 +7,9 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/qualification/posture.rs"
+
 [lints]
 workspace = true
 
