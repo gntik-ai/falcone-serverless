@@ -9,3 +9,14 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+# Shared crates for the first contract tasks (#60, #65, #67, #100). The worker sandbox is
+# offline and only reads crates already in Cargo.lock, so they are added here once, at
+# reviewed versions released at least two weeks ago.
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
+
+[dev-dependencies]
+wit-parser = "=0.262.0"
