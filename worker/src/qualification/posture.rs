@@ -7,6 +7,18 @@ const RULE_IDS: [&str; 12] = [
     "RP-11", "RP-12",
 ];
 
+const RP_01_NON_ROOT: usize = 0;
+const RP_02_NO_PRIVILEGE_ESCALATION: usize = 1;
+const RP_03_NOT_PRIVILEGED: usize = 2;
+const RP_04_DROP_CAPABILITIES: usize = 3;
+const RP_05_RUNTIME_DEFAULT_SECCOMP: usize = 4;
+const RP_06_READ_ONLY_ROOT_FILESYSTEM: usize = 5;
+const RP_07_NO_HOST_NAMESPACES: usize = 6;
+const RP_08_NO_HOST_PATH: usize = 7;
+const RP_09_NO_HOST_PORT: usize = 8;
+const RP_10_NO_API_TOKEN: usize = 9;
+const RP_11_NO_RUNTIME_CLASS: usize = 10;
+
 /// The deployment's trusted platform role, supplied by the caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
@@ -41,13 +53,13 @@ pub fn check(object: &Value, role: Role) -> Vec<Violation> {
     }
     let pod = &object["spec"]["template"]["spec"];
     if !pod.is_object() {
-        return RULE_IDS[..11]
+        return RULE_IDS[..=RP_11_NO_RUNTIME_CLASS]
             .iter()
             .filter(|id| role != Role::Controller || **id != "RP-10")
             .map(|id| Violation { rule_id: id })
             .collect();
     }
-    let mut valid = [true; 12];
+    let mut valid = [true; RULE_IDS.len()];
     if pod
         .get("containers")
         .and_then(Value::as_array)
@@ -56,16 +68,16 @@ pub fn check(object: &Value, role: Role) -> Vec<Violation> {
             .get("initContainers")
             .is_some_and(|value| !value.is_array())
     {
-        valid[..6].fill(false);
-        valid[8] = false;
+        valid[RP_01_NON_ROOT..=RP_06_READ_ONLY_ROOT_FILESYSTEM].fill(false);
+        valid[RP_09_NO_HOST_PORT] = false;
     }
     let pod_context = &pod["securityContext"];
     if pod
         .get("securityContext")
         .is_some_and(|context| !context.is_object())
     {
-        valid[0] = false;
-        valid[4] = false;
+        valid[RP_01_NON_ROOT] = false;
+        valid[RP_05_RUNTIME_DEFAULT_SECCOMP] = false;
     }
     for container in pod["containers"]
         .as_array()
@@ -74,8 +86,8 @@ pub fn check(object: &Value, role: Role) -> Vec<Violation> {
         .chain(pod["initContainers"].as_array().into_iter().flatten())
     {
         if !container.is_object() {
-            valid[..6].fill(false);
-            valid[8] = false;
+            valid[RP_01_NON_ROOT..=RP_06_READ_ONLY_ROOT_FILESYSTEM].fill(false);
+            valid[RP_09_NO_HOST_PORT] = false;
             continue;
         }
         let context = &container["securityContext"];
@@ -83,50 +95,53 @@ pub fn check(object: &Value, role: Role) -> Vec<Violation> {
             .get("securityContext")
             .is_some_and(|context| !context.is_object())
         {
-            valid[..6].fill(false);
+            valid[RP_01_NON_ROOT..=RP_06_READ_ONLY_ROOT_FILESYSTEM].fill(false);
         }
         let effective = |field: &str| context.get(field).or_else(|| pod_context.get(field));
-        valid[0] &= effective("runAsNonRoot").and_then(Value::as_bool) == Some(true)
+        valid[RP_01_NON_ROOT] &= effective("runAsNonRoot").and_then(Value::as_bool) == Some(true)
             && effective("runAsUser").is_none_or(|uid| uid.as_u64().is_some_and(|uid| uid > 0));
-        valid[1] &= context["allowPrivilegeEscalation"].as_bool() == Some(false);
-        valid[2] &= context
+        valid[RP_02_NO_PRIVILEGE_ESCALATION] &=
+            context["allowPrivilegeEscalation"].as_bool() == Some(false);
+        valid[RP_03_NOT_PRIVILEGED] &= context
             .get("privileged")
             .is_none_or(|value| value.as_bool() == Some(false));
-        valid[3] &= context["capabilities"]["drop"]
-            .as_array()
-            .is_some_and(|drop| {
-                drop.iter().all(Value::is_string)
-                    && drop.iter().any(|cap| cap.as_str() == Some("ALL"))
-            })
-            && context["capabilities"]
-                .get("add")
-                .is_none_or(|add| add.as_array().is_some_and(Vec::is_empty));
-        valid[4] &= effective("seccompProfile")
+        valid[RP_04_DROP_CAPABILITIES] &=
+            context["capabilities"]["drop"]
+                .as_array()
+                .is_some_and(|drop| {
+                    drop.iter().all(Value::is_string)
+                        && drop.iter().any(|cap| cap.as_str() == Some("ALL"))
+                })
+                && context["capabilities"]
+                    .get("add")
+                    .is_none_or(|add| add.as_array().is_some_and(Vec::is_empty));
+        valid[RP_05_RUNTIME_DEFAULT_SECCOMP] &= effective("seccompProfile")
             .and_then(|profile| profile.get("type"))
             .and_then(Value::as_str)
             == Some("RuntimeDefault");
-        valid[8] &= container.get("ports").is_none_or(|ports| {
+        valid[RP_09_NO_HOST_PORT] &= container.get("ports").is_none_or(|ports| {
             ports.as_array().is_some_and(|ports| {
                 ports
                     .iter()
                     .all(|port| port.is_object() && port.get("hostPort").is_none())
             })
         });
-        valid[5] &= context["readOnlyRootFilesystem"].as_bool() == Some(true);
+        valid[RP_06_READ_ONLY_ROOT_FILESYSTEM] &=
+            context["readOnlyRootFilesystem"].as_bool() == Some(true);
     }
-    valid[6] = ["hostNetwork", "hostPID", "hostIPC"].iter().all(|field| {
+    valid[RP_07_NO_HOST_NAMESPACES] = ["hostNetwork", "hostPID", "hostIPC"].iter().all(|field| {
         pod.get(field)
             .is_none_or(|value| value.as_bool() == Some(false))
     });
-    valid[7] = pod.get("volumes").is_none_or(|volumes| {
+    valid[RP_08_NO_HOST_PATH] = pod.get("volumes").is_none_or(|volumes| {
         volumes.as_array().is_some_and(|volumes| {
             volumes
                 .iter()
                 .all(|volume| volume.is_object() && volume.get("hostPath").is_none())
         })
     });
-    valid[10] = pod.get("runtimeClassName").is_none();
-    valid[9] =
+    valid[RP_11_NO_RUNTIME_CLASS] = pod.get("runtimeClassName").is_none();
+    valid[RP_10_NO_API_TOKEN] =
         role == Role::Controller || pod["automountServiceAccountToken"].as_bool() == Some(false);
     valid
         .into_iter()
@@ -142,7 +157,14 @@ pub fn check(object: &Value, role: Role) -> Vec<Violation> {
 #[cfg(test)]
 mod tests {
     use super::{Role, check};
-    use serde_json::json;
+    use serde_json::{Value, json};
+
+    fn rule_ids(object: &Value, role: Role) -> Vec<&'static str> {
+        check(object, role)
+            .into_iter()
+            .map(|violation| violation.rule_id)
+            .collect()
+    }
 
     #[test]
     fn missing_security_controls_fail_closed() {
@@ -150,18 +172,9 @@ mod tests {
             "apiVersion": "apps/v1", "kind": "Deployment",
             "spec": {"template": {"spec": {"containers": [{"name": "worker"}]}}}
         });
-        let ids: Vec<_> = check(&object, Role::GuestWorker)
-            .iter()
-            .map(|violation| violation.rule_id)
-            .collect();
+        let ids = rule_ids(&object, Role::GuestWorker);
         assert_eq!(ids, ["RP-01", "RP-02", "RP-04", "RP-05", "RP-06", "RP-10"]);
     }
-}
-
-#[cfg(test)]
-mod malformed_tests {
-    use super::{Role, check};
-    use serde_json::{Value, json};
 
     fn deployment() -> Value {
         json!({
@@ -189,8 +202,7 @@ mod malformed_tests {
             ] {
                 let mut object = deployment();
                 object["spec"]["template"]["spec"][field] = value;
-                let violations = check(&object, Role::GuestWorker);
-                let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+                let ids = rule_ids(&object, Role::GuestWorker);
                 assert_eq!(
                     ids,
                     [
@@ -207,8 +219,7 @@ mod malformed_tests {
             if let Some(containers) = containers {
                 pod.insert("containers".into(), containers);
             }
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(
                 ids,
                 [
@@ -222,8 +233,7 @@ mod malformed_tests {
         for value in [Value::Null, json!(false), json!("restricted"), json!([])] {
             let mut object = deployment();
             object["spec"]["template"]["spec"]["containers"][0]["securityContext"] = value.clone();
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(ids, ["RP-01", "RP-02", "RP-03", "RP-04", "RP-05", "RP-06"]);
 
             let mut object = deployment();
@@ -232,8 +242,7 @@ mod malformed_tests {
             pod["containers"][0]["securityContext"]["seccompProfile"] =
                 json!({"type":"RuntimeDefault"});
             pod["securityContext"] = value;
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(ids, ["RP-01", "RP-05"]);
         }
     }
@@ -248,11 +257,9 @@ mod malformed_tests {
             for path in ["/spec", "/spec/template", "/spec/template/spec"] {
                 let mut object = deployment();
                 *object.pointer_mut(path).unwrap() = value.clone();
-                let violations = check(&object, Role::GuestWorker);
-                let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+                let ids = rule_ids(&object, Role::GuestWorker);
                 assert_eq!(ids, expected, "{path}: {value}");
-                let violations = check(&object, Role::Controller);
-                let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+                let ids = rule_ids(&object, Role::Controller);
                 assert_eq!(
                     ids,
                     [
@@ -263,8 +270,7 @@ mod malformed_tests {
             }
         }
         let object = json!({"apiVersion": "apps/v1", "kind": "Deployment"});
-        let violations = check(&object, Role::GuestWorker);
-        let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+        let ids = rule_ids(&object, Role::GuestWorker);
         assert_eq!(ids, expected);
     }
 
@@ -358,8 +364,7 @@ mod malformed_tests {
                 .as_object_mut()
                 .unwrap()
                 .insert(field.into(), value);
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(ids, [expected], "{path}: {object}");
         }
     }
@@ -373,8 +378,7 @@ mod malformed_tests {
             let mut bad = good.clone();
             bad["securityContext"]["allowPrivilegeEscalation"] = json!(true);
             pod[field] = json!([good, bad.clone(), bad]);
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(ids, ["RP-02"], "{field}");
         }
     }
@@ -393,8 +397,7 @@ mod malformed_tests {
                 .as_object_mut()
                 .unwrap()
                 .remove(field);
-            let violations = check(&object, Role::GuestWorker);
-            let ids: Vec<_> = violations.iter().map(|v| v.rule_id).collect();
+            let ids = rule_ids(&object, Role::GuestWorker);
             assert_eq!(ids, [expected]);
         }
     }
