@@ -1,4 +1,4 @@
-# Trusted worker image inputs
+# Trusted worker and controller image inputs
 
 ## Digest pinning
 
@@ -21,8 +21,54 @@ tags; they cannot authenticate registry contents. Before merge, an independent
 reviewer must resolve both tags against their registries and confirm the exact
 digests above. This R3 change also requires operator approval covering the digest
 amendment. No image build, publication or deployment is added by this task, and
-the existing CI does not build this Containerfile. Image build validation remains
-an operator gate.
+the existing CI does not build this Containerfile or the controller one. Image
+build validation remains an operator gate.
+
+## Controller image
+
+`controller/Containerfile` builds the trusted pool controller from these two
+external inputs:
+
+- Builder: `docker.io/library/golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfac7662f3bec40927c7dee48731e3d92083d42`
+- Runtime: `gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3`
+
+Both are OCI image indexes supplied by the operator in the 2026-11-01 amendment.
+The builder tag's major.minor equals the `go` directive in `controller/go.mod`.
+Build from the repository root, using `controller/Containerfile` as the build file:
+`docker build -f controller/Containerfile .`. The build stage copies only
+`controller/go.mod` and `controller/main.go` (no test files; there is no `go.sum`),
+sets `GOTOOLCHAIN=local` so no toolchain is downloaded, and runs
+`CGO_ENABLED=0 go build -trimpath -ldflags '-s -w'`. Only the static binary is copied
+into the runtime image. The Containerfile has no ADD instruction, no RUN after the
+runtime FROM and no copy from an external image; the runtime image has no shell or
+package manager. The image runs as the numeric user `65532:65532` and its ENTRYPOINT
+is the exec-form binary `/usr/local/bin/falcone-serverless-controller`.
+
+The binary ignores arguments, so running the image with no arguments or with
+`--help` prints `falcone-serverless-controller 0.1.0` and exits 0. Real flag
+parsing and `--help` output belong to DEP-03 (#23).
+
+The root `.dockerignore` excludes `docs/`, `target/` and `.git` from every build
+context. No path that `worker/Containerfile` or `controller/Containerfile` copies
+from the context is excluded, and every `docs/` include in the worker is test-only.
+BuildKit prefers a `<Containerfile>.dockerignore` placed next to a Containerfile, so
+adding one would bypass the root rules; do not add one without updating them.
+
+### Image age exception
+
+Base images are normally at least two weeks old. The builder index was pushed
+2026-10-28, under 14 days before this change, and the operator accepted it for the
+Go 1.26.10 security fixes to `crypto/x509` in the Go standard library compiled into
+the binary; Go 1.26.9, pushed 2026-10-10, lacks those fixes. The runtime index was
+uploaded 2026-09-13, and its immutable tag is
+`nonroot-02a141105c8d1b1987df7993c1a635ec72ac9c65`.
+
+The digests are operator-supplied. Offline tests (`controller/image_test.go`) check
+the reference format, byte-equality with the values above, the user, the exec-form
+entrypoint and the `.dockerignore` rules; they cannot authenticate registry contents.
+Before merge, an independent reviewer must resolve both tags to these digests. The
+image build, `docker inspect` of `Config.User`, and a run of the image are validated by
+the operator's CI job, which is added in a separate change.
 
 ## SBOM
 
