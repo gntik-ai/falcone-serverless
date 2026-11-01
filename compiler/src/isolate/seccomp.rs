@@ -27,8 +27,18 @@ const fn syscall_number(x86_64: i64, asm_generic: i64) -> i64 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Condition {
     Always,
-    ArgumentNotEqual { index: u8, value: u64 },
-    ArgumentHasBits { index: u8, mask: u64 },
+    ArgumentNotEqual {
+        index: u8,
+        value: u64,
+    },
+    /// Compares all 64 bits: a pointer whose low half is zero is still not NULL.
+    PointerNotNull {
+        index: u8,
+    },
+    ArgumentHasBits {
+        index: u8,
+        mask: u64,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DenyRule {
@@ -95,6 +105,27 @@ impl SeccompPlan {
             ("io_uring_setup", 425, 425),
             ("io_uring_enter", 426, 426),
             ("io_uring_register", 427, 427),
+            // Pathname sockets: Landlock ABI 6 scopes only abstract ones. sendmsg and
+            // sendmmsg carry the destination in a msghdr that seccomp cannot inspect.
+            ("connect", 42, 203),
+            ("bind", 49, 200),
+            ("sendmsg", 46, 211),
+            ("sendmmsg", 307, 269),
+            // Metadata mutators that Landlock does not mediate.
+            ("fchmod", 91, 52),
+            ("fchmodat", 268, 53),
+            ("fchmodat2", 452, 452),
+            ("fchown", 93, 55),
+            ("fchownat", 260, 54),
+            ("setxattr", 188, 5),
+            ("lsetxattr", 189, 6),
+            ("fsetxattr", 190, 7),
+            ("removexattr", 197, 14),
+            ("lremovexattr", 198, 15),
+            ("fremovexattr", 199, 16),
+            ("setxattrat", 463, 463),
+            ("removexattrat", 466, 466),
+            ("utimensat", 280, 88),
         ];
         plan.rules
             .extend(table.into_iter().map(|(syscall, x86, generic)| DenyRule {
@@ -103,6 +134,40 @@ impl SeccompPlan {
                 condition: Condition::Always,
                 errno: 1,
             }));
+        if cfg!(target_arch = "x86_64") {
+            // Legacy entry points that asm-generic never defined.
+            plan.rules.extend(
+                [
+                    ("chmod", 90),
+                    ("chown", 92),
+                    ("lchown", 94),
+                    ("utime", 132),
+                    ("utimes", 235),
+                    ("futimesat", 261),
+                ]
+                .into_iter()
+                .map(|(syscall, number)| DenyRule {
+                    syscall,
+                    number,
+                    condition: Condition::Always,
+                    errno: 1,
+                }),
+            );
+        }
+        // Only a NULL destination addresses the already-connected unnamed socketpair.
+        plan.rules.push(DenyRule {
+            syscall: "sendto",
+            number: syscall_number(44, 206),
+            condition: Condition::PointerNotNull { index: 4 },
+            errno: 1,
+        });
+        // The child shares the launcher's UID and PID namespace; pid 0 is itself.
+        plan.rules.push(DenyRule {
+            syscall: "prlimit64",
+            number: syscall_number(302, 261),
+            condition: Condition::ArgumentNotEqual { index: 0, value: 0 },
+            errno: 1,
+        });
         plan.rules.push(DenyRule {
             syscall: "clone3",
             number: 435,
@@ -136,6 +201,10 @@ impl SeccompPlan {
                             value,
                         )
                         .map_err(|_| Failure::Seccomp)?,
+                    ],
+                    Condition::PointerNotNull { index } => vec![
+                        SeccompCondition::new(index, SeccompCmpArgLen::Qword, SeccompCmpOp::Ne, 0)
+                            .map_err(|_| Failure::Seccomp)?,
                     ],
                     Condition::ArgumentHasBits { index, mask } => {
                         // Each set bit is an OR rule: deny ANY namespace flag, including combinations.

@@ -17,4 +17,9 @@ workspace = true
 [dependencies]
 landlock = "=0.4.7"
 seccompiler = "=0.5.0"
-rustix = { version = "=1.1.5", features = ["process", "thread", "fs"] }
+rustix = { version = "=1.1.5", features = ["process", "thread", "fs", "event", "stdio"] }
+
+# Integration tests issue real socket and metadata syscalls from a seccomp-confined child
+# (the crate forbids unsafe code, so no libc). Same pinned version as above.
+[dev-dependencies]
+rustix = { version = "=1.1.5", features = ["process", "thread", "fs", "net"] }

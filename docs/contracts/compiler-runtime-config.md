@@ -14,6 +14,10 @@ cannot cross containers, with an abstract Unix domain socket. It changes the mea
 of `control_socket` and the minimum value of `landlock_min_abi`, so it is a major
 version; every other key and rule is unchanged from version 1.
 
+The build runner also requires `forbidden_paths` (#235). There is no runtime consumer
+yet, so the chart must supply it before the runner is enabled; without it the runner
+is not ready.
+
 ## Service keys
 
 | Key | Meaning |
@@ -64,6 +68,7 @@ compiler replicas. No pod-per-build Job or extra controller permission is requir
 | `build_max_processes` | Aggregate process-count ceiling, including every descendant. |
 | `build_output_bytes` | Aggregate output-byte ceiling. |
 | `build_wall_clock` | Wall-clock duration ceiling for the entire build. |
+| `forbidden_paths` | Required, at least one. Absolute, canonically spelled mount paths of the signing key, service identity and service configuration as deployed (paths only, never values). The runner probes each for presence, never opens or reads it, at startup and before every build; any present path makes it not ready (credential mount). A path that equals, sits under or contains `toolchain_dir`, `catalogue_dir`, `workspace_root`, `/dev/null`, `/proc/self` or a language-profile extra path is a configuration error. A missing or empty list fails closed. The five fixed locations (`/var/run/secrets/kubernetes.io/serviceaccount`, `/run/secrets`, `/var/run/secrets`, `/etc/falcone/identity`, `/etc/falcone/compiler`) are always probed in addition. The launcher takes them as positional arguments after `file_size_bytes`. |
 | `control_socket` | Name of the service-to-launcher control socket in the Linux abstract Unix socket namespace, with no filesystem path; never a named filesystem (pathname) or network socket. |
 
 CPU and memory container limits and these build budgets are bounded by service
@@ -78,7 +83,20 @@ configured `landlock_min_abi` does not include this scoping, or the kernel does
 not provide it, the launcher reports not ready and builds stay disabled; there is
 no unscoped fallback. The launcher applies Landlock and seccomp before executing
 trusted toolchains, denies message-queue IPC and cross-process memory access, and
-allows toolchains no sockets other than unnamed Unix socketpairs. Terminate and
+allows toolchains no sockets other than unnamed Unix socketpairs. The seccomp filter
+also fails with `EPERM` any `connect`, `bind`, `sendmsg` and `sendmmsg` (so an unnamed
+socketpair cannot address a pathname socket), `sendto` with a destination address,
+`prlimit64` on any pid other than the caller (`0`), and the metadata mutators Landlock
+does not mediate: chmod, chown, extended-attribute set/remove and timestamp changes
+(including `fchmodat2`). `write`, `send` and `sendto` with a NULL destination over the
+socketpair keep working; file descriptor passing with `sendmsg` does not.
+
+The launcher's `spawn` returns only after the build child has confined itself. The
+child reports success just before exec and a failure byte otherwise, over a pipe that
+is close-on-exec, so no handshake descriptor reaches the toolchain, which still holds
+only descriptors 0, 1 and 2. A child that reports failure or stays silent past a bounded
+wait is killed, its workspace is removed and the runner is not ready with a confinement
+failure, distinct from an ordinary failed build. Terminate and
 reap all descendants before returning a result or collecting files. Staging and
 collection follow the descriptor-relative, no-follow, beneath-workspace
 single-link regular-file rules of the source build contract, only while the

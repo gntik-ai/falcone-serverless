@@ -103,6 +103,8 @@ impl CommandEnvironment for Command {
 pub trait KernelInterface {
     fn probe_landlock(&mut self, minimum: u32) -> Result<()>;
     fn path_present(&mut self, probe: CredentialProbe) -> Result<bool>;
+    /// Presence only, for a deployment-configured credential path. Never opens it.
+    fn forbidden_path_present(&mut self, path: &Path) -> Result<bool>;
     fn create_workspace(&mut self, root: &Path) -> Result<PathBuf>;
     fn remove_workspace(&mut self, workspace: &Path) -> Result<()>;
     fn probe_confinement(&mut self, spec: &SpawnSpec) -> Result<()>;
@@ -126,6 +128,11 @@ pub fn check_runner_environment(
     kernel.probe_landlock(config.landlock_min_abi)?;
     for probe in CredentialProbe::ALL {
         if kernel.path_present(probe)? {
+            return Err(Failure::CredentialMount);
+        }
+    }
+    for path in &config.forbidden_paths {
+        if kernel.forbidden_path_present(path)? {
             return Err(Failure::CredentialMount);
         }
     }

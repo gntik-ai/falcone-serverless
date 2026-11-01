@@ -2,6 +2,9 @@ use falcone_serverless_compiler::isolate::*;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A deployment-configured credential mount outside the five fixed probe locations.
+pub const SIGNING_KEY: &str = "/srv/falcone/signing/ed25519.key";
+
 pub struct TempRoot(pub PathBuf);
 impl TempRoot {
     pub fn new() -> Self {
@@ -21,6 +24,7 @@ impl TempRoot {
             &self.0,
             "compiler-control",
         )
+        .with_forbidden_paths([SIGNING_KEY])
     }
 }
 impl Drop for TempRoot {
@@ -38,6 +42,10 @@ pub struct MockKernel {
     pub child_descriptors: Vec<u32>,
     pub abi: u32,
     pub credential: Option<CredentialProbe>,
+    pub forbidden_present: Vec<PathBuf>,
+    /// Models a child that confines itself *after* spawn started: the readiness probe
+    /// passes and the failure is only reported by the setup handshake.
+    pub child_confinement_fault: bool,
     pub spawned: Vec<SpawnSpec>,
     pub workspaces: Vec<PathBuf>,
     pub finished: Option<bool>,
@@ -58,6 +66,8 @@ impl Default for MockKernel {
             child_descriptors: vec![],
             abi: 6,
             credential: None,
+            forbidden_present: vec![],
+            child_confinement_fault: false,
             spawned: vec![],
             workspaces: vec![],
             finished: None,
@@ -91,6 +101,10 @@ impl KernelInterface for MockKernel {
     fn path_present(&mut self, probe: CredentialProbe) -> Result<bool> {
         self.step("path", Failure::Probe)?;
         Ok(self.credential == Some(probe))
+    }
+    fn forbidden_path_present(&mut self, path: &Path) -> Result<bool> {
+        self.step("path", Failure::Probe)?;
+        Ok(self.forbidden_present.iter().any(|present| present == path))
     }
     fn create_workspace(&mut self, root: &Path) -> Result<PathBuf> {
         self.step("create", Failure::Workspace)?;
@@ -136,6 +150,10 @@ impl KernelInterface for MockKernel {
         self.step("exec", Failure::Spawn)
     }
     fn spawn(&mut self, spec: &SpawnSpec) -> Result<u64> {
+        if self.child_confinement_fault {
+            self.events.push("child_confinement_failed");
+            return Err(Failure::Confinement);
+        }
         confine_and_exec(self, spec)?;
         self.spawned.push(spec.clone());
         Ok(self.spawned.len() as u64)
@@ -148,3 +166,7 @@ impl KernelInterface for MockKernel {
         self.step("terminate", Failure::Spawn)
     }
 }
+
+/// Serializes every test that forks: writing an executable script while another thread
+/// forks makes the later exec fail with ETXTBSY.
+pub static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

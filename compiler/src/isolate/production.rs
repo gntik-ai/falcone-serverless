@@ -5,20 +5,72 @@ use landlock::{
 };
 use rustix::process::{Resource, Rlimit};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::fs::{self, DirBuilder};
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, PipeReader, Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// Setup handshake bytes. The child sends READY once confinement is applied, just before
+// exec, and a failure byte instead if anything before or during exec fails. Silence,
+// EOF without READY and unknown bytes all mean failure: only READY is trusted.
+const SETUP_READY: u8 = 0;
+const SETUP_CONFINEMENT_FAILED: u8 = 1;
+const SETUP_EXEC_FAILED: u8 = 2;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Only this implementation is constructed by the launcher binary.
 pub struct ProductionKernel {
     executable: PathBuf,
     children: BTreeMap<u64, Child>,
     next_child: u64,
+    handshake_timeout: Duration,
+    setup_status: Option<File>,
+}
+enum SetupRead {
+    Byte(u8),
+    Eof,
+    Timeout,
+    Broken,
+}
+/// Wait for the next status byte without spinning: poll the pipe up to the deadline.
+fn read_setup_status(status: &mut PipeReader, deadline: Instant) -> SetupRead {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = rustix::event::Timespec {
+            tv_sec: remaining.as_secs().try_into().unwrap_or(i64::MAX),
+            tv_nsec: remaining.subsec_nanos().into(),
+        };
+        let mut fds = [rustix::event::PollFd::new(
+            &*status,
+            rustix::event::PollFlags::IN,
+        )];
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(0) => return SetupRead::Timeout,
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return SetupRead::Broken,
+        }
+        let mut byte = [0];
+        match status.read(&mut byte) {
+            Ok(0) => return SetupRead::Eof,
+            Ok(_) => return SetupRead::Byte(byte[0]),
+            Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return SetupRead::Broken,
+        }
+    }
+}
+/// Presence only: a dangling credential mount/symlink is also rejected.
+fn path_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(Failure::Probe),
+    }
 }
 impl ProductionKernel {
     pub fn new(executable: PathBuf) -> Self {
@@ -26,6 +78,53 @@ impl ProductionKernel {
             executable,
             children: BTreeMap::new(),
             next_child: 0,
+            handshake_timeout: HANDSHAKE_TIMEOUT,
+            setup_status: None,
+        }
+    }
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+    /// Trampoline side of the setup handshake, called first in `--child` mode. std can map
+    /// only stdio into a child, so `spawn` hands over the status pipe as descriptor 0.
+    /// Move it to a CLOEXEC descriptor (the exec closes it, which is the parent's proof
+    /// that exec happened and keeps it from the toolchain) and give descriptor 0 back to
+    /// the toolchain as /dev/null: an empty stdin, as the parent's closed pipe used to be.
+    pub fn adopt_setup_status(&mut self) -> Result<()> {
+        let status = rustix::io::fcntl_dupfd_cloexec(rustix::stdio::stdin(), 3)
+            .map_err(|_| Failure::Confinement)?;
+        let null = File::open("/dev/null").map_err(|_| Failure::Confinement)?;
+        rustix::stdio::dup2_stdin(&null).map_err(|_| Failure::Confinement)?;
+        self.setup_status = Some(File::from(status));
+        Ok(())
+    }
+    /// Best effort: if the byte is lost the parent sees EOF without READY, also a failure.
+    pub fn report_setup_failure(&mut self, failure: Failure) {
+        let _ = self.send_setup_status(if failure == Failure::Spawn {
+            SETUP_EXEC_FAILED
+        } else {
+            SETUP_CONFINEMENT_FAILED
+        });
+    }
+    fn send_setup_status(&mut self, byte: u8) -> Result<()> {
+        match &mut self.setup_status {
+            Some(status) => status.write_all(&[byte]).map_err(|_| Failure::Confinement),
+            None => Ok(()),
+        }
+    }
+    /// Parent side: READY must arrive, then EOF once exec closed the descriptor.
+    fn await_setup(&self, mut status: PipeReader) -> Result<()> {
+        let deadline = Instant::now() + self.handshake_timeout;
+        match read_setup_status(&mut status, deadline) {
+            SetupRead::Byte(SETUP_READY) => {}
+            SetupRead::Byte(SETUP_EXEC_FAILED) => return Err(Failure::Spawn),
+            _ => return Err(Failure::Confinement),
+        }
+        match read_setup_status(&mut status, deadline) {
+            SetupRead::Eof => Ok(()),
+            SetupRead::Byte(SETUP_EXEC_FAILED) | SetupRead::Timeout => Err(Failure::Spawn),
+            _ => Err(Failure::Confinement),
         }
     }
     fn trampoline(&mut self, spec: &SpawnSpec, probe: bool) -> Result<Command> {
@@ -80,11 +179,10 @@ impl KernelInterface for ProductionKernel {
         Ok(())
     }
     fn path_present(&mut self, probe: CredentialProbe) -> Result<bool> {
-        match fs::symlink_metadata(probe.path()) {
-            Ok(_) => Ok(true), // A dangling credential mount/symlink is also rejected.
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-            Err(_) => Err(Failure::Probe),
-        }
+        path_exists(probe.path())
+    }
+    fn forbidden_path_present(&mut self, path: &Path) -> Result<bool> {
+        path_exists(path)
     }
     fn create_workspace(&mut self, root: &Path) -> Result<PathBuf> {
         if fs::canonicalize(root).map_err(|_| Failure::Workspace)? != root {
@@ -220,6 +318,8 @@ impl KernelInterface for ProductionKernel {
         Ok(())
     }
     fn exec(&mut self, spec: &SpawnSpec) -> Result<()> {
+        // Confinement is complete; the parent's spawn() waits for this byte.
+        self.send_setup_status(SETUP_READY)?;
         // The trampoline already owns three private pipes. Reuse them across exec;
         // creating new pipes here would leave them with no trusted reader/writer.
         let mut command = spec.command();
@@ -231,11 +331,19 @@ impl KernelInterface for ProductionKernel {
         Err(Failure::Spawn)
     }
     fn spawn(&mut self, spec: &SpawnSpec) -> Result<u64> {
-        let mut child = self
-            .trampoline(spec, false)?
-            .spawn()
-            .map_err(|_| Failure::Spawn)?;
-        drop(child.stdin.take());
+        let (status, writer) = std::io::pipe().map_err(|_| Failure::Spawn)?;
+        let mut command = self.trampoline(spec, false)?;
+        command.stdin(writer);
+        let spawned = command.spawn();
+        // The command owns the parent's copy of the write end; EOF needs it closed.
+        drop(command);
+        let mut child = spawned.map_err(|_| Failure::Spawn)?;
+        // Not started until the child reports its own confinement (or fails to).
+        if let Err(failure) = self.await_setup(status) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failure);
+        }
         // Drain/discard bounded chunks during poll. Never log workspace/toolchain output.
         let flags = rustix::fs::OFlags::NONBLOCK;
         let pipe_setup = (|| {

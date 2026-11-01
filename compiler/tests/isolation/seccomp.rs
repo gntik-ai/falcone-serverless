@@ -119,3 +119,102 @@ fn alternate_abis_cannot_bypass_the_filter_and_denial_never_kills() {
         }
     }
 }
+
+const DENIED: u32 = 0x50001;
+const ALLOWED: u32 = 0x7fff0000;
+
+// Independent of the production table: numbers from the Linux UAPI tables
+// (asm/unistd_64.h and asm-generic/unistd.h), one literal per architecture.
+fn arch(x86_64: u32, generic: u32) -> u32 {
+    if cfg!(target_arch = "x86_64") {
+        x86_64
+    } else {
+        generic
+    }
+}
+
+#[test]
+fn connect_bind_and_destination_bearing_sends_are_denied_but_null_destination_sends_pass() {
+    let programs = SeccompPlan::for_host().unwrap().compile().unwrap();
+    let (connect, bind, sendto) = (arch(42, 203), arch(49, 200), arch(44, 206));
+    let (sendmsg, sendmmsg) = (arch(46, 211), arch(307, 269));
+    for nr in [connect, bind, sendmsg, sendmmsg] {
+        assert_eq!(result(&programs, nr, [0; 6]), DENIED, "syscall {nr}");
+        assert_eq!(
+            result(&programs, nr, [3, 1, 2, 3, 4, 5]),
+            DENIED,
+            "syscall {nr}"
+        );
+    }
+    // sendto(fd, buf, len, flags, dest_addr, addrlen): argument 4 is a pointer.
+    assert_eq!(result(&programs, sendto, [3, 0x1000, 8, 0, 0, 0]), ALLOWED);
+    assert_eq!(
+        result(&programs, sendto, [3, 0x1000, 8, 0, 0, 110]),
+        ALLOWED
+    );
+    for dest in [1, 0x7fff_0000, 1 << 32, 0x7fff_1234_5678_0000, u64::MAX] {
+        assert_eq!(
+            result(&programs, sendto, [3, 0x1000, 8, 0, dest, 110]),
+            DENIED,
+            "dest_addr {dest:#x}"
+        );
+    }
+}
+
+#[test]
+fn prlimit64_is_denied_for_any_other_process_and_allowed_for_self() {
+    let programs = SeccompPlan::for_host().unwrap().compile().unwrap();
+    let prlimit64 = arch(302, 261);
+    // prlimit64(pid, resource, new_limit, old_limit)
+    assert_eq!(result(&programs, prlimit64, [0, 7, 0, 0, 0, 0]), ALLOWED);
+    assert_eq!(
+        result(&programs, prlimit64, [0, 7, 0x1000, 0x2000, 0, 0]),
+        ALLOWED
+    );
+    for pid in [1, 2, 4242, 0x7fff_ffff, u32::MAX] {
+        assert_eq!(
+            result(&programs, prlimit64, [pid.into(), 7, 0x1000, 0, 0, 0]),
+            DENIED,
+            "pid {pid}"
+        );
+    }
+}
+
+#[test]
+fn filesystem_metadata_mutators_are_denied() {
+    let programs = SeccompPlan::for_host().unwrap().compile().unwrap();
+    let mut denied = vec![
+        // fchmod fchmodat fchmodat2 fchown fchownat setxattr lsetxattr fsetxattr
+        // removexattr lremovexattr fremovexattr utimensat setxattrat removexattrat
+        arch(91, 52),
+        arch(268, 53),
+        452,
+        arch(93, 55),
+        arch(260, 54),
+        arch(188, 5),
+        arch(189, 6),
+        arch(190, 7),
+        arch(197, 14),
+        arch(198, 15),
+        arch(199, 16),
+        arch(280, 88),
+        463,
+        466,
+    ];
+    if cfg!(target_arch = "x86_64") {
+        // chmod chown lchown utime utimes futimesat exist only in the x86_64 table.
+        denied.extend([90, 92, 94, 132, 235, 261]);
+    }
+    for nr in denied {
+        assert_eq!(result(&programs, nr, [0; 6]), DENIED, "syscall {nr}");
+        assert_eq!(
+            result(&programs, nr, [3, 4, 5, 6, 7, 8]),
+            DENIED,
+            "syscall {nr}"
+        );
+    }
+    // Reading metadata stays available: getxattr and fstat-family syscalls.
+    for nr in [arch(191, 8), arch(5, 80)] {
+        assert_eq!(result(&programs, nr, [0; 6]), ALLOWED, "syscall {nr}");
+    }
+}

@@ -15,6 +15,8 @@ pub enum Failure {
     Workspace,
     Spawn,
     Control,
+    /// The build child failed to confine itself after its readiness probe passed.
+    Confinement,
 }
 pub type Result<T> = std::result::Result<T, Failure>;
 
@@ -105,6 +107,9 @@ pub struct RunnerConfig {
     pub control_socket: String,
     pub landlock_min_abi: u32,
     pub limits: Limits,
+    /// Deployment mount paths (signing key, identity, configuration) that must be absent
+    /// from the runner. Probed for presence only, never opened, read or logged.
+    pub forbidden_paths: Vec<PathBuf>,
 }
 impl RunnerConfig {
     pub fn new(
@@ -120,11 +125,19 @@ impl RunnerConfig {
             control_socket: socket.into(),
             landlock_min_abi: 6,
             limits: Limits::default(),
+            forbidden_paths: Vec::new(),
         }
+    }
+    pub fn with_forbidden_paths<P: Into<PathBuf>>(
+        mut self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Self {
+        self.forbidden_paths = paths.into_iter().map(Into::into).collect();
+        self
     }
     /// Positional, credential-free deployment inputs. No environment/config bypass keys.
     pub fn arguments(&self) -> Vec<OsString> {
-        vec![
+        let mut arguments = vec![
             self.toolchain_dir.clone().into_os_string(),
             self.catalogue_dir.clone().into_os_string(),
             self.workspace_root.clone().into_os_string(),
@@ -134,10 +147,18 @@ impl RunnerConfig {
             self.limits.cpu_seconds.to_string().into(),
             self.limits.open_files.to_string().into(),
             self.limits.file_size.to_string().into(),
-        ]
+        ];
+        arguments.extend(
+            self.forbidden_paths
+                .iter()
+                .map(|path| path.clone().into_os_string()),
+        );
+        arguments
     }
+    /// The nine fixed values are followed by one or more forbidden paths. A missing list
+    /// fails closed: an omitted argument must never mean "nothing to check".
     pub fn from_arguments(args: &[OsString]) -> Result<Self> {
-        if args.len() != 9 {
+        if args.len() <= 9 {
             return Err(Failure::Configuration);
         }
         let number = |index: usize| -> Result<u64> {
@@ -159,6 +180,7 @@ impl RunnerConfig {
                 open_files: number(7)?,
                 file_size: number(8)?,
             },
+            forbidden_paths: args[9..].iter().map(PathBuf::from).collect(),
         };
         config.validate()?;
         Ok(config)
@@ -196,6 +218,26 @@ impl RunnerConfig {
                 || roots.iter().enumerate().any(|(j, other)| {
                     i != j && (root.starts_with(other) || other.starts_with(root))
                 })
+            {
+                return Err(Failure::Configuration);
+            }
+        }
+        // Anything the build child may touch must stay clear of every credential path.
+        let mut allowed: Vec<&Path> = roots.iter().map(|root| root.as_path()).collect();
+        allowed.extend([Path::new("/dev/null"), Path::new("/proc/self")]);
+        allowed.extend(
+            Profile::ALL
+                .iter()
+                .flat_map(|profile| profile.extra_paths())
+                .map(|extra| Path::new(extra.path)),
+        );
+        for forbidden in &self.forbidden_paths {
+            // The path is probed as written, so it must also be spelled canonically.
+            if !normalized(forbidden)
+                || forbidden.components().collect::<PathBuf>().as_os_str() != forbidden.as_os_str()
+                || allowed
+                    .iter()
+                    .any(|path| forbidden.starts_with(path) || path.starts_with(forbidden))
             {
                 return Err(Failure::Configuration);
             }

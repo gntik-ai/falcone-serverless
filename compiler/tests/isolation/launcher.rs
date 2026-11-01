@@ -220,3 +220,25 @@ fn control_address_is_abstract_and_protocol_accepts_only_fixed_profiles() {
         assert_eq!(parse_control_frame(1, frame), ControlEvent::Invalid(1));
     }
 }
+
+#[test]
+fn a_child_confinement_failure_after_a_passing_probe_drops_readiness_and_the_workspace() {
+    let root = TempRoot::new();
+    let mut launcher = Launcher::new(root.config(), MockKernel::default());
+    assert!(launcher.check_readiness().ready);
+    launcher.kernel_mut().child_confinement_fault = true;
+    assert!(launcher.connect(1));
+    assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::NotReady);
+    assert_eq!(
+        launcher.report(),
+        ReadinessReport {
+            ready: false,
+            failure: Some(Failure::Confinement)
+        }
+    );
+    assert!(launcher.kernel().events.contains(&"probe"));
+    assert!(launcher.kernel().spawned.is_empty());
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+    // It is a runner fault, not a failed build: no active build is left to poll.
+    assert_eq!(launcher.poll().unwrap(), BuildOutcome::Idle);
+}
