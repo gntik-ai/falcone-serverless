@@ -15,6 +15,7 @@ use std::io::{self, IoSlice, Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,6 +23,7 @@ const EPERM: i32 = 1;
 const ENOTSUP: i32 = 95;
 const DIR_VARIABLE: &str = "ISOLATE_CONFINED_DIR";
 const LIMIT_VARIABLE: &str = "ISOLATE_PARENT_NOFILE";
+const MODE_VARIABLE: &str = "ISOLATE_CHMOD_TARGET";
 const WORKSPACE_MODE: u32 = 0o750;
 
 fn outcome(result: io::Result<()>) -> String {
@@ -434,4 +436,105 @@ fn metadata_mutators_on_the_workspace_parent_fail_and_leave_it_unchanged() {
     assert_eq!(meta.mode() & 0o7777, WORKSPACE_MODE);
     assert_ne!(meta.mtime(), 1, "utimensat changed the mtime");
     assert!(rustix::fs::getxattr(&parent, "user.escape", &mut [0u8; 4]).is_err());
+}
+
+/// Neither std nor rustix 1.1.5 issues `fchmodat2` and this crate forbids unsafe code, so
+/// the syscall comes from glibc (2.39 and later) through Python's
+/// `os.chmod(follow_symlinks=False)`, which maps to `fchmodat(AT_SYMLINK_NOFOLLOW)`.
+const FCHMODAT2_SCRIPT: &str = concat!(
+    "import os, sys\n",
+    "try:\n",
+    "    os.chmod(sys.argv[1], int(sys.argv[2], 8), follow_symlinks=False)\n",
+    "    print('CASE fchmodat2=ok')\n",
+    "except NotImplementedError:\n",
+    "    print('CASE fchmodat2=unsupported')\n",
+    "except OSError as e:\n",
+    "    print('CASE fchmodat2=errno%d' % e.errno)\n",
+);
+
+fn fchmodat2_command(target: &std::path::Path, mode: u32) -> Command {
+    let mut command = Command::new("python3");
+    command
+        .args(["-I", "-c", FCHMODAT2_SCRIPT])
+        .arg(target)
+        .arg(format!("{mode:o}"));
+    command
+}
+
+fn case_outcome(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        // libtest prefixes the first line of a --nocapture run with the test name.
+        .find_map(|line| line.split_once("CASE fchmodat2=").map(|(_, value)| value))
+        .unwrap_or("no-result")
+        .to_string()
+}
+
+#[test]
+#[ignore = "re-executed by the parent test as the confined child"]
+fn confined_fchmodat2_child() {
+    let target = PathBuf::from(std::env::var_os(MODE_VARIABLE).expect("run through the parent"));
+    for program in SeccompPlan::for_host().unwrap().compile().unwrap() {
+        seccompiler::apply_filter(&program).unwrap();
+    }
+    // The filter is inherited across exec; only this process image is replaced.
+    let error = fchmodat2_command(&target, 0).exec();
+    panic!("exec of python3 failed: {error}");
+}
+
+#[test]
+fn fchmodat2_on_the_workspace_parent_fails_with_eperm_under_the_filter() {
+    let python = Command::new("python3").args(["-I", "-c", "pass"]).output();
+    if !python.is_ok_and(|output| output.status.success()) {
+        eprintln!("SKIP fchmodat2 kernel test: python3 is not available to issue the syscall");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("compiler-fchmodat2-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    let _guard = Restore(dir.clone());
+    let parent = dir.join("parent");
+    fs::create_dir(&parent).unwrap();
+    fs::set_permissions(&parent, Permissions::from_mode(WORKSPACE_MODE)).unwrap();
+    // Control: unconfined, the syscall reaches the kernel and changes the mode.
+    let control = fchmodat2_command(&parent, 0o700).output().unwrap();
+    match case_outcome(&control).as_str() {
+        "ok" => {}
+        "unsupported" | "errno38" => {
+            eprintln!("SKIP fchmodat2 kernel test: the kernel or libc lacks fchmodat2");
+            return;
+        }
+        other => panic!("control fchmodat2: {other}"),
+    }
+    assert_eq!(
+        fs::metadata(&parent).unwrap().mode() & 0o7777,
+        0o700,
+        "control did not change the mode"
+    );
+    fs::set_permissions(&parent, Permissions::from_mode(WORKSPACE_MODE)).unwrap();
+    let _serialized = super::support::SPAWN_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let confined = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "confined::confined_fchmodat2_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(MODE_VARIABLE, &parent)
+        .output()
+        .unwrap();
+    assert_eq!(
+        case_outcome(&confined),
+        format!("errno{EPERM}"),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&confined.stdout),
+        String::from_utf8_lossy(&confined.stderr)
+    );
+    assert_eq!(
+        fs::metadata(&parent).unwrap().mode() & 0o7777,
+        WORKSPACE_MODE,
+        "fchmodat2 changed the parent's mode"
+    );
 }
