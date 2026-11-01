@@ -169,20 +169,31 @@ func checkContainerfile(containerfile, goMod string, repoFiles []string) []strin
 	if len(images) != 2 {
 		violations = append(violations, "from-count")
 	}
+	// A builder tag that disagrees with the go directive is reported once, as
+	// go-version; its digest is still compared, so the exact ref stays enforced
+	// whenever the tag is the expected one.
+	goVersionWrong := false
+	if len(images) > 0 {
+		tag := strings.TrimPrefix(strings.SplitN(images[0], "@", 2)[0], "docker.io/library/golang:")
+		goVersionWrong = majorMinor(tag) != goDirective(goMod)
+		if goVersionWrong {
+			violations = append(violations, "go-version")
+		}
+	}
 	for i, want := range []string{builderRef, runtimeRef} {
 		if len(images) != 2 {
 			break
 		}
 		if !refFormat.MatchString(images[i]) {
 			violations = append(violations, "digest")
-		} else if images[i] != want {
-			violations = append(violations, "base-ref")
+			continue
 		}
-	}
-	if len(images) > 0 {
-		tag := strings.TrimPrefix(strings.SplitN(images[0], "@", 2)[0], "docker.io/library/golang:")
-		if majorMinor(tag) != goDirective(goMod) {
-			violations = append(violations, "go-version")
+		got := images[i]
+		if i == 0 && goVersionWrong {
+			got, want = got[strings.Index(got, "@"):], want[strings.Index(want, "@"):]
+		}
+		if got != want {
+			violations = append(violations, "base-ref")
 		}
 	}
 
@@ -428,8 +439,12 @@ func TestBuilderTagMustMatchGoDirective(t *testing.T) {
 		t.Fatalf("patch-level go directive: %v", got)
 	}
 	older := mutate(t, containerfile, "golang:1.26.10-trixie", "golang:1.25.0-trixie")
-	if got := checkContainerfile(older, readFile(t, "go.mod"), files); !slices.Equal(got, []string{"base-ref", "go-version"}) {
-		t.Fatalf("1.25 tag: violations = %v, want [base-ref go-version]", got)
+	wrongDigest := mutate(t, older, builderRef[strings.Index(builderRef, "@")+len("@sha256:"):][1:], strings.Repeat("a", 63))
+	if got := checkContainerfile(wrongDigest, readFile(t, "go.mod"), files); !slices.Equal(got, []string{"go-version", "base-ref"}) {
+		t.Fatalf("1.25 tag with wrong digest: violations = %v, want [go-version base-ref]", got)
+	}
+	if got := checkContainerfile(older, readFile(t, "go.mod"), files); !slices.Equal(got, []string{"go-version"}) {
+		t.Fatalf("1.25 tag: violations = %v, want [go-version]", got)
 	}
 }
 
