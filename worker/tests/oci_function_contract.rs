@@ -154,6 +154,10 @@ fn compliant_http_yields_no_violations() {
 #[path = "../src/oci_contract.rs"]
 pub mod contract;
 
+// The reference's own deadline validator, compared against the published schema.
+#[path = "../src/bin/oci-contract-reference.rs"]
+pub mod reference_bin;
+
 #[test]
 fn embedded_fixtures_validate_at_the_contract_boundary() {
     for fixture in contract::FIXTURES {
@@ -386,7 +390,11 @@ fn compliant_process_and_scratch_writes_pass() {
 fn process_rules_and_filesystem_locations_are_isolated() {
     for (mode, rule) in [
         ("OCI-V1-BINDING", "OCI-V1-BINDING"),
+        ("extra-listener", "OCI-V1-BINDING"),
+        ("extra-listener-loopback", "OCI-V1-BINDING"),
+        ("extra-listener-child", "OCI-V1-BINDING"),
         ("ignore-sigterm", "OCI-V1-SIGTERM"),
+        ("leave-group", "OCI-V1-SIGTERM"),
         ("write-cwd", "OCI-V1-FILESYSTEM"),
         ("write-home", "OCI-V1-FILESYSTEM"),
         ("modify-sentinel", "OCI-V1-FILESYSTEM"),
@@ -412,38 +420,126 @@ fn legacy_replayers_and_boundary_envelopes_pass() {
     }
 }
 
+const TABLE_HEADER: &str =
+    "  sl  local_address rem_address st tx_queue:rx_queue tr:tm->when retrnsmt uid timeout inode\n";
+
+fn listener(address: &str, port: u16, state: &str, inode: u64) -> String {
+    format!(
+        " 0: {address}:{port:04X} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000 1000 0 {inode} 1 0000000000000000 100 0 0 10 0\n"
+    )
+}
+
+fn binding_rules(tcp: &str, tcp6: &str, owned: &[u64], port: u16) -> Vec<&'static str> {
+    let owned: std::collections::HashSet<u64> = owned.iter().copied().collect();
+    contract::check_binding_snapshot(tcp, tcp6, &owned, port)
+        .keys()
+        .copied()
+        .collect()
+}
+
 #[test]
 fn binding_snapshot_rejects_wildcard_ipv6_and_other_loopbacks() {
-    let header = "  sl  local_address rem_address st\n";
-    let good = format!("{header} 0: 0100007F:1F90 00000000:0000 0A\n");
-    assert!(contract::check_binding_snapshot(&good, header, 8080).is_empty());
+    let none = TABLE_HEADER;
+    let good = format!("{none}{}", listener("0100007F", 8080, "0A", 11));
+    assert!(binding_rules(&good, none, &[11], 8080).is_empty());
     for bad in ["00000000", "0200007F"] {
-        let tcp = format!("{header} 0: {bad}:1F90 00000000:0000 0A\n");
-        assert_eq!(
-            contract::check_binding_snapshot(&tcp, header, 8080)
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            ["OCI-V1-BINDING"]
-        );
+        let tcp = format!("{none}{}", listener(bad, 8080, "0A", 11));
+        assert_eq!(binding_rules(&tcp, none, &[11], 8080), ["OCI-V1-BINDING"]);
     }
     let ipv6 = format!(
-        "{header} 0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A\n"
+        "{none}{}",
+        listener("00000000000000000000000000000000", 8080, "0A", 11)
     );
+    assert_eq!(binding_rules(&good, &ipv6, &[11], 8080), ["OCI-V1-BINDING"]);
+    assert_eq!(binding_rules(none, none, &[11], 8080), ["OCI-V1-BINDING"]);
+}
+
+#[test]
+fn binding_snapshot_rejects_every_owned_extra_listener_on_another_port() {
+    let wildcard6 = "00000000000000000000000000000000";
+    let loopback6 = "00000000000000000100000000000000";
+    let primary = listener("0100007F", 8080, "0A", 11);
+    // The extra listener is in the same candidate tree (owned inode 12).
+    for (address, ipv6) in [
+        ("00000000", false),
+        ("0100007F", false),
+        ("0200007F", false),
+        (wildcard6, true),
+        (loopback6, true),
+    ] {
+        let extra = listener(address, 9090, "0A", 12);
+        let (tcp, tcp6) = if ipv6 {
+            (
+                format!("{TABLE_HEADER}{primary}"),
+                format!("{TABLE_HEADER}{extra}"),
+            )
+        } else {
+            (
+                format!("{TABLE_HEADER}{primary}{extra}"),
+                TABLE_HEADER.to_owned(),
+            )
+        };
+        assert_eq!(
+            binding_rules(&tcp, &tcp6, &[11, 12], 8080),
+            ["OCI-V1-BINDING"],
+            "{address}"
+        );
+        // The same listener owned by somebody else (another test's socket) is ignored.
+        assert!(
+            binding_rules(&tcp, &tcp6, &[11], 8080).is_empty(),
+            "{address}"
+        );
+    }
+    // A non-listening owned socket (for example an established connection) is not a listener.
+    let connected = format!(
+        "{TABLE_HEADER}{primary}{}",
+        listener("0100007F", 40000, "01", 13)
+    );
+    assert!(binding_rules(&connected, TABLE_HEADER, &[11, 13], 8080).is_empty());
+}
+
+#[test]
+fn binding_snapshot_requires_the_port_listener_to_be_owned_by_the_candidate() {
+    // Someone else holds 127.0.0.1:$PORT; the candidate holds nothing.
+    let tcp = format!("{TABLE_HEADER}{}", listener("0100007F", 8080, "0A", 11));
     assert_eq!(
-        contract::check_binding_snapshot(&good, &ipv6, 8080)
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
+        binding_rules(&tcp, TABLE_HEADER, &[99], 8080),
         ["OCI-V1-BINDING"]
     );
+}
+
+#[test]
+fn candidate_tree_follows_group_parent_chain_and_subreaper_orphans() {
+    // pid -> (ppid, pgrp)
+    let table: std::collections::BTreeMap<i32, (i32, i32)> = [
+        (100, (1, 1)),     // the tester's own parent chain
+        (200, (100, 100)), // the tester
+        (300, (200, 300)), // candidate child; group 300
+        (301, (300, 300)), // forked descendant
+        (302, (301, 999)), // grandchild that left the group
+        (303, (200, 300)), // orphan adopted by the tester (subreaper), still in group
+        (304, (200, 777)), // orphan adopted by the tester, left the group
+        (400, (1, 400)),   // unrelated process
+        (401, (400, 400)), // child of unrelated process
+        (500, (1, 300)),   // unrelated parent but candidate group member
+    ]
+    .into_iter()
+    .collect();
     assert_eq!(
-        contract::check_binding_snapshot(header, header, 8080)
-            .keys()
-            .copied()
+        contract::candidate_tree(&table, 300, 300, 200)
+            .into_iter()
             .collect::<Vec<_>>(),
-        ["OCI-V1-BINDING"]
+        [300, 301, 302, 303, 304, 500]
     );
+}
+
+#[test]
+fn proc_stat_parsing_survives_odd_command_names() {
+    assert_eq!(
+        contract::parse_stat("42 (a) b ) c) S 7 9 9 0 -1 4194560 1 0"),
+        Some((7, 9))
+    );
+    assert_eq!(contract::parse_stat("garbage"), None);
 }
 
 #[test]
@@ -529,6 +625,45 @@ fn utc_deadlines_match_the_published_schema() {
             valid,
             "tester: {deadline}"
         );
+        assert_eq!(
+            reference_bin::valid_deadline(deadline),
+            valid,
+            "reference: {deadline}"
+        );
+    }
+}
+
+#[test]
+fn reference_accepts_published_deadlines_and_rejects_malformed_ones() {
+    for deadline in [
+        "2026-10-31T12:00:00Z",
+        "2026-10-31T12:00:00.5Z",
+        "2026-10-31T12:00:00.123456789Z",
+        "2026-12-31T23:59:60Z",
+        "2026-12-31T23:59:60.25Z",
+    ] {
+        assert!(reference_bin::valid_deadline(deadline), "{deadline}");
+    }
+    for deadline in [
+        "",
+        "2026-10-31T12:00:00",
+        "2026-10-31T12:00:00+00:00",
+        "2026-10-31T12:00:00.Z",
+        "2026-10-31T12:00:00.1234567890Z",
+        "2026-10-31T12:00:00,5Z",
+        "2026-10-31 12:00:00Z",
+        "1900-02-29T00:00:00Z",
+        "2026-13-01T00:00:00Z",
+        "2026-00-10T00:00:00Z",
+        "2026-04-31T00:00:00Z",
+        "2026-10-31T24:00:00Z",
+        "2026-10-31T12:60:00Z",
+        "2026-10-31T12:00:61Z",
+        "2026-10-3112:00:00ZZ",
+        "+026-10-31T12:00:00Z",
+        "2026-10-31T12:00:+0Z",
+    ] {
+        assert!(!reference_bin::valid_deadline(deadline), "{deadline}");
     }
 }
 
@@ -694,4 +829,44 @@ fn source_only_image_context_has_identical_contract_assets() {
             fixture.path
         );
     }
+}
+
+#[test]
+fn fixed_deadline_reference_fails_only_the_request_rule_over_http() {
+    let port = free_port();
+    let _candidate = reference(port, "fixed-deadline");
+    assert_rules(tester(Some(port), &["http"]), &["OCI-V1-REQUEST"]);
+}
+
+#[test]
+fn candidate_that_leaves_its_group_and_ignores_sigterm_is_bounded_and_reaped() {
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = contract::Candidate::spawn(
+        8080,
+        std::ffi::OsStr::new(env!("CARGO_BIN_EXE_oci-contract-reference")),
+        &["idle-leave-group".into()],
+        &probe,
+    )
+    .unwrap();
+    let pid = child.pid();
+    let ready = Instant::now();
+    while !probe.scratch().join("ready").exists() {
+        assert!(
+            ready.elapsed() < Duration::from_secs(5),
+            "candidate startup"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let start = Instant::now();
+    assert!(!child.terminate().unwrap(), "SIGTERM is ignored");
+    drop(child);
+    assert!(
+        start.elapsed() < contract::TERM_GRACE + Duration::from_secs(5),
+        "cleanup is bounded: {:?}",
+        start.elapsed()
+    );
+    assert!(
+        rustix::process::test_kill_process(pid).is_err(),
+        "child was not killed/reaped"
+    );
 }

@@ -1,6 +1,6 @@
 //! Standalone OCI v1 conformance boundary; not connected to the execution worker.
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 pub const DOC: &str = include_str!("oci_contract_assets/README.md");
 pub const CONTEXT_SCHEMA: &str = include_str!("oci_contract_assets/context.schema.json");
@@ -383,6 +383,8 @@ pub const RULE_IDS: &[&str] = &[
 const IO_BUDGET: Duration = Duration::from_secs(2);
 const STARTUP_BUDGET: Duration = Duration::from_secs(3);
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
+/// Upper bound for reaping a SIGKILLed candidate; `Candidate::drop` never waits longer.
+const CLEANUP_BOUND: Duration = Duration::from_secs(5);
 
 struct DeadlineStream {
     stream: TcpStream,
@@ -478,6 +480,33 @@ fn inspect_response(response: Response, diagnostics: &mut Diagnostics) {
     }
 }
 
+/// Valid under the published syntax: whole seconds, 1-9 fractional digits, a leap second.
+const VALID_DEADLINES: &[&str] = &[
+    "2026-10-31T12:00:00Z",
+    "2026-10-31T12:00:00.5Z",
+    "2026-10-31T12:00:00.123456789Z",
+    "2026-12-31T23:59:60Z",
+    "2000-02-29T00:00:00Z",
+];
+
+/// Generated from a valid base so each variant breaks exactly one syntax rule.
+fn malformed_deadlines() -> Vec<String> {
+    let base = "2026-10-31T12:00:00";
+    let mut deadlines: Vec<String> = ["+00:00", "-00:00", "+01:00", "", "z"]
+        .iter()
+        .map(|suffix| format!("{base}{suffix}"))
+        .collect();
+    deadlines.push(format!("{base}.{}Z", "1".repeat(10)));
+    deadlines.push(format!("{base}.Z"));
+    deadlines.push(format!("{base}.5"));
+    deadlines.push(base.replace('T', " ") + "Z");
+    deadlines.push("1900-02-29T00:00:00Z".into());
+    deadlines.push("2026-04-31T00:00:00Z".into());
+    deadlines.push("2026-10-31T12:00:60Z".into());
+    deadlines.push("2026-10-31T24:00:00Z".into());
+    deadlines
+}
+
 pub fn check_http(port: u16) -> Diagnostics {
     let mut diagnostics = Diagnostics::new();
     let startup = Instant::now() + STARTUP_BUDGET;
@@ -561,6 +590,32 @@ pub fn check_http(port: u16) -> Diagnostics {
             break;
         }
     }
+    for deadline in VALID_DEADLINES {
+        let mut value = request(json!({"message":"hello"}));
+        value["context"]["deadline"] = json!(deadline);
+        let body = serde_json::to_vec(&value).unwrap();
+        if !probe(port, "POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 200)
+        {
+            diagnostics.insert(
+                "OCI-V1-REQUEST",
+                "valid UTC deadline was not accepted with 200",
+            );
+            break;
+        }
+    }
+    for deadline in malformed_deadlines() {
+        let mut value = request(json!({}));
+        value["context"]["deadline"] = json!(deadline);
+        let body = serde_json::to_vec(&value).unwrap();
+        if !probe(port, "POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 400)
+        {
+            diagnostics.insert(
+                "OCI-V1-REQUEST",
+                "malformed UTC deadline was not rejected with 400",
+            );
+            break;
+        }
+    }
     if !probe(port, "POST", "/invoke", &payload, "text/plain").is_ok_and(|r| r.status == 400) {
         diagnostics.insert(
             "OCI-V1-REQUEST",
@@ -634,8 +689,11 @@ pub fn check_process(
         match (
             fs::read_to_string("/proc/net/tcp"),
             fs::read_to_string("/proc/net/tcp6"),
+            child.socket_inodes(),
         ) {
-            (Ok(tcp), Ok(tcp6)) => diagnostics.extend(check_binding_snapshot(&tcp, &tcp6, port)),
+            (Ok(tcp), Ok(tcp6), Ok(owned)) => {
+                diagnostics.extend(check_binding_snapshot(&tcp, &tcp6, &owned, port))
+            }
             _ => {
                 diagnostics.insert("OCI-V1-BINDING", "cannot inspect Linux listening sockets");
             }
@@ -755,7 +813,15 @@ impl Drop for FilesystemProbe {
     }
 }
 
-pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
+/// Every listening TCP/TCP6 socket whose inode is in `owned` (the candidate tree's sockets)
+/// must be `127.0.0.1:port`, and that one must exist. Listeners owned by anyone else
+/// are not the candidate's and are ignored.
+pub fn check_binding_snapshot(
+    tcp: &str,
+    tcp6: &str,
+    owned: &HashSet<u64>,
+    port: u16,
+) -> Diagnostics {
     let mut seen = false;
     let mut invalid = false;
     for (table, ipv6) in [(tcp, false), (tcp6, true)] {
@@ -764,14 +830,21 @@ pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
             if fields.get(3) != Some(&"0A") {
                 continue;
             }
-            let Some((address, value)) = fields.get(1).and_then(|s| s.split_once(':')) else {
+            let Some(inode) = fields.get(9).and_then(|s| s.parse::<u64>().ok()) else {
                 continue;
             };
-            if u16::from_str_radix(value, 16) != Ok(port) {
+            if !owned.contains(&inode) {
                 continue;
             }
-            seen = true;
-            invalid |= ipv6 || address != "0100007F";
+            let Some((address, value)) = fields.get(1).and_then(|s| s.split_once(':')) else {
+                invalid = true;
+                continue;
+            };
+            if !ipv6 && address == "0100007F" && u16::from_str_radix(value, 16) == Ok(port) {
+                seen = true;
+            } else {
+                invalid = true;
+            }
         }
     }
     let mut diagnostics = Diagnostics::new();
@@ -782,6 +855,49 @@ pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
         );
     }
     diagnostics
+}
+
+/// `(ppid, pgrp)` from a `/proc/<pid>/stat` line; the command name may contain `)`.
+pub fn parse_stat(stat: &str) -> Option<(i32, i32)> {
+    let mut fields = stat[stat.rfind(')')? + 1..].split_whitespace().skip(1);
+    let ppid = fields.next()?.parse().ok()?;
+    let pgrp = fields.next()?.parse().ok()?;
+    Some((ppid, pgrp))
+}
+
+/// The candidate tree: the child, its process group, every process whose parent chain
+/// reaches the child, and orphans reparented to the tester (child subreaper). The tester
+/// itself is never part of it. `table` maps pid to `(ppid, pgrp)`.
+pub fn candidate_tree(
+    table: &BTreeMap<i32, (i32, i32)>,
+    child: i32,
+    group: i32,
+    tester: i32,
+) -> BTreeSet<i32> {
+    let mut tree = BTreeSet::from([child]);
+    loop {
+        let before = tree.len();
+        for (pid, (ppid, pgrp)) in table {
+            if *pid != tester && (*pgrp == group || *ppid == tester || tree.contains(ppid)) {
+                tree.insert(*pid);
+            }
+        }
+        if tree.len() == before {
+            return tree;
+        }
+    }
+}
+
+fn read_proc(path: impl AsRef<Path>) -> io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        // The process exited while scanning: it owns no sockets.
+        Err(error) if error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+            Ok(None)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub struct Candidate {
@@ -822,6 +938,55 @@ impl Candidate {
     pub fn pid(&self) -> rustix::process::Pid {
         self.group
     }
+    /// Inodes of every socket held by the candidate tree. Vanished processes are skipped;
+    /// any other failure (for example unreadable `/proc/<pid>/fd`) is an error so callers fail closed.
+    pub fn socket_inodes(&self) -> io::Result<HashSet<u64>> {
+        let mut table = BTreeMap::new();
+        for entry in fs::read_dir("/proc")? {
+            let Some(pid) = entry?
+                .file_name()
+                .to_str()
+                .and_then(|n| n.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            if let Some(stat) = read_proc(format!("/proc/{pid}/stat"))? {
+                let parsed = parse_stat(&stat)
+                    .ok_or_else(|| io::Error::other("unparsable /proc/<pid>/stat"))?;
+                table.insert(pid, parsed);
+            }
+        }
+        let tree = candidate_tree(
+            &table,
+            self.child.id() as i32,
+            self.group.as_raw_nonzero().get(),
+            std::process::id() as i32,
+        );
+        let mut inodes = HashSet::new();
+        for pid in tree {
+            let entries = match fs::read_dir(format!("/proc/{pid}/fd")) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let link = match entry.and_then(|entry| fs::read_link(entry.path())) {
+                    Ok(link) => link,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if let Some(inode) = link
+                    .to_str()
+                    .and_then(|l| l.strip_prefix("socket:["))
+                    .and_then(|l| l.strip_suffix(']'))
+                    .and_then(|l| l.parse::<u64>().ok())
+                {
+                    inodes.insert(inode);
+                }
+            }
+        }
+        Ok(inodes)
+    }
     pub fn terminate(&mut self) -> io::Result<bool> {
         use rustix::process::{Signal, kill_process};
         if self.child.try_wait()?.is_some() {
@@ -847,9 +1012,14 @@ impl Candidate {
 
 impl Drop for Candidate {
     fn drop(&mut self) {
-        use rustix::process::{Signal, WaitOptions, kill_process_group, waitpgid};
+        use rustix::process::{Signal, WaitOptions, kill_process, kill_process_group, waitpgid};
+        // The direct child may have left the original group (ESRCH there), so kill it by pid too.
+        let _ = kill_process(rustix::process::Pid::from_child(&self.child), Signal::KILL);
         let _ = kill_process_group(self.group, Signal::KILL);
-        let _ = self.child.wait();
+        let deadline = Instant::now() + CLEANUP_BOUND;
+        while !matches!(self.child.try_wait(), Ok(Some(_)) | Err(_)) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
         let deadline = Instant::now() + Duration::from_secs(1);
         loop {
             match waitpgid(self.group, WaitOptions::NOHANG) {
