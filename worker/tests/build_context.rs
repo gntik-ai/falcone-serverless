@@ -69,39 +69,73 @@ fn missing(containerfile: &str, manifest: &str, includes: &[String]) -> Vec<Stri
         .collect()
 }
 
-fn normalise(path: &Path) -> String {
+/// Context-relative target of an include literal written in `source`, or why it escapes.
+fn resolve_include(source: &Path, literal: &str) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
-    for component in path.components() {
+    let joined = source.parent().unwrap().join(literal);
+    for component in joined.components() {
         match component {
-            Component::ParentDir => {
-                parts.pop();
-            }
             Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
-            _ => {}
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return Err(format!(
+                        "{}: {literal:?} climbs above the build context",
+                        source.display()
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "{}: {literal:?} is an absolute path",
+                    source.display()
+                ));
+            }
         }
     }
-    parts.join("/")
+    Ok(parts.join("/"))
+}
+
+/// Every `include_str!`/`include_bytes!` in `text`, resolved against `source` (context-relative).
+fn scan_source(source: &Path, text: &str) -> Vec<Result<String, String>> {
+    let mut results = Vec::new();
+    for macro_name in ["include_str!", "include_bytes!"] {
+        for part in text.split(macro_name).skip(1) {
+            let literal = part
+                .trim_start()
+                .trim_start_matches('(')
+                .trim_start()
+                .strip_prefix('"')
+                .and_then(|rest| rest.split('"').next());
+            results.push(match literal {
+                Some(literal) => resolve_include(source, literal),
+                None => Err(format!("{}: non-literal include path", source.display())),
+            });
+        }
+    }
+    results
 }
 
 /// Context-relative target of every `include_str!`/`include_bytes!` below `dir`.
-fn include_targets(dir: &Path, context: &Path, found: &mut BTreeSet<String>) {
+fn include_targets(
+    dir: &Path,
+    context: &Path,
+    found: &mut BTreeSet<String>,
+    escapes: &mut Vec<String>,
+) {
     for entry in fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
         if path.is_dir() {
-            include_targets(&path, context, found);
+            include_targets(&path, context, found, escapes);
         } else if path.extension().is_some_and(|ext| ext == "rs") {
             let text = fs::read_to_string(&path).unwrap();
-            for macro_name in ["include_str!", "include_bytes!"] {
-                for part in text.split(macro_name).skip(1) {
-                    let literal = part
-                        .trim_start()
-                        .trim_start_matches('(')
-                        .trim_start()
-                        .strip_prefix('"')
-                        .and_then(|rest| rest.split('"').next())
-                        .unwrap_or_else(|| panic!("{}: non-literal include path", path.display()));
-                    let relative = path.strip_prefix(context).unwrap().parent().unwrap();
-                    found.insert(normalise(&relative.join(literal)));
+            let relative = path.strip_prefix(context).unwrap();
+            for result in scan_source(relative, &text) {
+                match result {
+                    Ok(target) => {
+                        found.insert(target);
+                    }
+                    Err(reason) => escapes.push(reason),
                 }
             }
         }
@@ -111,8 +145,20 @@ fn include_targets(dir: &Path, context: &Path, found: &mut BTreeSet<String>) {
 fn worker_includes() -> Vec<String> {
     let context = root().canonicalize().unwrap();
     let mut found = BTreeSet::new();
-    include_targets(&context.join("worker/src"), &context, &mut found);
-    include_targets(&context.join("compiler/src"), &context, &mut found);
+    let mut escapes = Vec::new();
+    include_targets(
+        &context.join("worker/src"),
+        &context,
+        &mut found,
+        &mut escapes,
+    );
+    include_targets(
+        &context.join("compiler/src"),
+        &context,
+        &mut found,
+        &mut escapes,
+    );
+    assert_eq!(escapes, Vec::<String>::new());
     assert!(
         found.contains("docs/contracts/worker-runtime-config.md"),
         "the scan must see the docs/contracts inputs: {found:?}"
@@ -168,6 +214,28 @@ fn fixture_containerfiles_missing_inputs_are_rejected() {
             "{without}: {gaps:?}"
         );
     }
+}
+
+#[test]
+fn include_literals_that_leave_the_build_context_are_rejected() {
+    let source = Path::new("worker/src/config.rs");
+    let ok = scan_source(source, r#"include_str!("../../docs/contracts/a.md")"#);
+    assert_eq!(ok, [Ok("docs/contracts/a.md".to_string())]);
+    for literal in [
+        "../../../worker/src/main.rs",
+        "/worker/src/main.rs",
+        "../../../../etc/passwd",
+    ] {
+        for macro_name in ["include_str!", "include_bytes!"] {
+            let results = scan_source(source, &format!("{macro_name}(\"{literal}\")"));
+            assert!(
+                matches!(results.as_slice(), [Err(_)]),
+                "{macro_name} {literal}: {results:?}"
+            );
+        }
+    }
+    let results = scan_source(source, "include_str!(concat!(\"a\", \"b\"))");
+    assert!(matches!(results.as_slice(), [Err(_)]));
 }
 
 #[test]
