@@ -293,6 +293,37 @@ fn guarded_create_refuses_bad_names_and_images_before_client_access() {
 }
 
 #[test]
+fn init_containers_need_digest_pinned_images_before_any_client_call() {
+    let with_init = |init_image: String| {
+        let mut spec = pod_spec(&image()).unwrap();
+        let mut init = spec["containers"][0].clone();
+        init["name"] = json!("init");
+        init["image"] = json!(init_image);
+        spec["initContainers"] = json!([init]);
+        spec
+    };
+    for unpinned in [
+        "repo:latest".to_string(),
+        format!("repo@sha256:{}", "a".repeat(63)),
+    ] {
+        let kube = FakeKube::default();
+        let error = Session::create(&kube, "fs-test-unit", &with_init(unpinned.clone()))
+            .err()
+            .expect("refused");
+        assert!(error.contains("digest-pinned"), "{unpinned}: {error}");
+        assert!(kube.calls.borrow().is_empty(), "{unpinned}");
+    }
+    let kube = FakeKube::default();
+    Session::create(&kube, "fs-test-unit", &with_init(image())).unwrap();
+    assert_eq!(kube.calls.borrow().first(), Some(&"create namespace"));
+    let mut spec = pod_spec(&image()).unwrap();
+    spec["ephemeralContainers"] = json!([{"name": "debug", "image": image()}]);
+    let kube = FakeKube::default();
+    assert!(Session::create(&kube, "fs-test-unit", &spec).is_err());
+    assert!(kube.calls.borrow().is_empty());
+}
+
+#[test]
 fn completed_pod_requires_success_and_the_worker_version() {
     let kube = FakeKube::default();
     let session = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).unwrap();
@@ -360,7 +391,14 @@ struct Commands {
 }
 
 impl Runner for Commands {
-    fn run(&self, program: &str, args: &[&str], input: Option<&Value>) -> Result<String, String> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        assert!(timeout > Duration::ZERO && timeout <= Duration::from_secs(3600));
         self.calls.borrow_mut().push((
             program.into(),
             args.iter().map(|s| (*s).into()).collect(),
@@ -490,6 +528,38 @@ fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
 }
 
 #[test]
+fn every_kubectl_call_gets_a_bounded_deadline_and_cleanup_its_own() {
+    struct Recording(RefCell<Vec<(String, Duration)>>);
+    impl Runner for Recording {
+        fn run(
+            &self,
+            _: &str,
+            args: &[&str],
+            _: Option<&Value>,
+            timeout: Duration,
+        ) -> Result<String, String> {
+            let verb = ["create", "get", "logs", "delete"]
+                .into_iter()
+                .find(|verb| args.contains(verb))
+                .unwrap();
+            self.0.borrow_mut().push((verb.into(), timeout));
+            Ok("Succeeded".into())
+        }
+    }
+    let cli = Cli::new(Recording(RefCell::default()));
+    let ns = Namespace::new("fs-test-adapter").unwrap();
+    cli.wait_terminal(&ns, "fs-test-adapter", Duration::from_secs(5))
+        .unwrap();
+    cli.logs(&ns, "fs-test-adapter").unwrap();
+    cli.delete_namespace(&ns).unwrap();
+    let calls = cli.runner.0.borrow();
+    assert!(calls[0].1 <= Duration::from_secs(5), "{calls:?}");
+    assert!(calls[1].1 > Duration::ZERO && calls[1].1 <= Duration::from_secs(60));
+    // Cleanup does not inherit a spent budget: it always has a full, documented allowance.
+    assert!(calls[2].1 >= Duration::from_secs(60) && calls[2].1 <= Duration::from_secs(300));
+}
+
+#[test]
 fn disabled_cluster_mode_never_invokes_tools() {
     let cli = Cli::new(Commands {
         fail: true,
@@ -533,23 +603,145 @@ fn enabled_cluster_flow_builds_pushes_runs_and_cleans_up() {
     assert!(calls.last().unwrap().1.contains(&"delete".into()));
 }
 
+const LONG: Duration = Duration::from_secs(30);
+
 #[test]
 fn subprocess_errors_suppress_output_and_name_ambient_prerequisites() {
     let runner = Process;
     let error = runner
-        .run("sh", &["-c", "printf output-canary >&2; exit 1"], None)
+        .run(
+            "sh",
+            &["-c", "printf output-canary >&2; exit 1"],
+            None,
+            LONG,
+        )
         .unwrap_err();
     assert!(!error.contains("output-canary"));
     assert!(error.contains("ambient"));
     assert_eq!(
-        runner.run("sh", &["-c", "printf ready"], None).unwrap(),
+        runner
+            .run("sh", &["-c", "printf ready"], None, LONG)
+            .unwrap(),
         "ready"
+    );
+    assert_eq!(
+        runner
+            .run("sh", &["-c", "cat"], Some(&json!({"k": "v"})), LONG)
+            .unwrap(),
+        r#"{"k":"v"}"#
     );
     assert!(
         runner
-            .run("/nonexistent-fs-test-executable", &[], None)
+            .run("/nonexistent-fs-test-executable", &[], None, LONG)
             .is_err()
     );
+}
+
+fn scratch_file(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("fs-test-{name}-{}", std::process::id()))
+}
+
+#[test]
+fn subprocess_ignoring_sigterm_is_killed_and_reaped_at_the_deadline() {
+    let pidfile = scratch_file("sigterm");
+    let started = std::time::Instant::now();
+    let error = Process
+        .run(
+            "sh",
+            &[
+                "-c",
+                "echo $$ > \"$0\"; trap '' TERM; exec sleep 30",
+                pidfile.to_str().unwrap(),
+            ],
+            None,
+            Duration::from_millis(500),
+        )
+        .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let _ = std::fs::remove_file(&pidfile);
+    // A reaped process has no /proc entry; an unreaped one would linger as a zombie.
+    assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
+}
+
+struct HangingKube {
+    calls: RefCell<Vec<&'static str>>,
+}
+
+impl Kube for HangingKube {
+    fn create_namespace(&self, _: &Namespace) -> Result<(), String> {
+        Ok(())
+    }
+    fn create_pod(&self, _: &Namespace, _: &Value) -> Result<(), String> {
+        Ok(())
+    }
+    fn wait_terminal(&self, _: &Namespace, _: &str, _: Duration) -> Result<String, String> {
+        self.calls.borrow_mut().push("wait");
+        Process.run(
+            "sh",
+            &["-c", "setsid sleep 30 & exit 0"],
+            None,
+            Duration::from_millis(200),
+        )
+    }
+    fn logs(&self, _: &Namespace, _: &str) -> Result<String, String> {
+        Ok(String::new())
+    }
+    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
+        self.calls.borrow_mut().push("delete namespace");
+        Ok(())
+    }
+}
+
+#[test]
+fn detached_descendant_holding_the_pipes_cannot_stall_run_or_cleanup() {
+    let kube = HangingKube {
+        calls: RefCell::default(),
+    };
+    let started = std::time::Instant::now();
+    {
+        let session = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).unwrap();
+        assert!(session.verify().is_err());
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(*kube.calls.borrow(), ["wait", "delete namespace"]);
+}
+
+#[test]
+fn detached_descendant_is_killed_where_it_can_be_found() {
+    let pidfile = scratch_file("detached");
+    let script = "setsid sh -c 'echo $$ > \"$0\"; exec sleep 30' \"$0\" & exit 0";
+    let result = Process.run(
+        "sh",
+        &["-c", script, pidfile.to_str().unwrap()],
+        None,
+        Duration::from_millis(500),
+    );
+    assert!(result.unwrap_err().contains("timed out"));
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    let _ = std::fs::remove_file(&pidfile);
+    let proc = format!("/proc/{}/stat", pid.trim());
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    // Killed; the zombie (if any) is reaped by the init process, so allow it a moment.
+    while std::fs::read_to_string(&proc).is_ok_and(|stat| !stat.contains(") Z ")) {
+        assert!(std::time::Instant::now() < deadline, "descendant survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn hung_foreground_command_times_out_within_the_deadline_and_grace() {
+    let started = std::time::Instant::now();
+    let error = Process
+        .run("sleep", &["30"], None, Duration::from_millis(200))
+        .unwrap_err();
+    assert!(error.contains("timed out"));
+    assert!(started.elapsed() < Duration::from_secs(2));
 }
 
 #[test]
