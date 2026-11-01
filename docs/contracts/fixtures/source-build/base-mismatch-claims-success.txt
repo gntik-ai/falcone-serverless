@@ -1,0 +1,8 @@
+# Synthetic base composition fixture; digests are not real registry digests.
+requested.base_ref.id = synthetic-base
+requested.base_ref.version = 1.0.0
+requested.base_ref.digest = sha256:1111111111111111111111111111111111111111111111111111111111111111
+requested.language_profile = synthetic-profile-a
+actual.base_digest = sha256:2222222222222222222222222222222222222222222222222222222222222222
+actual.base_profile = synthetic-profile-a
+expected_outcome = success
