@@ -12,7 +12,7 @@ use falcone_serverless_worker::{Role, check};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::time::Duration;
-use support::cli::{Cli, Process, Runner};
+use support::cli::{Cli, Process, Runner, kill_tree};
 use support::{
     Config, Kube, Namespace, NamespaceMode, Session, deployment, final_uid, namespace_name,
     pod_spec,
@@ -815,6 +815,23 @@ fn environment_clearing_descendant_left_in_the_group_is_killed_after_the_parent_
         assert!(std::time::Instant::now() < deadline, "descendant survived");
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn child_is_reaped_even_when_the_cleanup_budget_is_already_spent() {
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    // Discovery gets no time at all; the killed child must still be reaped.
+    kill_tree(
+        &mut child,
+        "fs-test-spent-budget",
+        std::time::Instant::now(),
+    );
+    // A zombie keeps its /proc entry until somebody reaps it.
+    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
 }
 
 #[test]

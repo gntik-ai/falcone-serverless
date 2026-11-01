@@ -403,12 +403,17 @@ impl Runner for Process {
 /// one that sits in uninterruptible sleep stays until the kernel releases it. Such a process
 /// can keep the detached pipe readers alive until it exits; this is accepted for test-only
 /// code and bounded by never joining them.
-fn kill_tree(child: &mut std::process::Child, tag: &str, cleanup: std::time::Instant) {
+pub fn kill_tree(child: &mut std::process::Child, tag: &str, cleanup: std::time::Instant) {
     use rustix::process::{Pid, Signal, kill_process, kill_process_group};
     let root = Pid::from_child(child);
-    // Most of the grace stays for signalling and reaping. Descendants are listed while their
-    // parents are alive, since killing the parents reparents them out of reach.
-    let scan = (std::time::Instant::now() + CLEANUP_GRACE / 4).min(cleanup);
+    // The tail of the budget is reserved for reaping, so that a slow or oversized process
+    // table can exhaust discovery without leaving the killed child unreaped. Descendants are
+    // listed while their parents are alive, since killing the parents reparents them out of
+    // reach.
+    let reap = cleanup
+        .checked_sub(CLEANUP_GRACE / 4)
+        .unwrap_or_else(std::time::Instant::now);
+    let scan = (std::time::Instant::now() + CLEANUP_GRACE / 4).min(reap);
     let descendants = descendants(root.as_raw_nonzero().get(), scan);
     let _ = kill_process_group(root, Signal::KILL);
     let _ = child.kill();
@@ -417,9 +422,11 @@ fn kill_tree(child: &mut std::process::Child, tag: &str, cleanup: std::time::Ins
             let _ = kill_process(pid, Signal::KILL);
         }
     }
-    kill_tagged(tag, Some(root), cleanup);
-    while std::time::Instant::now() < cleanup {
-        if !matches!(child.try_wait(), Ok(None)) {
+    kill_tagged(tag, Some(root), reap);
+    // SIGKILL was sent above, so the child is reaped at once; try at least once even when the
+    // budget is already spent, and wait out the rest of it only for an unkillable child.
+    loop {
+        if !matches!(child.try_wait(), Ok(None)) || std::time::Instant::now() >= cleanup {
             return;
         }
         std::thread::sleep(POLL);
