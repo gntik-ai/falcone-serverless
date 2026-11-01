@@ -564,6 +564,7 @@ dependencies = [
  "toml",
  "wasmparser 0.258.3",
  "wasmtime",
+ "wat",
  "wit-parser 0.262.0",
 ]
 

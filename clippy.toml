@@ -1,0 +1,10 @@
+# No tenant native artifact may enter the engine's native-cache loading APIs.
+disallowed-methods = [
+    "wasmtime::Module::deserialize",
+    "wasmtime::Module::deserialize_raw",
+    "wasmtime::Module::deserialize_file",
+    "wasmtime::Module::deserialize_open_file",
+    "wasmtime::component::Component::deserialize",
+    "wasmtime::component::Component::deserialize_raw",
+    "wasmtime::component::Component::deserialize_file",
+]
