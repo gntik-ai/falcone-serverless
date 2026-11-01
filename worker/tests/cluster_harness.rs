@@ -324,6 +324,36 @@ fn init_containers_need_digest_pinned_images_before_any_client_call() {
 }
 
 #[test]
+fn cli_refuses_unpinned_init_containers_before_any_runner_call() {
+    let cli = Cli::new(Commands::default());
+    let ns = Namespace::new("fs-test-adapter").unwrap();
+    let pod_with_init = |init_image: &str| {
+        let mut spec = pod_spec(&image()).unwrap();
+        let mut init = spec["containers"][0].clone();
+        init["name"] = json!("init");
+        init["image"] = json!(init_image);
+        spec["initContainers"] = json!([init]);
+        json!({
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": "fs-test-adapter",
+                "namespace": "fs-test-adapter",
+                "labels": {"falcone.test/run": "fs-test-adapter"},
+            },
+            "spec": spec,
+        })
+    };
+    let error = cli
+        .create_pod(&ns, &pod_with_init("repo:latest"))
+        .expect_err("unpinned initContainer image is refused");
+    assert!(error.contains("digest-pinned"), "{error}");
+    assert!(cli.runner.calls.borrow().is_empty());
+    cli.create_pod(&ns, &pod_with_init(&image())).unwrap();
+    assert_eq!(cli.runner.calls.borrow().len(), 1);
+}
+
+#[test]
 fn completed_pod_requires_success_and_the_worker_version() {
     let kube = FakeKube::default();
     let session = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).unwrap();
