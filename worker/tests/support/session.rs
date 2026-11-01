@@ -1,19 +1,24 @@
 use super::{Namespace, NamespaceMode, validate_spec};
 use serde_json::{Value, json};
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub trait Kube {
-    fn create_namespace(&self, namespace: &Namespace) -> Result<(), String>;
-    fn create_pod(&self, namespace: &Namespace, pod: &Value) -> Result<(), String>;
+    fn create_namespace(&self, namespace: &Namespace, deadline: Instant) -> Result<(), String>;
+    fn create_pod(
+        &self,
+        namespace: &Namespace,
+        pod: &Value,
+        deadline: Instant,
+    ) -> Result<(), String>;
     fn wait_terminal(
         &self,
         namespace: &Namespace,
         pod: &str,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<String, String>;
-    fn logs(&self, namespace: &Namespace, pod: &str) -> Result<String, String>;
-    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String>;
+    fn logs(&self, namespace: &Namespace, pod: &str, deadline: Instant) -> Result<String, String>;
+    fn delete_namespace(&self, namespace: &Namespace, deadline: Instant) -> Result<(), String>;
 }
 
 pub struct Session<'a, K: Kube> {
@@ -27,24 +32,27 @@ impl<'a, K: Kube> Session<'a, K> {
     pub fn close(mut self) -> Result<(), String> {
         if self.delete_namespace {
             self.delete_namespace = false;
-            self.kube.delete_namespace(&self.namespace).map_err(|_| {
-                format!(
-                    "failed to delete guarded namespace {}; operator cleanup required",
-                    self.namespace.name()
-                )
-            })?;
+            self.kube
+                .delete_namespace(&self.namespace, Instant::now() + Duration::from_secs(60))
+                .map_err(|_| {
+                    format!(
+                        "failed to delete guarded namespace {}; operator cleanup required",
+                        self.namespace.name()
+                    )
+                })?;
         }
         Ok(())
     }
 
     pub fn verify(&self) -> Result<(), String> {
-        let phase =
-            self.kube
-                .wait_terminal(&self.namespace, &self.pod, Duration::from_secs(180))?;
+        let deadline = Instant::now() + Duration::from_secs(180);
+        let phase = self
+            .kube
+            .wait_terminal(&self.namespace, &self.pod, deadline)?;
         if phase != "Succeeded" {
             return Err("worker pod did not succeed".into());
         }
-        let logs = self.kube.logs(&self.namespace, &self.pod)?;
+        let logs = self.kube.logs(&self.namespace, &self.pod, deadline)?;
         if !logs.contains("falcone-serverless-worker 0.1.0") {
             return Err("worker version log is missing".into());
         }
@@ -68,8 +76,9 @@ impl<'a, K: Kube> Session<'a, K> {
             NamespaceMode::Shared(namespace) => namespace.clone(),
         };
         let delete_namespace = *mode == NamespaceMode::Create;
+        let deadline = Instant::now() + Duration::from_secs(30);
         if delete_namespace {
-            kube.create_namespace(&namespace).map_err(|_| {
+            kube.create_namespace(&namespace, deadline).map_err(|_| {
                 "FS_TEST_NAMESPACE_MODE=create: namespace creation denied or unavailable"
                     .to_string()
             })?;
@@ -81,14 +90,19 @@ impl<'a, K: Kube> Session<'a, K> {
             delete_namespace,
         };
         kube.create_pod(&session.namespace, &json!({"apiVersion":"v1", "kind":"Pod", "metadata": {
-            "name":name, "namespace":session.namespace.name(), "labels":{"falcone.test/run":name}}, "spec":spec}))?;
+            "name":name, "namespace":session.namespace.name(), "labels":{"falcone.test/run":name}}, "spec":spec}), deadline)?;
         Ok(session)
     }
 }
 
 impl<K: Kube> Drop for Session<'_, K> {
     fn drop(&mut self) {
-        if self.delete_namespace && self.kube.delete_namespace(&self.namespace).is_err() {
+        if self.delete_namespace
+            && self
+                .kube
+                .delete_namespace(&self.namespace, Instant::now() + Duration::from_secs(60))
+                .is_err()
+        {
             eprintln!(
                 "failed to delete guarded namespace {}; operator cleanup required",
                 self.namespace.name()

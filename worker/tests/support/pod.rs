@@ -77,6 +77,14 @@ pub(super) fn validate_spec(spec: &Value) -> Result<(), String> {
                 .iter()
                 .any(|container| !container["image"].as_str().is_some_and(pinned_image))
         })
+        || spec.get("initContainers").is_some_and(|value| {
+            value.as_array().is_none_or(|containers| {
+                containers
+                    .iter()
+                    .any(|container| !container["image"].as_str().is_some_and(pinned_image))
+            })
+        })
+        || spec.get("ephemeralContainers").is_some()
     {
         return Err("test pod requires restartPolicy Never and digest-pinned images".into());
     }

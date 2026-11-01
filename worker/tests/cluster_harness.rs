@@ -11,7 +11,7 @@ mod support;
 use falcone_serverless_worker::{Role, check};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::cli::{Cli, Process, Runner};
 use support::{
     Config, Kube, Namespace, NamespaceMode, Session, deployment, final_uid, namespace_name,
@@ -146,15 +146,17 @@ fn config_depends_only_on_supplied_values() {
 #[derive(Default)]
 struct FakeKube {
     calls: RefCell<Vec<&'static str>>,
+    cleanup_deadlines: RefCell<Vec<Instant>>,
     fail_pod: bool,
     fail_namespace: bool,
     fail_delete: bool,
+    fail_wait: bool,
     phase: Option<&'static str>,
     log: Option<&'static str>,
 }
 
 impl Kube for FakeKube {
-    fn create_namespace(&self, _: &Namespace) -> Result<(), String> {
+    fn create_namespace(&self, _: &Namespace, _: Instant) -> Result<(), String> {
         self.calls.borrow_mut().push("create namespace");
         if self.fail_namespace {
             Err("namespace denied".into())
@@ -162,7 +164,7 @@ impl Kube for FakeKube {
             Ok(())
         }
     }
-    fn create_pod(&self, _: &Namespace, pod: &Value) -> Result<(), String> {
+    fn create_pod(&self, _: &Namespace, pod: &Value, _: Instant) -> Result<(), String> {
         self.calls.borrow_mut().push("create pod");
         assert_eq!(pod["kind"], "Pod");
         assert_eq!(pod["metadata"]["namespace"], "fs-test-unit");
@@ -176,20 +178,25 @@ impl Kube for FakeKube {
             Ok(())
         }
     }
-    fn wait_terminal(&self, _: &Namespace, _: &str, timeout: Duration) -> Result<String, String> {
+    fn wait_terminal(&self, _: &Namespace, _: &str, deadline: Instant) -> Result<String, String> {
         self.calls.borrow_mut().push("wait");
+        let timeout = deadline.saturating_duration_since(Instant::now());
         assert!(timeout > Duration::ZERO && timeout <= Duration::from_secs(180));
+        if self.fail_wait {
+            return Err("worker pod terminal-phase wait timed out".into());
+        }
         Ok(self.phase.unwrap_or("Succeeded").into())
     }
-    fn logs(&self, _: &Namespace, _: &str) -> Result<String, String> {
+    fn logs(&self, _: &Namespace, _: &str, _: Instant) -> Result<String, String> {
         self.calls.borrow_mut().push("logs");
         Ok(self
             .log
             .unwrap_or("falcone-serverless-worker 0.1.0\n")
             .into())
     }
-    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
+    fn delete_namespace(&self, _: &Namespace, deadline: Instant) -> Result<(), String> {
         self.calls.borrow_mut().push("delete namespace");
+        self.cleanup_deadlines.borrow_mut().push(deadline);
         if self.fail_delete {
             Err("delete denied".into())
         } else {
@@ -265,6 +272,32 @@ fn namespace_cleanup_runs_once_on_success_error_and_unwind() {
 }
 
 #[test]
+fn verify_timeout_still_allows_close_and_drop_their_own_cleanup_budget() {
+    for explicit_close in [false, true] {
+        let kube = FakeKube {
+            fail_wait: true,
+            ..FakeKube::default()
+        };
+        let session = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).unwrap();
+        assert!(session.verify().unwrap_err().contains("timed out"));
+        let cleanup_start = Instant::now();
+        if explicit_close {
+            session.close().unwrap();
+        } else {
+            drop(session);
+        }
+        assert_eq!(
+            *kube.calls.borrow(),
+            ["create namespace", "create pod", "wait", "delete namespace"]
+        );
+        let deadlines = kube.cleanup_deadlines.borrow();
+        assert_eq!(deadlines.len(), 1);
+        assert!(deadlines[0] >= cleanup_start + Duration::from_secs(60));
+        assert!(deadlines[0] <= Instant::now() + Duration::from_secs(60));
+    }
+}
+
+#[test]
 fn guarded_create_refuses_bad_names_and_images_before_client_access() {
     for name in ["default", "in-falcone-staging", "fs-test-invalid."] {
         let kube = FakeKube::default();
@@ -290,6 +323,86 @@ fn guarded_create_refuses_bad_names_and_images_before_client_access() {
         .unwrap();
     assert!(error.contains("FS_TEST_NAMESPACE_MODE"));
     assert_eq!(*kube.calls.borrow(), ["create namespace"]);
+}
+
+#[test]
+fn init_container_images_are_guarded_before_any_client_call() {
+    for invalid in [
+        "repo:latest".into(),
+        format!("repo@sha256:{}", "a".repeat(63)),
+        format!("repo@sha256:{}", "A".repeat(64)),
+    ] {
+        let mut spec = pod_spec(&image()).unwrap();
+        let mut init = spec["containers"][0].clone();
+        init["name"] = json!("init");
+        init["image"] = json!(invalid);
+        spec["initContainers"] = json!([init]);
+        assert!(check(&deployment(&spec), Role::GuestWorker).is_empty());
+        let kube = FakeKube::default();
+        assert!(Session::create_in(&kube, "fs-test-unit", &spec, &NamespaceMode::Create).is_err());
+        assert!(kube.calls.borrow().is_empty());
+        let cli = Cli::new(Commands::default());
+        let pod = json!({"apiVersion":"v1", "kind":"Pod", "metadata": {
+            "name":"fs-test-unit", "namespace":"fs-test-unit",
+            "labels":{"falcone.test/run":"fs-test-unit"}}, "spec":spec});
+        assert!(
+            cli.create_pod(
+                &Namespace::new("fs-test-unit").unwrap(),
+                &pod,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(cli.runner.calls.borrow().is_empty());
+    }
+}
+
+#[test]
+fn pinned_restricted_init_container_is_accepted() {
+    let mut spec = pod_spec(&image()).unwrap();
+    let mut init = spec["containers"][0].clone();
+    init["name"] = json!("init");
+    spec["initContainers"] = json!([init]);
+    let cli = Cli::new(Commands::default());
+    Session::create(&cli, "fs-test-unit", &spec)
+        .unwrap()
+        .close()
+        .unwrap();
+    let calls = cli.runner.calls.borrow();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[1].2.as_ref().unwrap()["spec"], spec);
+}
+
+#[test]
+fn malformed_init_arrays_and_all_ephemeral_containers_are_refused() {
+    for (field, value) in [
+        ("initContainers", json!({})),
+        ("initContainers", Value::Null),
+        ("ephemeralContainers", json!([])),
+        ("ephemeralContainers", Value::Null),
+    ] {
+        let mut spec = pod_spec(&image()).unwrap();
+        spec[field] = value;
+        let kube = FakeKube::default();
+        assert!(
+            Session::create(&kube, "fs-test-unit", &spec).is_err(),
+            "{field}"
+        );
+        assert!(kube.calls.borrow().is_empty());
+        let cli = Cli::new(Commands::default());
+        let pod = json!({"apiVersion":"v1", "kind":"Pod", "metadata": {
+            "name":"fs-test-unit", "namespace":"fs-test-unit",
+            "labels":{"falcone.test/run":"fs-test-unit"}}, "spec":spec});
+        assert!(
+            cli.create_pod(
+                &Namespace::new("fs-test-unit").unwrap(),
+                &pod,
+                Instant::now() + Duration::from_secs(1)
+            )
+            .is_err()
+        );
+        assert!(cli.runner.calls.borrow().is_empty());
+    }
 }
 
 #[test]
@@ -354,13 +467,23 @@ type Invocation = (String, Vec<String>, Option<Value>);
 #[derive(Default)]
 struct Commands {
     calls: RefCell<Vec<Invocation>>,
+    deadlines: RefCell<Vec<Instant>>,
     fail: bool,
     rootless: bool,
     phase: Option<&'static str>,
 }
 
 impl Runner for Commands {
-    fn run(&self, program: &str, args: &[&str], input: Option<&Value>) -> Result<String, String> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<String, String> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero());
+        self.deadlines.borrow_mut().push(deadline);
         self.calls.borrow_mut().push((
             program.into(),
             args.iter().map(|s| (*s).into()).collect(),
@@ -472,21 +595,67 @@ fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
         ..Commands::default()
     });
     assert_eq!(
-        cli.wait_terminal(&ns, "fs-test-adapter", Duration::from_secs(1))
-            .unwrap(),
+        cli.wait_terminal(
+            &ns,
+            "fs-test-adapter",
+            Instant::now() + Duration::from_secs(1)
+        )
+        .unwrap(),
         "Failed"
     );
     let cli = Cli::new(Commands::default());
     assert!(
-        cli.wait_terminal(&ns, "fs-test-adapter", Duration::ZERO)
+        cli.wait_terminal(&ns, "fs-test-adapter", Instant::now())
             .is_err()
     );
     assert!(
-        cli.wait_terminal(&ns, "../default", Duration::from_secs(1))
+        cli.wait_terminal(&ns, "../default", Instant::now() + Duration::from_secs(1))
             .is_err()
     );
-    assert!(cli.logs(&ns, "../default").is_err());
+    assert!(
+        cli.logs(&ns, "../default", Instant::now() + Duration::from_secs(1))
+            .is_err()
+    );
     assert!(cli.runner.calls.borrow().is_empty());
+}
+
+#[test]
+fn every_kube_operation_propagates_and_clamps_its_deadline() {
+    let ns = Namespace::new("fs-test-unit").unwrap();
+    let pod = json!({"apiVersion":"v1", "kind":"Pod", "metadata": {
+        "name":"fs-test-unit", "namespace":"fs-test-unit",
+        "labels":{"falcone.test/run":"fs-test-unit"}}, "spec":pod_spec(&image()).unwrap()});
+    for expired in [false, true] {
+        let cli = Cli::new(Commands::default());
+        let deadline = Instant::now()
+            + if expired {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(1)
+            };
+        assert_eq!(cli.create_namespace(&ns, deadline).is_err(), expired);
+        assert_eq!(cli.create_pod(&ns, &pod, deadline).is_err(), expired);
+        assert_eq!(
+            cli.wait_terminal(&ns, "fs-test-unit", deadline).is_err(),
+            expired
+        );
+        assert_eq!(cli.logs(&ns, "fs-test-unit", deadline).is_err(), expired);
+        assert_eq!(cli.delete_namespace(&ns, deadline).is_err(), expired);
+        let calls = cli.runner.calls.borrow();
+        assert_eq!(calls.len(), if expired { 0 } else { 5 });
+        assert!(cli.runner.deadlines.borrow().iter().all(|d| *d == deadline));
+        for (_, args, _) in calls.iter() {
+            let millis = args
+                .iter()
+                .find_map(|arg| arg.strip_prefix("--request-timeout="))
+                .unwrap()
+                .strip_suffix("ms")
+                .unwrap()
+                .parse::<u128>()
+                .unwrap();
+            assert!((1..=1000).contains(&millis));
+        }
+    }
 }
 
 #[test]
@@ -537,19 +706,140 @@ fn enabled_cluster_flow_builds_pushes_runs_and_cleans_up() {
 fn subprocess_errors_suppress_output_and_name_ambient_prerequisites() {
     let runner = Process;
     let error = runner
-        .run("sh", &["-c", "printf output-canary >&2; exit 1"], None)
+        .run(
+            "sh",
+            &["-c", "printf output-canary >&2; exit 1"],
+            None,
+            Instant::now() + Duration::from_secs(2),
+        )
         .unwrap_err();
     assert!(!error.contains("output-canary"));
     assert!(error.contains("ambient"));
     assert_eq!(
-        runner.run("sh", &["-c", "printf ready"], None).unwrap(),
+        runner
+            .run(
+                "sh",
+                &["-c", "printf ready"],
+                None,
+                Instant::now() + Duration::from_secs(2)
+            )
+            .unwrap(),
         "ready"
     );
     assert!(
         runner
-            .run("/nonexistent-fs-test-executable", &[], None)
+            .run(
+                "/nonexistent-fs-test-executable",
+                &[],
+                None,
+                Instant::now() + Duration::from_secs(2)
+            )
             .is_err()
     );
+}
+
+struct ProcessFixture(std::path::PathBuf);
+
+impl ProcessFixture {
+    fn new() -> Self {
+        use std::os::unix::fs::DirBuilderExt;
+        let path = std::env::temp_dir().join(namespace_name());
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for ProcessFixture {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[test]
+fn subprocess_deadline_kills_and_reaps_the_entire_group() {
+    let fixture = ProcessFixture::new();
+    let pids = fixture.0.join("pids");
+    let start = Instant::now();
+    let result = Process.run(
+        "sh",
+        &[
+            "-c",
+            "sleep 30 & echo \"$$ $!\" > \"$1\"; wait",
+            "sh",
+            pids.to_str().unwrap(),
+        ],
+        None,
+        start + Duration::from_millis(200),
+    );
+    assert!(result.is_err(), "hanging child must time out");
+    assert!(start.elapsed() < Duration::from_secs(2));
+    let pids = std::fs::read_to_string(pids).unwrap();
+    for pid in pids.split_whitespace() {
+        let pid = rustix::process::Pid::from_raw(pid.parse().unwrap()).unwrap();
+        assert_eq!(
+            rustix::process::test_kill_process(pid),
+            Err(rustix::io::Errno::SRCH),
+            "process {pid} remains"
+        );
+    }
+}
+
+#[test]
+fn subprocess_drains_a_full_stdout_pipe() {
+    let output = Process
+        .run(
+            "sh",
+            &["-c", "head -c 1048576 /dev/zero"],
+            None,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+    assert_eq!(output.len(), 1_048_576);
+    assert!(output.bytes().all(|byte| byte == 0));
+}
+
+#[test]
+fn subprocess_deadline_covers_blocked_stdin_and_inherited_stdout() {
+    for script in ["sleep 30", "sleep 30 & exit 0"] {
+        let input = json!("x".repeat(1_048_576));
+        let start = Instant::now();
+        assert!(
+            Process
+                .run(
+                    "sh",
+                    &["-c", script],
+                    Some(&input),
+                    start + Duration::from_millis(200)
+                )
+                .is_err()
+        );
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+}
+
+#[test]
+fn expired_subprocess_deadline_never_spawns() {
+    let fixture = ProcessFixture::new();
+    let marker = fixture.0.join("spawned");
+    assert!(
+        Process
+            .run(
+                "sh",
+                &[
+                    "-c",
+                    "printf spawned > \"$1\"",
+                    "sh",
+                    marker.to_str().unwrap()
+                ],
+                None,
+                Instant::now()
+            )
+            .is_err()
+    );
+    assert!(!marker.exists());
 }
 
 #[test]

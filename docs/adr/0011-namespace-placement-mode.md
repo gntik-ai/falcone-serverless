@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: Proposed — 2026-10-30. **R3 (tenant isolation).** This records a proposal, not permission to relax the current hard rules. Acceptance requires a second reviewer and explicit operator approval. The operator must apply the AGENTS.md amendments below after acceptance; makers never edit that protected file. Completion of the broader rollout depends on that operator gate. This docs-only ChangeSet neither implements the modes nor claims their enforcement is qualified.
+Status: Accepted — 2026-11-01. **R3 (tenant isolation).** Operator decision ([#237](https://github.com/gntik-ai/falcone-serverless/issues/237)): namespace creation stays available and is switchable to a shared, preprovisioned namespace; runtime placement and test placement remain independent. Merge and rollout still require independent second review and explicit operator approval. The operator must apply the AGENTS.md amendments below before the hard rules change; makers never edit that protected file. Completion of the broader rollout depends on that operator gate. This docs-only decision neither implements the modes nor claims their enforcement is qualified.
 
 ## Context
 
