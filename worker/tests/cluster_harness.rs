@@ -734,6 +734,89 @@ fn detached_descendant_is_killed_where_it_can_be_found() {
     }
 }
 
+/// Kills a helper the code under test may have failed to kill, even when an assertion fails.
+struct Helper(std::path::PathBuf);
+
+impl Helper {
+    fn pid(&self) -> Option<String> {
+        std::fs::read_to_string(&self.0)
+            .ok()
+            .map(|pid| pid.trim().to_string())
+            .filter(|pid| !pid.is_empty())
+    }
+
+    fn alive(&self) -> bool {
+        self.pid().is_some_and(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "))
+        })
+    }
+}
+
+impl Drop for Helper {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid() {
+            let _ = std::process::Command::new("kill")
+                .args(["-KILL", &pid])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn environment_clearing_descendant_that_left_the_group_cannot_stall_run_or_cleanup() {
+    // Neither the process group nor the run marker reaches this helper, so discovery fails and
+    // the pipe readers must be abandoned within the documented grace.
+    let helper = Helper(scratch_file("escaped"));
+    let script = "env -i setsid sh -c 'echo $$ > \"$0\"; exec sleep 30' \"$0\" & exit 0";
+    let started = std::time::Instant::now();
+    let error = Process
+        .run(
+            "sh",
+            &["-c", script, helper.0.to_str().unwrap()],
+            None,
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    // Cleanup after the abandoned readers still runs.
+    let kube = FakeKube::default();
+    {
+        let session = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).unwrap();
+        drop(session);
+    }
+    assert!(kube.calls.borrow().contains(&"delete namespace"));
+}
+
+#[test]
+fn environment_clearing_descendant_left_in_the_group_is_killed_after_the_parent_exits() {
+    let helper = Helper(scratch_file("grouped"));
+    let script = "env -i sh -c 'echo $$ > \"$0\"; exec sleep 30' \"$0\" & exit 0";
+    let started = std::time::Instant::now();
+    let error = Process
+        .run(
+            "sh",
+            &["-c", script, helper.0.to_str().unwrap()],
+            None,
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+    assert!(error.contains("timed out"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    // The zombie (if any) is reaped by the init process, so allow it a moment.
+    while helper.alive() {
+        assert!(std::time::Instant::now() < deadline, "descendant survived");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn hung_foreground_command_times_out_within_the_deadline_and_grace() {
     let started = std::time::Instant::now();

@@ -261,10 +261,10 @@ impl<R: Runner> Kube for Cli<R> {
 
 pub struct Process;
 
-/// Extra time allowed after the deadline to read the last output once the process tree is
-/// killed. `run` therefore returns within `timeout` plus this grace and `REAP_GRACE`.
-const PIPE_GRACE: Duration = Duration::from_millis(500);
-const REAP_GRACE: Duration = Duration::from_secs(1);
+/// One allowance, counted from the moment a deadline passes, for everything `run` does
+/// afterwards: finding descendants, signalling them, letting the pipe readers see EOF and
+/// reaping the child. `run` therefore returns within `timeout` plus this grace and one poll.
+const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(5);
 /// Environment marker inherited by every descendant, used to find processes that left the
 /// process group or were reparented. Its value is unique to one `run` call.
@@ -278,6 +278,7 @@ impl Runner for Process {
         input: Option<&Value>,
         timeout: Duration,
     ) -> Result<String, String> {
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
         use std::io::{Read, Write};
         use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
@@ -323,6 +324,7 @@ impl Runner for Process {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| error())?;
+        let root = Pid::from_child(&child);
         // Pipe I/O runs on detached threads so that no read or write can outlive the deadline
         // by blocking `run`; a failed write shows up as the child's own failure.
         if let (Some(bytes), Some(mut stdin)) = (bytes, child.stdin.take()) {
@@ -345,32 +347,45 @@ impl Runner for Process {
                 "{program} timed out after {timeout:?}: process tree killed; command output suppressed"
             )
         };
-        let status = loop {
-            if let Some(status) = child.try_wait().map_err(|_| error())? {
-                break status;
+        // Exit is observed without reaping (WNOWAIT): the zombie keeps the pid, and with it
+        // the process group id, reserved until cleanup is done, so a group signal can never
+        // reach an unrelated process that reused the number.
+        let exit = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
+        loop {
+            if waitid(WaitId::Pid(root), exit)
+                .map_err(|_| error())?
+                .is_some()
+            {
+                break;
             }
             if Instant::now() >= deadline {
-                // The child is not reaped yet, so its pid and group id cannot be reused.
-                kill_tree(&mut child, &tag);
+                kill_tree(&mut child, &tag, Instant::now() + CLEANUP_GRACE);
                 return Err(timed_out());
             }
             std::thread::sleep(POLL);
-        };
+        }
         // The child exited, but a descendant may still hold the output pipe.
         let wait = deadline.saturating_duration_since(Instant::now());
         let stdout = match output.recv_timeout(wait) {
             Ok(stdout) => stdout,
             // No reader without a piped stdout.
             Err(mpsc::RecvTimeoutError::Disconnected) if !piped_stdout => Vec::new(),
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(error()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let _ = child.wait();
+                return Err(error());
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                kill_tagged(&tag, None);
+                let cleanup = Instant::now() + CLEANUP_GRACE;
+                // The unreaped child still pins its group, so the group is killed even though
+                // the leader is gone; this reaches helpers that cleared their environment.
+                kill_tree(&mut child, &tag, cleanup);
                 // Give the readers a moment to see EOF; otherwise abandon them. They are
                 // detached and end when the last pipe holder dies.
-                let _ = output.recv_timeout(PIPE_GRACE);
+                let _ = output.recv_timeout(cleanup.saturating_duration_since(Instant::now()));
                 return Err(timed_out());
             }
         };
+        let status = child.wait().map_err(|_| error())?;
         if !status.success() {
             return Err(error());
         }
@@ -378,18 +393,23 @@ impl Runner for Process {
     }
 }
 
-/// Kills the direct child, its process group, descendants found through `/proc` and
-/// processes carrying the run tag, then reaps the child within `REAP_GRACE`.
+/// Kills the process group (also when only descendants are left), descendants found through
+/// `/proc` and processes carrying the run tag, then reaps the child; all of it before
+/// `cleanup`, the one absolute deadline for discovery, signalling and reaping.
 ///
-/// Gaps (no privileges, no cgroup or subreaper): a descendant that both leaves the process
-/// group and clears its environment, and that is reparented before the scan, escapes. So does
-/// one that forks after the scan; a killed one that sits in uninterruptible sleep stays until
-/// the kernel releases it. Such a process can keep the detached pipe readers alive until it
-/// exits; this is accepted for test-only code and bounded by never joining them.
-fn kill_tree(child: &mut std::process::Child, tag: &str) {
+/// Gaps (no privileges, no cgroup or subreaper): a descendant that leaves the process group,
+/// clears its environment and is reparented before the scan escapes. So does one that forks
+/// after the scan or while the scan runs out of time on a very large process table; a killed
+/// one that sits in uninterruptible sleep stays until the kernel releases it. Such a process
+/// can keep the detached pipe readers alive until it exits; this is accepted for test-only
+/// code and bounded by never joining them.
+fn kill_tree(child: &mut std::process::Child, tag: &str, cleanup: std::time::Instant) {
     use rustix::process::{Pid, Signal, kill_process, kill_process_group};
     let root = Pid::from_child(child);
-    let descendants = descendants(root.as_raw_nonzero().get());
+    // Most of the grace stays for signalling and reaping. Descendants are listed while their
+    // parents are alive, since killing the parents reparents them out of reach.
+    let scan = (std::time::Instant::now() + CLEANUP_GRACE / 4).min(cleanup);
+    let descendants = descendants(root.as_raw_nonzero().get(), scan);
     let _ = kill_process_group(root, Signal::KILL);
     let _ = child.kill();
     for pid in descendants {
@@ -397,9 +417,8 @@ fn kill_tree(child: &mut std::process::Child, tag: &str) {
             let _ = kill_process(pid, Signal::KILL);
         }
     }
-    kill_tagged(tag, Some(root));
-    let deadline = std::time::Instant::now() + REAP_GRACE;
-    while std::time::Instant::now() < deadline {
+    kill_tagged(tag, Some(root), cleanup);
+    while std::time::Instant::now() < cleanup {
         if !matches!(child.try_wait(), Ok(None)) {
             return;
         }
@@ -408,14 +427,20 @@ fn kill_tree(child: &mut std::process::Child, tag: &str) {
 }
 
 /// Pids below `root` according to `/proc/<pid>/task/*/children` (best effort).
-fn descendants(root: i32) -> Vec<i32> {
+fn descendants(root: i32, until: std::time::Instant) -> Vec<i32> {
     let mut found = Vec::new();
     let mut queue = vec![root];
     while let Some(pid) = queue.pop() {
+        if std::time::Instant::now() >= until {
+            break;
+        }
         let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) else {
             continue;
         };
         for task in tasks.flatten() {
+            if std::time::Instant::now() >= until {
+                return found;
+            }
             let Ok(children) = fs::read_to_string(task.path().join("children")) else {
                 continue;
             };
@@ -431,13 +456,16 @@ fn descendants(root: i32) -> Vec<i32> {
 }
 
 /// Kills every other process of this user whose environment carries the run tag.
-fn kill_tagged(tag: &str, skip: Option<rustix::process::Pid>) {
+fn kill_tagged(tag: &str, skip: Option<rustix::process::Pid>, until: std::time::Instant) {
     use rustix::process::{Pid, Signal, kill_process};
     let marker = format!("{TAG}={tag}");
     let Ok(entries) = fs::read_dir("/proc") else {
         return;
     };
     for entry in entries.flatten() {
+        if std::time::Instant::now() >= until {
+            return;
+        }
         let Some(pid) = entry
             .file_name()
             .to_str()
