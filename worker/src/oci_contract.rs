@@ -1016,16 +1016,15 @@ impl Drop for Candidate {
         // The direct child may have left the original group (ESRCH there), so kill it by pid too.
         let _ = kill_process(rustix::process::Pid::from_child(&self.child), Signal::KILL);
         let _ = kill_process_group(self.group, Signal::KILL);
+        // One absolute budget covers both phases and is checked on every iteration.
         let deadline = Instant::now() + CLEANUP_BOUND;
         while !matches!(self.child.try_wait(), Ok(Some(_)) | Err(_)) && Instant::now() < deadline {
             thread::sleep(Duration::from_millis(10));
         }
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
+        while Instant::now() < deadline {
             match waitpgid(self.group, WaitOptions::NOHANG) {
-                Ok(Some(_)) => continue,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                Err(rustix::io::Errno::INTR) => continue,
+                Ok(Some(_)) | Err(rustix::io::Errno::INTR) => continue,
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
                 _ => break,
             }
         }
