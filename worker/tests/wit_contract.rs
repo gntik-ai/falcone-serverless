@@ -1,6 +1,6 @@
 //! Static shape checks only; RUN-01/RUN-02 must enforce linking and limits at runtime.
 use std::{collections::BTreeSet, fs, path::Path};
-use wit_parser::{PackageId, Resolve, Type, TypeDefKind, TypeId, WorldItem};
+use wit_parser::{Handle, PackageId, Resolve, Type, TypeDefKind, TypeId, TypeOwner, WorldItem};
 
 const INTERFACES: &[&str] = &[
     "storage",
@@ -12,7 +12,92 @@ const INTERFACES: &[&str] = &[
     "progress",
     "invocation-context",
 ];
-const FALLIBLE: &[&str] = &["storage", "http", "events", "workflows", "progress"];
+// Literal requirements for falcone:host@0.1.0, independent of the canonical WIT.
+// Resource ownership is explicit even where WIT spells an own handle implicitly.
+const RESOURCES: &[(&str, &str)] = &[
+    ("storage", "object"),
+    ("storage", "checkpoint"),
+    ("workflows", "execution"),
+];
+const OPERATIONS: &[(&str, &str, &str)] = &[
+    ("cancellation", "is-cancelled", "() -> bool"),
+    (
+        "storage",
+        "open-object",
+        "(key: string) -> result<own<falcone:host@0.1.0/storage.object>, host-error>",
+    ),
+    (
+        "storage",
+        "read-object",
+        "(handle: borrow<falcone:host@0.1.0/storage.object>) -> result<list<u8>, host-error>",
+    ),
+    (
+        "storage",
+        "write-object",
+        "(handle: borrow<falcone:host@0.1.0/storage.object>, data: list<u8>) -> result<_, host-error>",
+    ),
+    (
+        "storage",
+        "open-checkpoint",
+        "(key: string) -> result<own<falcone:host@0.1.0/storage.checkpoint>, host-error>",
+    ),
+    (
+        "storage",
+        "read-checkpoint",
+        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<list<u8>, host-error>",
+    ),
+    (
+        "storage",
+        "write-checkpoint",
+        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>, data: list<u8>) -> result<_, host-error>",
+    ),
+    (
+        "http",
+        "request",
+        "(url: string, method: string, headers: list<header>, body: list<u8>) -> result<response, host-error>",
+    ),
+    (
+        "events",
+        "publish",
+        "(destination: string, payload: list<u8>) -> result<_, host-error>",
+    ),
+    (
+        "workflows",
+        "start",
+        "(workflow: string, input: list<u8>) -> result<own<falcone:host@0.1.0/workflows.execution>, host-error>",
+    ),
+    (
+        "workflows",
+        "signal",
+        "(handle: borrow<falcone:host@0.1.0/workflows.execution>, name: string, payload: list<u8>) -> result<_, host-error>",
+    ),
+    (
+        "logging",
+        "log",
+        "(severity: level, message: string, fields: list<field>) -> result<_, host-error>",
+    ),
+    (
+        "progress",
+        "report",
+        "(completed: u64, total: u64, message: string) -> result<_, host-error>",
+    ),
+    (
+        "progress",
+        "report-checkpoint",
+        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<_, host-error>",
+    ),
+    ("invocation-context", "invocation-key", "() -> string"),
+    ("invocation-context", "attempt-id", "() -> string"),
+    ("invocation-context", "idempotency-key", "() -> string"),
+];
+const FALLIBLE: &[&str] = &[
+    "storage",
+    "http",
+    "events",
+    "workflows",
+    "logging",
+    "progress",
+];
 const LIMITS: &[(&str, u64)] = &[
     ("max-guest-to-host-bytes", 1_048_576),
     ("max-host-to-guest-bytes", 1_048_576),
@@ -35,6 +120,68 @@ fn unalias(resolve: &Resolve, mut ty: Type) -> Option<TypeId> {
         match resolve.types[id].kind {
             TypeDefKind::Type(next) => ty = next,
             _ => return Some(id),
+        }
+    }
+}
+
+fn render_optional_type(resolve: &Resolve, ty: Option<Type>) -> String {
+    ty.map(|ty| render_type(resolve, ty))
+        .unwrap_or_else(|| "_".into())
+}
+
+fn render_type(resolve: &Resolve, ty: Type) -> String {
+    match ty {
+        Type::Bool => "bool".into(),
+        Type::U8 => "u8".into(),
+        Type::U16 => "u16".into(),
+        Type::U32 => "u32".into(),
+        Type::U64 => "u64".into(),
+        Type::S8 => "s8".into(),
+        Type::S16 => "s16".into(),
+        Type::S32 => "s32".into(),
+        Type::S64 => "s64".into(),
+        Type::F32 => "f32".into(),
+        Type::F64 => "f64".into(),
+        Type::Char => "char".into(),
+        Type::String => "string".into(),
+        Type::ErrorContext => "error-context".into(),
+        Type::Id(id) => {
+            let def = &resolve.types[id];
+            match &def.kind {
+                TypeDefKind::Type(ty) => render_type(resolve, *ty),
+                TypeDefKind::List(ty) => format!("list<{}>", render_type(resolve, *ty)),
+                TypeDefKind::Result(result) => format!(
+                    "result<{}, {}>",
+                    render_optional_type(resolve, result.ok),
+                    render_optional_type(resolve, result.err),
+                ),
+                TypeDefKind::Handle(handle) => {
+                    let (mode, resource) = match handle {
+                        Handle::Borrow(id) => ("borrow", *id),
+                        Handle::Own(id) => ("own", *id),
+                    };
+                    let resource = unalias(resolve, Type::Id(resource)).expect("resolved resource");
+                    let resource = &resolve.types[resource];
+                    let TypeOwner::Interface(owner) = resource.owner else {
+                        return "<unowned-resource>".into();
+                    };
+                    let interface = &resolve.interfaces[owner];
+                    let package = interface
+                        .package
+                        .map(|id| resolve.packages[id].name.to_string())
+                        .unwrap_or_default();
+                    format!(
+                        "{mode}<{package}/{}.{}>",
+                        interface.name.as_deref().unwrap_or("<inline>"),
+                        resource.name.as_deref().unwrap_or("<unnamed>"),
+                    )
+                }
+                // Named records, enums and variants are compared by their WIT name.
+                _ => def
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("<{}>", def.kind.as_str())),
+            }
         }
     }
 }
@@ -103,6 +250,40 @@ fn check(resolve: &Resolve, package: PackageId) -> Vec<String> {
     }
     for (name, id) in &package_data.interfaces {
         let interface = &resolve.interfaces[*id];
+        for (owner, resource) in RESOURCES {
+            if owner == name
+                && !interface
+                    .types
+                    .get(*resource)
+                    .is_some_and(|id| matches!(resolve.types[*id].kind, TypeDefKind::Resource))
+            {
+                violations.push(format!("missing resource: {name}.{resource}"));
+            }
+        }
+        for (owner, operation, expected) in OPERATIONS {
+            if owner != name {
+                continue;
+            }
+            let Some(function) = interface.functions.get(*operation) else {
+                violations.push(format!("missing operation: {name}.{operation}"));
+                continue;
+            };
+            let params = function
+                .params
+                .iter()
+                .map(|param| format!("{}: {}", param.name, render_type(resolve, param.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let actual = format!(
+                "({params}) -> {}",
+                render_optional_type(resolve, function.result)
+            );
+            if actual != *expected {
+                violations.push(format!(
+                    "{name}.{operation}: wrong signature, expected {expected}, got {actual}"
+                ));
+            }
+        }
         let docs = interface.docs.contents.as_deref().unwrap_or_default();
         for (key, expected) in LIMITS {
             match key_value(docs, key).and_then(|value| value.parse::<u64>().ok()) {
@@ -208,26 +389,49 @@ interface storage {
     use cancellation.{host-error};
     /// An execution-scoped handle, invalid after completion.
     resource object;
-    read: func(key: string) -> result<list<u8>, host-error>;
+    /// An execution-scoped handle, invalid after completion.
+    resource checkpoint;
+    open-object: func(key: string) -> result<object, host-error>;
+    read-object: func(handle: borrow<object>) -> result<list<u8>, host-error>;
+    write-object: func(handle: borrow<object>, data: list<u8>) -> result<_, host-error>;
+    open-checkpoint: func(key: string) -> result<checkpoint, host-error>;
+    read-checkpoint: func(handle: borrow<checkpoint>) -> result<list<u8>, host-error>;
+    write-checkpoint: func(handle: borrow<checkpoint>, data: list<u8>) -> result<_, host-error>;
 }
 interface http {
     use cancellation.{host-error};
-    request: func(url: string) -> result<list<u8>, host-error>;
+    record header { name: string, value: string }
+    record response { status: u16, headers: list<header>, body: list<u8> }
+    request: func(url: string, method: string, headers: list<header>, body: list<u8>) -> result<response, host-error>;
 }
 interface events {
     use cancellation.{host-error};
-    publish: func(payload: list<u8>) -> result<_, host-error>;
+    publish: func(destination: string, payload: list<u8>) -> result<_, host-error>;
 }
 interface workflows {
     use cancellation.{host-error};
-    start: func(name: string) -> result<string, host-error>;
+    /// An execution-scoped handle, invalid after completion.
+    resource execution;
+    start: func(workflow: string, input: list<u8>) -> result<execution, host-error>;
+    signal: func(handle: borrow<execution>, name: string, payload: list<u8>) -> result<_, host-error>;
 }
-interface logging { log: func(message: string); }
+interface logging {
+    use cancellation.{host-error};
+    enum level { debug, info, warn, error }
+    record field { name: string, value: string }
+    log: func(severity: level, message: string, fields: list<field>) -> result<_, host-error>;
+}
 interface progress {
     use cancellation.{host-error};
-    report: func(completed: u64) -> result<_, host-error>;
+    use storage.{checkpoint};
+    report: func(completed: u64, total: u64, message: string) -> result<_, host-error>;
+    report-checkpoint: func(handle: borrow<checkpoint>) -> result<_, host-error>;
 }
-interface invocation-context { invocation-key: func() -> string; }
+interface invocation-context {
+    invocation-key: func() -> string;
+    attempt-id: func() -> string;
+    idempotency-key: func() -> string;
+}
 world function {
     import storage;
     import http;
@@ -412,27 +616,27 @@ fn each_interface_requires_positive_exact_limits_and_cancellation() {
 fn fallible_operations_require_the_shared_error_result() {
     for (before, after, expected) in [
         (
-            "read: func(key: string) -> result<list<u8>, host-error>",
-            "read: func(key: string) -> list<u8>",
-            "storage.read: must return result with shared host-error",
+            "read-object: func(handle: borrow<object>) -> result<list<u8>, host-error>",
+            "read-object: func(handle: borrow<object>) -> list<u8>",
+            "storage.read-object: must return result with shared host-error",
         ),
         (
-            "request: func(url: string) -> result<list<u8>, host-error>",
+            "request: func(url: string, method: string, headers: list<header>, body: list<u8>) -> result<response, host-error>",
             "request: func(url: string)",
             "http.request: must return result with shared host-error",
         ),
         (
-            "publish: func(payload: list<u8>) -> result<_, host-error>",
+            "publish: func(destination: string, payload: list<u8>) -> result<_, host-error>",
             "publish: func(payload: list<u8>)",
             "events.publish: must return result with shared host-error",
         ),
         (
-            "start: func(name: string) -> result<string, host-error>",
-            "start: func(name: string) -> string",
+            "start: func(workflow: string, input: list<u8>) -> result<execution, host-error>",
+            "start: func(workflow: string, input: list<u8>) -> string",
             "workflows.start: must return result with shared host-error",
         ),
         (
-            "report: func(completed: u64) -> result<_, host-error>",
+            "report: func(completed: u64, total: u64, message: string) -> result<_, host-error>",
             "report: func(completed: u64)",
             "progress.report: must return result with shared host-error",
         ),
@@ -457,9 +661,9 @@ fn fallible_operations_require_the_shared_error_result() {
             "host-error missing timeout",
         ),
         (
-            "read: func(key: string) -> result<list<u8>, host-error>",
-            "variant other-error { cancelled }\nread: func(key: string) -> result<list<u8>, other-error>",
-            "storage.read: must return result with shared host-error",
+            "read-object: func(handle: borrow<object>) -> result<list<u8>, host-error>",
+            "variant other-error { cancelled }\nread-object: func(handle: borrow<object>) -> result<list<u8>, other-error>",
+            "storage.read-object: must return result with shared host-error",
         ),
     ] {
         let source = fixture().replace(before, after);
@@ -471,13 +675,13 @@ fn fallible_operations_require_the_shared_error_result() {
 fn callers_cannot_choose_scope_or_parameterize_invocation_context() {
     for (before, after, expected) in [
         (
-            "read: func(key: string)",
-            "read: func(tenant: string)",
+            "open-object: func(key: string)",
+            "open-object: func(tenant: string)",
             "forbidden scope parameter tenant",
         ),
         (
-            "read: func(key: string)",
-            "read: func(workspace: string)",
+            "open-object: func(key: string)",
+            "open-object: func(workspace: string)",
             "forbidden scope parameter workspace",
         ),
         (
@@ -492,13 +696,21 @@ fn callers_cannot_choose_scope_or_parameterize_invocation_context() {
 
 #[test]
 fn resource_lifetime_is_part_of_the_contract() {
-    rejects(
-        &fixture().replace(
-            "/// An execution-scoped handle, invalid after completion.",
-            "",
-        ),
-        "storage: resource must be execution-scoped",
-    );
+    let original = fixture();
+    for (interface, resource) in RESOURCES {
+        let before = format!(
+            "/// An execution-scoped handle, invalid after completion.\n    resource {resource};"
+        );
+        let source = original.replace(&before, &format!("resource {resource};"));
+        assert_ne!(
+            source, original,
+            "mutation must change {interface}.{resource}"
+        );
+        rejects(
+            &source,
+            &format!("{interface}: resource must be execution-scoped"),
+        );
+    }
 }
 
 #[test]
@@ -533,6 +745,206 @@ fn readme_only_version_and_limit_changes_are_rejected() {
         assert!(
             violations.iter().any(|violation| violation == expected),
             "{violations:#?}"
+        );
+    }
+}
+
+#[test]
+fn required_operation_cannot_be_removed() {
+    let original = fixture();
+    for (interface, operation, _) in OPERATIONS {
+        let prefix = format!("{operation}: func(");
+        let declarations: Vec<_> = original
+            .lines()
+            .filter(|line| line.trim_start().starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            declarations.len(),
+            1,
+            "fixture contains {interface}.{operation}"
+        );
+        let source = original.replace(&format!("{}\n", declarations[0]), "");
+        assert_ne!(
+            source, original,
+            "mutation must remove {interface}.{operation}"
+        );
+        rejects(
+            &source,
+            &format!("missing operation: {interface}.{operation}"),
+        );
+    }
+}
+
+#[test]
+fn required_resource_cannot_be_renamed() {
+    let original = fixture();
+    for (interface, resource) in RESOURCES {
+        let renamed = format!("other-{resource}");
+        let source = original
+            .replace(
+                &format!("resource {resource};"),
+                &format!("resource {renamed};"),
+            )
+            .replace(&format!("<{resource}>"), &format!("<{renamed}>"))
+            .replace(&format!("<{resource},"), &format!("<{renamed},"))
+            .replace(&format!(".{{{resource}}}"), &format!(".{{{renamed}}}"));
+        assert_ne!(
+            source, original,
+            "mutation must rename {interface}.{resource}"
+        );
+        rejects(
+            &source,
+            &format!("missing resource: {interface}.{resource}"),
+        );
+    }
+}
+
+#[test]
+fn required_operation_signatures_cannot_change() {
+    let original = fixture();
+    for (operation, before, after) in [
+        (
+            "cancellation.is-cancelled",
+            "is-cancelled: func() -> bool",
+            "is-cancelled: func() -> u8",
+        ),
+        (
+            "storage.open-object",
+            "open-object: func(key: string) -> result<object, host-error>",
+            "open-object: func(key: string) -> result<checkpoint, host-error>",
+        ),
+        (
+            "storage.read-object",
+            "read-object: func(handle: borrow<object>)",
+            "read-object: func(handle: own<object>)",
+        ),
+        (
+            "storage.write-object",
+            "write-object: func(handle: borrow<object>, data: list<u8>)",
+            "write-object: func(handle: borrow<object>, data: string)",
+        ),
+        (
+            "storage.open-checkpoint",
+            "open-checkpoint: func(key: string)",
+            "open-checkpoint: func(key: u64)",
+        ),
+        (
+            "storage.read-checkpoint",
+            "read-checkpoint: func(handle: borrow<checkpoint>)",
+            "read-checkpoint: func(handle: borrow<object>)",
+        ),
+        (
+            "storage.write-checkpoint",
+            "write-checkpoint: func(handle: borrow<checkpoint>, data: list<u8>)",
+            "write-checkpoint: func(handle: borrow<checkpoint>)",
+        ),
+        (
+            "http.request",
+            "request: func(url: string, method: string,",
+            "request: func(method: string, url: string,",
+        ),
+        (
+            "events.publish",
+            "publish: func(destination: string,",
+            "publish: func(destination: list<u8>,",
+        ),
+        (
+            "workflows.start",
+            "start: func(workflow: string, input: list<u8>)",
+            "start: func(workflow: string, input: list<u16>)",
+        ),
+        (
+            "workflows.signal",
+            "signal: func(handle: borrow<execution>,",
+            "signal: func(handle: own<execution>,",
+        ),
+        (
+            "logging.log",
+            "log: func(severity: level, message: string, fields: list<field>) -> result<_, host-error>",
+            "log: func(severity: level, message: string, fields: list<field>)",
+        ),
+        (
+            "progress.report",
+            "report: func(completed: u64,",
+            "report: func(completed: u32,",
+        ),
+        (
+            "progress.report-checkpoint",
+            "use storage.{checkpoint};",
+            "use storage.{object as checkpoint};",
+        ),
+        (
+            "invocation-context.invocation-key",
+            "invocation-key: func() -> string",
+            "invocation-key: func() -> bool",
+        ),
+        (
+            "invocation-context.attempt-id",
+            "attempt-id: func() -> string",
+            "attempt-id: func() -> u64",
+        ),
+        (
+            "invocation-context.idempotency-key",
+            "idempotency-key: func() -> string",
+            "idempotency-key: func() -> list<u8>",
+        ),
+        (
+            "http.request",
+            "method: string, headers: list<header>,",
+            "method: string, headers: list<response>,",
+        ),
+        (
+            "logging.log",
+            "log: func(severity: level,",
+            "log: func(priority: level,",
+        ),
+        (
+            "logging.log",
+            "log: func(severity: level,",
+            "log: func(severity: string,",
+        ),
+        (
+            "storage.read-object",
+            "read-object: func(handle: borrow<object>) -> result<list<u8>, host-error>",
+            "read-object: func(handle: borrow<object>) -> result<list<u16>, host-error>",
+        ),
+        (
+            "events.publish",
+            "publish: func(destination: string, payload: list<u8>) -> result<_, host-error>",
+            "publish: func(destination: string, payload: list<u8>) -> result<string, host-error>",
+        ),
+    ] {
+        let source = original.replace(before, after);
+        assert_ne!(source, original, "mutation must change {operation}");
+        rejects(&source, &format!("{operation}: wrong signature"));
+    }
+}
+
+#[test]
+fn every_fallible_operation_requires_the_shared_error_identity() {
+    let original = fixture();
+    for (interface, operation, signature) in OPERATIONS {
+        if !signature.contains(" -> result<") {
+            continue;
+        }
+        let prefix = format!("{operation}: func(");
+        let declaration = original
+            .lines()
+            .find(|line| line.trim_start().starts_with(&prefix))
+            .expect("required operation in fixture");
+        let source = original
+            .replace(declaration, &declaration.replace("host-error", "other-error"))
+            .replace(
+                &format!("interface {interface} {{"),
+                &format!("interface {interface} {{\n    variant other-error {{ denied, limit-exceeded, timeout, cancelled }}"),
+            );
+        assert_ne!(
+            source, original,
+            "mutation must change {interface}.{operation}"
+        );
+        rejects(
+            &source,
+            &format!("{interface}.{operation}: must return result with shared host-error"),
         );
     }
 }
