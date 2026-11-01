@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-const HEADER: &[&str] = &["Contract: ctr-artifact-validation-compile", "Version: 1"];
+const HEADER: &[&str] = &["Contract: ctr-artifact-validation-compile", "Version: 2"];
 
 struct Section {
     heading: &'static str,
@@ -194,6 +194,7 @@ const SECTIONS: &[Section] = &[
             "undeclared_import",
             "trusted_cache_unavailable",
             "cache_key_mismatch",
+            "buffer_limit_exceeded",
         ],
         statements: &[],
     },

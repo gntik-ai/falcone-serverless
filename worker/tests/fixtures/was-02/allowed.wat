@@ -1,0 +1,12 @@
+(component
+  (type $host (instance))
+  (import "falcone:host/storage@0.1.0" (instance (type $host)))
+  (import "falcone:host/http@0.1.0" (instance (type $host)))
+  (import "falcone:host/events@0.1.0" (instance (type $host)))
+  (import "falcone:host/workflows@0.1.0" (instance (type $host)))
+  (import "falcone:host/logging@0.1.0" (instance (type $host)))
+  (import "falcone:host/cancellation@0.1.0" (instance (type $host)))
+  (import "falcone:host/progress@0.1.0" (instance (type $host)))
+  (import "falcone:host/invocation-context@0.1.0" (instance (type $host)))
+  (core module (func (export "answer") (result i32) i32.const 42))
+)

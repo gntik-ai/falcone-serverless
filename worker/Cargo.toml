@@ -25,12 +25,18 @@ toml = { workspace = true }
 # Wasmtime engine for the WAS-01 qualification runner (#115).
 wasmtime = { workspace = true }
 
+wasmparser = { workspace = true }
+sha2 = { workspace = true }
+
+[[bin]]
+name = "artifact-compile-child"
+path = "src/artifact/compile_child.rs"
+
 [dev-dependencies]
+wat = "=1.258.3"
 wit-parser = "=0.262.0"
 # WAS-01 static checks (#115).
-wasmparser = { workspace = true }
 toml = { workspace = true }
-sha2 = { workspace = true }
 # Language profile matrix schema checks (#97); no remote/file reference resolution.
 jsonschema = { version = "0.59.0", default-features = false }
 # Restricted fs-test cluster harness (#121): Kubernetes client (rustls + ring, no OpenSSL),

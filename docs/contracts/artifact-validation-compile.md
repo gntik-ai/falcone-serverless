@@ -1,11 +1,11 @@
 # Artifact validation and bounded compilation
 
 Contract: ctr-artifact-validation-compile
-Version: 1
+Version: 2
 
 This versioned contract separates raw Wasm validation, bounded trusted compilation
-and verified native cache loading. It specifies a documentation boundary for
-WAS-02.t3; no validator, compiler, supervisor or cache loader is implemented here.
+and verified native cache loading. Version 2 adds the unwired WAS-02.t5 component validator and Linux compile child.
+It implements neither guest execution nor native cache loading or publication.
 
 ## Input fields
 
@@ -45,6 +45,39 @@ Every result contains the following fields. Failure yields `rejected`, never a u
 - `AVC-R6`: Guest/host `buffer_limits` belong to `ctr-wit-capability-host` (falcone-serverless:WAS-02.t1), currently `worker/wit/README.md`; this contract does not redefine them.
 
 Numeric defaults and qualification evidence belong to WAS-01 and the selected profile; this contract defines no new ceilings.
+
+### Version 2 enforcement
+
+The parent pipes stdin and applies RLIMIT_CPU and RLIMIT_AS with
+`rustix::process::prlimit(Pid::from_child)` before sending any bytes. Missing,
+zero or unenforceable budgets fail closed. The child reads stdin to EOF before
+creating the engine; it writes no files, persists no output and spawns no
+subprocesses. Thus its process tree consists of the child alone. Core dumps are
+disabled by the parent. The child compiles through the component API and discards
+the result. This is compile evidence, not a usable or published cache entry.
+
+| Limit | Measured quantity | Mechanism | Code | Fixture test (`artifact_validation.rs`) |
+| --- | --- | --- | --- | --- |
+| `input_bytes` | Raw input length in bytes | Check before parsing or spawning | `compile_size_limit_exceeded` | `validation_order_and_input_boundary` |
+| `cpu_seconds` | Child CPU time, whole-second Linux granularity | Parent RLIMIT_CPU; SIGXCPU or non-parent SIGKILL | `compile_cpu_limit_exceeded` | `cpu_budget_bounds_real_compilation` |
+| `memory_bytes` | Virtual address space, **not RSS** | Parent RLIMIT_AS; allocation/mmap failure, SIGABRT or engine-reported OOM | `compile_memory_limit_exceeded` | `address_space_budget_bounds_real_compilation` |
+| `wall_clock_deadline` | Monotonic elapsed time, including pipe transfer | Parent kills and waits at deadline | `compile_deadline_exceeded` | `deadline_reaps_and_allows_recovery` |
+| Caller cancellation | Shared atomic cancellation state | Parent kills and waits when fired | `compile_cancelled` | `cancellation_reaps_and_allows_recovery` |
+| Guest/host buffers | Aggregate serialized transfer bytes per direction | Check the existing WIT ceiling before copying | `buffer_limit_exceeded` | `bounded_transfer_preserves_destination_on_rejection` |
+
+Every spawned-child path terminates and waits before returning, including setup,
+I/O and unknown-exit failures. Parent deadline/cancel kills retain their own code;
+unknown exits fail with `compile_failed`, never success. The tests use test-only
+budgets calibrated for a small fixture and a deterministically expanded heavy
+fixture. Production budgets remain owned by WAS-01/profile policy.
+
+Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
+precompiled input), full component-model validation, component-only check, then
+exact top-level interface-instance imports from `falcone:host@0.1.0` world
+`function`. Nested core modules are validated too. AVC-R5/profile declared-memory
+checks and guest memory/epoch enforcement remain RUN-01 work; this module does
+not claim to implement them. No runtime consumer is wired into the worker.
+
 
 ## Cancellation boundaries
 
@@ -91,6 +124,8 @@ Diagnostics identify the failed element and use these stable codes. Diagnostic p
 | `unsupported_feature` | Wasm feature or requested version unsupported by the qualified profile. |
 | `undeclared_import` | Import outside the declared, permitted versioned interfaces. |
 | `trusted_cache_unavailable` | No verified trusted-compiler cache entry is available. |
+| `buffer_limit_exceeded` | Aggregate guest/host transfer exceeds the capability-host ceiling; destination is unchanged. |
+| `compile_failed` | Trusted compiler failed, a required budget could not be applied, or an unknown child exit occurred. |
 | `cache_key_mismatch` | An entry's key is incomplete or differs from the expected key. |
 
 ## Design basis
@@ -101,4 +136,4 @@ Diagnostics identify the failed element and use these stable codes. Diagnostic p
 
 Source builds belong to `ctr-source-build-api` ([source-build.md](source-build.md)); revision metadata belongs to `ctr-revision-runtime-manifest` (WAS-02.t2). Compiler image/runtime configuration and build authorization belong to DEP-01. This contract defines none of those interfaces. No credentials, keys, secret paths or Secret values are specified here.
 
-The executable fixtures are documentation gates, not runtime validation or containment evidence. Rollout is merge-only with no runtime consumer; revert this document and its test before a consumer pins Version 1. Future runtime implementation and semantic review must preserve every boundary above.
+The contract test remains a documentation gate; WAS-02.t5 adds Linux executable validation and compile-containment fixtures. These do not claim WAS-01 runtime qualification. Rollout is merge-only with no runtime consumer; revert Version 2 and its implementation before a consumer pins it. Future runtime implementation and semantic review must preserve every boundary above.
