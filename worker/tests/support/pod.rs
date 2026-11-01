@@ -71,12 +71,21 @@ pub(super) fn validate_spec(spec: &Value) -> Result<(), String> {
                 .join(", ")
         ));
     }
+    // Every container that can start in the pod is digest-pinned. Ephemeral containers are
+    // not part of the single-worker harness pod and are refused outright.
+    let pinned = |field: &str, required: bool| match spec.get(field) {
+        None | Some(Value::Null) => !required,
+        Some(containers) => containers.as_array().is_some_and(|containers| {
+            (!required || !containers.is_empty())
+                && containers
+                    .iter()
+                    .all(|container| container["image"].as_str().is_some_and(pinned_image))
+        }),
+    };
     if spec["restartPolicy"] != "Never"
-        || spec["containers"].as_array().is_none_or(|containers| {
-            containers
-                .iter()
-                .any(|container| !container["image"].as_str().is_some_and(pinned_image))
-        })
+        || !pinned("containers", true)
+        || !pinned("initContainers", false)
+        || spec.get("ephemeralContainers").is_some()
     {
         return Err("test pod requires restartPolicy Never and digest-pinned images".into());
     }
