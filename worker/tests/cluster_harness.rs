@@ -824,7 +824,8 @@ fn child_is_reaped_even_when_the_cleanup_budget_is_already_spent() {
         .spawn()
         .unwrap();
     let pid = child.id();
-    // Discovery gets no time at all; the killed child must still be reaped.
+    // Discovery gets no time at all; the killed child must still be reaped (SIGKILL is
+    // asynchronous, so the reaping allowance after the signal covers the delivery).
     kill_tree(
         &mut child,
         "fs-test-spent-budget",

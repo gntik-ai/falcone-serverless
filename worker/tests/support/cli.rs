@@ -266,6 +266,8 @@ pub struct Process;
 /// reaping the child. `run` therefore returns within `timeout` plus this grace and one poll.
 const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 const POLL: Duration = Duration::from_millis(5);
+/// Minimum time to wait for a SIGKILLed child to become reapable, whatever budget is left.
+const REAP_ALLOWANCE: Duration = Duration::from_millis(250);
 /// Environment marker inherited by every descendant, used to find processes that left the
 /// process group or were reparented. Its value is unique to one `run` call.
 const TAG: &str = "FS_TEST_RUN_TAG";
@@ -423,10 +425,12 @@ pub fn kill_tree(child: &mut std::process::Child, tag: &str, cleanup: std::time:
         }
     }
     kill_tagged(tag, Some(root), reap);
-    // SIGKILL was sent above, so the child is reaped at once; try at least once even when the
-    // budget is already spent, and wait out the rest of it only for an unkillable child.
+    // SIGKILL is delivered asynchronously, so the child may need a moment to become reapable:
+    // wait for it until `cleanup`, but never less than a short allowance after the signal,
+    // even when the budget is already spent. Only an unkillable child outlasts it.
+    let until = cleanup.max(std::time::Instant::now() + REAP_ALLOWANCE);
     loop {
-        if !matches!(child.try_wait(), Ok(None)) || std::time::Instant::now() >= cleanup {
+        if !matches!(child.try_wait(), Ok(None)) || std::time::Instant::now() >= until {
             return;
         }
         std::thread::sleep(POLL);
