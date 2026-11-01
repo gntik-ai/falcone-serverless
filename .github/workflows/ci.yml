@@ -81,15 +81,23 @@ jobs:
         if: env.DOCKERHUB_USERNAME != ''
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+        run: |
+          if [ -z "$DOCKERHUB_TOKEN" ]; then
+            echo "Docker Hub token unavailable; using anonymous pulls"; exit 0
+          fi
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
       - name: Build context excludes docs/, target/ and .git
         run: |
+          # Sentinels, so each exclusion is exercised (a fresh checkout has no target/).
+          mkdir -p target docs
+          touch target/context-sentinel docs/context-sentinel
           printf 'FROM scratch\nCOPY . /ctx\n' | docker build --quiet -f - --output "type=local,dest=$RUNNER_TEMP/context" .
           for path in docs target .git; do
             if [ -e "$RUNNER_TEMP/context/ctx/$path" ]; then
               echo "::error::the build context contains $path (check .dockerignore)"; exit 1
             fi
           done
+          rm -f target/context-sentinel docs/context-sentinel
       - name: Build the worker image
         run: docker build -f worker/Containerfile -t falcone-serverless-worker:ci .
       - name: Build the controller image
