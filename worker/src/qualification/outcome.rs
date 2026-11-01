@@ -113,10 +113,10 @@ pub fn root_fs_read_only(mountinfo: Option<&str>, write: Result<(), String>) -> 
     }
 }
 
-pub fn tmp_writable(write: Result<(), String>) -> Outcome {
-    match write {
-        Ok(()) => Outcome::passed("/tmp write probe succeeded"),
-        Err(reason) => Outcome::failed(reason, "io"),
+pub fn tmp_writable(round_trip: Result<(), String>) -> Outcome {
+    match round_trip {
+        Ok(()) => Outcome::passed("/tmp random payload readback verified"),
+        Err(reason) => Outcome::failed(reason, "posture"),
     }
 }
 
@@ -147,6 +147,15 @@ pub fn non_root_uid(status: Option<&str>) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tmp_failures_are_posture_failures() {
+        for error in ["write denied", "read denied", "readback differs"] {
+            let result = tmp_writable(Err(error.into()));
+            assert_eq!(result.status, Status::Failed);
+            assert_eq!(result.error_class, Some("posture"));
+        }
+    }
 
     fn status(outcome: Outcome) -> String {
         serde_json::to_value(outcome).unwrap()["status"]

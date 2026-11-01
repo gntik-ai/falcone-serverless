@@ -225,7 +225,7 @@ mod tests {
                 "root_fs_read_only",
                 "root mount is ro and write probe failed",
             ),
-            ("tmp_writable", "/tmp write probe succeeded"),
+            ("tmp_writable", "/tmp random payload readback verified"),
             (
                 "non_root_uid",
                 "uid=1000770000 gid=1000770000 (effective); uid set=[1000770000, 1000770000, 1000770000, 1000770000], gid set=[1000770000, 1000770000, 1000770000, 1000770000]",
