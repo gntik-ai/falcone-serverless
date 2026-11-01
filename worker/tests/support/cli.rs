@@ -1,15 +1,33 @@
 use super::{Config, Kube, Namespace, namespace_name, pinned_image};
 use serde_json::Value;
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+/// Runs one external command. `deadline` bounds the whole call: an implementation must stop
+/// the command and return an error at or shortly after it.
 pub trait Runner {
-    fn run(&self, program: &str, args: &[&str], input: Option<&Value>) -> Result<String, String>;
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<String, String>;
 }
+
+/// Total time allowed for one `execute` apart from namespace cleanup.
+const DEFAULT_BUDGET: Duration = Duration::from_secs(45 * 60);
+/// Own bound for namespace cleanup, which must run even when the budget is spent.
+const DEFAULT_CLEANUP: Duration = Duration::from_secs(90);
 
 pub struct Cli<R> {
     pub runner: R,
+    budget: Duration,
+    cleanup: Duration,
+    /// End of the current `execute` budget; unset outside `execute`.
+    limit: Cell<Option<Instant>>,
 }
 
 impl<R: Runner> Cli<R> {
@@ -17,6 +35,7 @@ impl<R: Runner> Cli<R> {
         let Config::Enabled { repo } = config else {
             return Ok(());
         };
+        self.limit.set(Some(Instant::now() + self.budget));
         let run = namespace_name();
         let image = self.build_push(repo, &run)?;
         let spec = super::pod_spec(&image)?;
@@ -24,12 +43,40 @@ impl<R: Runner> Cli<R> {
             super::NamespaceMode::Create => super::Session::create(self, &run, &spec)?,
             super::NamespaceMode::Shared(_) => super::Session::create_in(self, &run, &spec, mode)?,
         };
-        session.verify()?;
-        session.close()
+        let verified = session.verify();
+        // Cleanup always runs with its own bound; its failure is reported next to any other.
+        match (verified, session.close()) {
+            (Ok(()), closed) => closed,
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+        }
     }
 
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            budget: DEFAULT_BUDGET,
+            cleanup: DEFAULT_CLEANUP,
+            limit: Cell::new(None),
+        }
+    }
+
+    pub fn with_budget(mut self, budget: Duration) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    pub fn with_cleanup_timeout(mut self, cleanup: Duration) -> Self {
+        self.cleanup = cleanup;
+        self
+    }
+
+    /// Deadline of one command: at most `cap` from now and never past the remaining budget.
+    fn deadline(&self, cap: Duration) -> Instant {
+        let deadline = Instant::now() + cap;
+        self.limit
+            .get()
+            .map_or(deadline, |limit| limit.min(deadline))
     }
 
     pub fn build_push(&self, repo: &str, run: &str) -> Result<String, String> {
@@ -39,6 +86,7 @@ impl<R: Runner> Cli<R> {
             "podman",
             &["info", "--format", "{{.Host.Security.Rootless}}"],
             None,
+            self.deadline(Duration::from_secs(60)),
         )?;
         if rootless.trim() != "true" {
             return Err("rootless podman is required".into());
@@ -49,8 +97,12 @@ impl<R: Runner> Cli<R> {
         if !registry.contains('.') && !registry.contains(':') && registry != "localhost" {
             return Err("FS_TEST_IMAGE_REPO must include an explicit registry".into());
         }
-        self.runner
-            .run("podman", &["login", "--get-login", registry], None)?;
+        self.runner.run(
+            "podman",
+            &["login", "--get-login", registry],
+            None,
+            self.deadline(Duration::from_secs(60)),
+        )?;
         let tag = format!("{repo}:{run}");
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         self.runner.run(
@@ -66,6 +118,7 @@ impl<R: Runner> Cli<R> {
                 root.to_str().ok_or("non-UTF8 path")?,
             ],
             None,
+            self.deadline(Duration::from_secs(30 * 60)),
         )?;
         let scratch = Scratch::new()?;
         let digestfile = scratch.0.join("digest");
@@ -80,6 +133,7 @@ impl<R: Runner> Cli<R> {
                 &format!("docker://{tag}"),
             ],
             None,
+            self.deadline(Duration::from_secs(10 * 60)),
         )?;
         let digest =
             fs::read_to_string(&digestfile).map_err(|_| "podman push did not produce a digest")?;
@@ -113,6 +167,7 @@ impl<R: Runner> Kube for Cli<R> {
             "kubectl",
             &["--request-timeout=15s", "create", "-f", "-"],
             Some(&namespace.manifest()),
+            self.deadline(Duration::from_secs(30)),
         )?;
         Ok(())
     }
@@ -141,6 +196,7 @@ impl<R: Runner> Kube for Cli<R> {
                 "-",
             ],
             Some(pod),
+            self.deadline(Duration::from_secs(30)),
         )?;
         Ok(())
     }
@@ -152,9 +208,9 @@ impl<R: Runner> Kube for Cli<R> {
         timeout: Duration,
     ) -> Result<String, String> {
         Namespace::new(pod)?;
-        let deadline = std::time::Instant::now() + timeout.min(Duration::from_secs(180));
+        let deadline = self.deadline(timeout.min(Duration::from_secs(180)));
         loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 return Err("worker pod terminal-phase wait timed out".into());
             }
@@ -175,13 +231,14 @@ impl<R: Runner> Kube for Cli<R> {
                     "jsonpath={.status.phase}",
                 ],
                 None,
+                // The request timeout is the inner bound; the process bound adds a grace.
+                deadline.min(Instant::now() + Duration::from_secs(20)),
             )?;
             if matches!(phase.trim(), "Succeeded" | "Failed") {
                 return Ok(phase.trim().into());
             }
             std::thread::sleep(
-                Duration::from_millis(200)
-                    .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                Duration::from_millis(200).min(deadline.saturating_duration_since(Instant::now())),
             );
         }
     }
@@ -202,6 +259,7 @@ impl<R: Runner> Kube for Cli<R> {
                 "--tail=100",
             ],
             None,
+            self.deadline(Duration::from_secs(30)),
         )
     }
 
@@ -218,6 +276,8 @@ impl<R: Runner> Kube for Cli<R> {
                 "--timeout=60s",
             ],
             None,
+            // Cleanup is bounded by itself, not by a budget that may already be spent.
+            Instant::now() + self.cleanup,
         )?;
         Ok(())
     }
@@ -226,16 +286,34 @@ impl<R: Runner> Kube for Cli<R> {
 pub struct Process;
 
 impl Runner for Process {
-    fn run(&self, program: &str, args: &[&str], input: Option<&Value>) -> Result<String, String> {
-        use std::io::Write;
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<String, String> {
+        use std::io::{Read, Write};
+        use std::os::unix::process::CommandExt;
         use std::process::{Command, Stdio};
+        use std::sync::mpsc;
         let error = || {
             format!(
                 "{program} failed: verify the executable, ambient kubeconfig and rootless podman registry login; command output suppressed"
             )
         };
+        let timed_out =
+            || format!("{program} exceeded its deadline and was killed; command output suppressed");
+        if Instant::now() >= deadline {
+            return Err(timed_out());
+        }
+        let bytes = input
+            .map(|input| serde_json::to_vec(input).map_err(|_| "cannot serialize test manifest"))
+            .transpose()?;
         let mut child = Command::new(program)
             .args(args)
+            // Own process group, so a timeout also reaches helpers such as credential plugins.
+            .process_group(0)
             .stdin(if input.is_some() {
                 Stdio::piped()
             } else {
@@ -250,19 +328,58 @@ impl Runner for Process {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| error())?;
-        if let Some(input) = input {
-            let bytes = serde_json::to_vec(input).map_err(|_| "cannot serialize test manifest")?;
-            let result = child.stdin.take().ok_or_else(error)?.write_all(&bytes);
-            if result.is_err() {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error());
-            }
+        // Pipes are served on helper threads so a full pipe cannot stall the deadline poll.
+        let (wrote_tx, wrote) = mpsc::channel();
+        if let (Some(bytes), Some(mut stdin)) = (bytes, child.stdin.take()) {
+            std::thread::spawn(move || {
+                let _ = wrote_tx.send(stdin.write_all(&bytes).is_ok());
+            });
+        } else {
+            let _ = wrote_tx.send(true);
         }
-        let output = child.wait_with_output().map_err(|_| error())?;
-        if !output.status.success() {
+        let (read_tx, read) = mpsc::channel();
+        if let Some(mut stdout) = child.stdout.take() {
+            std::thread::spawn(move || {
+                let mut buffer = Vec::new();
+                let _ = read_tx.send(stdout.read_to_end(&mut buffer).map(|_| buffer));
+            });
+        } else {
+            let _ = read_tx.send(Ok(Vec::new()));
+        }
+        let group = rustix::process::Pid::from_raw(child.id() as i32);
+        let kill_group = |child: &mut std::process::Child| {
+            if let Some(group) = group {
+                let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+            }
+            let _ = child.kill();
+        };
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() >= deadline => {
+                    kill_group(&mut child);
+                    let _ = child.wait();
+                    return Err(timed_out());
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                Err(_) => {
+                    kill_group(&mut child);
+                    let _ = child.wait();
+                    return Err(error());
+                }
+            }
+        };
+        // A surviving helper can still hold a pipe open: bound the drain by the same deadline.
+        let wait = deadline.saturating_duration_since(Instant::now());
+        let output = read.recv_timeout(wait);
+        let wrote = wrote.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        let (Ok(output), Ok(wrote)) = (output, wrote) else {
+            kill_group(&mut child);
+            return Err(timed_out());
+        };
+        if !status.success() || !wrote {
             return Err(error());
         }
-        String::from_utf8(output.stdout).map_err(|_| error())
+        String::from_utf8(output.map_err(|_| error())?).map_err(|_| error())
     }
 }

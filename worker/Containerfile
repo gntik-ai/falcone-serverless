@@ -1,8 +1,11 @@
 FROM docker.io/library/rust:1.99.1-slim-trixie@sha256:b8e062b1c3a80183df83d9ba187cadd2b5ab84bc78d453dbfeb2fccd5f982247 AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY compiler/Cargo.toml compiler/Cargo.toml
+COPY compiler/src compiler/src
 COPY worker/Cargo.toml worker/Cargo.toml
 COPY worker/src worker/src
+COPY docs/contracts docs/contracts
 RUN cargo build --release --locked -p falcone-serverless-worker
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e

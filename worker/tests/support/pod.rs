@@ -71,14 +71,23 @@ pub(super) fn validate_spec(spec: &Value) -> Result<(), String> {
                 .join(", ")
         ));
     }
+    let pinned = |key: &str| match spec.get(key) {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(containers)) => containers
+            .iter()
+            .all(|container| container["image"].as_str().is_some_and(pinned_image)),
+        Some(_) => false,
+    };
     if spec["restartPolicy"] != "Never"
-        || spec["containers"].as_array().is_none_or(|containers| {
-            containers
-                .iter()
-                .any(|container| !container["image"].as_str().is_some_and(pinned_image))
-        })
+        || spec["containers"].as_array().is_none()
+        || !pinned("containers")
+        || !pinned("initContainers")
     {
         return Err("test pod requires restartPolicy Never and digest-pinned images".into());
+    }
+    // Ephemeral containers bypass the image and posture checks above; this harness runs one pod.
+    if spec.get("ephemeralContainers").is_some() {
+        return Err("test pod refuses ephemeralContainers".into());
     }
     Ok(())
 }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Status: Proposed — 2026-10-30. **R3 (tenant isolation).** This records a proposal, not permission to relax the current hard rules. Acceptance requires a second reviewer and explicit operator approval. The operator must apply the AGENTS.md amendments below after acceptance; makers never edit that protected file. Completion of the broader rollout depends on that operator gate. This docs-only ChangeSet neither implements the modes nor claims their enforcement is qualified.
+Status: Accepted — 2026-11-01 (proposed 2026-10-30). **R3 (tenant isolation).** Operator decision: namespace creation stays available and is switchable, either by creating a dedicated namespace (create mode) or by using a shared, preprovisioned namespace; the defaults `namespaceMode=preprovisioned` and `testNamespaceMode=create` are unchanged. Acceptance records that decision only. It does not by itself relax any hard rule: the operator must still apply the AGENTS.md amendments below (makers never edit that protected file), and the independent second review and operator approval that R3 requires remain conditions of any ChangeSet that implements a mode. This docs-only ChangeSet neither implements the modes nor claims their enforcement is qualified.
 
 ## Context
 

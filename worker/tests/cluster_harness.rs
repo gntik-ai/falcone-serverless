@@ -11,7 +11,7 @@ mod support;
 use falcone_serverless_worker::{Role, check};
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use support::cli::{Cli, Process, Runner};
 use support::{
     Config, Kube, Namespace, NamespaceMode, Session, deployment, final_uid, namespace_name,
@@ -354,18 +354,31 @@ type Invocation = (String, Vec<String>, Option<Value>);
 #[derive(Default)]
 struct Commands {
     calls: RefCell<Vec<Invocation>>,
+    deadlines: RefCell<Vec<Instant>>,
     fail: bool,
+    /// kubectl calls naming one of these words run a real `sleep 600` under the deadline.
+    hang: &'static [&'static str],
     rootless: bool,
     phase: Option<&'static str>,
 }
 
 impl Runner for Commands {
-    fn run(&self, program: &str, args: &[&str], input: Option<&Value>) -> Result<String, String> {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        deadline: Instant,
+    ) -> Result<String, String> {
         self.calls.borrow_mut().push((
             program.into(),
             args.iter().map(|s| (*s).into()).collect(),
             input.cloned(),
         ));
+        self.deadlines.borrow_mut().push(deadline);
+        if program == "kubectl" && self.hang.iter().any(|word| args.contains(word)) {
+            return Process.run("sh", &["-c", "sleep 600"], None, deadline);
+        }
         if self.fail {
             return Err("credentials or executable unavailable".into());
         }
@@ -536,18 +549,26 @@ fn enabled_cluster_flow_builds_pushes_runs_and_cleans_up() {
 #[test]
 fn subprocess_errors_suppress_output_and_name_ambient_prerequisites() {
     let runner = Process;
+    let soon = || Instant::now() + Duration::from_secs(20);
     let error = runner
-        .run("sh", &["-c", "printf output-canary >&2; exit 1"], None)
+        .run(
+            "sh",
+            &["-c", "printf output-canary >&2; exit 1"],
+            None,
+            soon(),
+        )
         .unwrap_err();
     assert!(!error.contains("output-canary"));
     assert!(error.contains("ambient"));
     assert_eq!(
-        runner.run("sh", &["-c", "printf ready"], None).unwrap(),
+        runner
+            .run("sh", &["-c", "printf ready"], None, soon())
+            .unwrap(),
         "ready"
     );
     assert!(
         runner
-            .run("/nonexistent-fs-test-executable", &[], None)
+            .run("/nonexistent-fs-test-executable", &[], None, soon())
             .is_err()
     );
 }
@@ -569,6 +590,222 @@ fn explicit_cleanup_reports_failure_without_deleting_twice() {
                 .count(),
             1
         );
+    }
+}
+
+fn with_init_container(image: String) -> Value {
+    let mut spec = pod_spec(&self::image()).unwrap();
+    let mut init = spec["containers"][0].clone();
+    init["name"] = json!("init");
+    init["image"] = json!(image);
+    spec["initContainers"] = json!([init]);
+    spec
+}
+
+#[test]
+fn init_containers_need_digest_pinned_images_and_ephemeral_containers_are_refused() {
+    let kube = FakeKube::default();
+    let spec = with_init_container(image());
+    assert!(check(&deployment(&spec), Role::GuestWorker).is_empty());
+    Session::create(&kube, "fs-test-unit", &spec).unwrap();
+    assert_eq!(kube.calls.borrow().first(), Some(&"create namespace"));
+    for invalid in [
+        "repo:latest".into(),
+        format!("repo@sha256:{}", "a".repeat(63)),
+        format!("repo@sha256:{}", "A".repeat(64)),
+    ] {
+        let kube = FakeKube::default();
+        let error = Session::create(&kube, "fs-test-unit", &with_init_container(invalid))
+            .err()
+            .unwrap();
+        assert!(error.contains("digest-pinned"), "{error}");
+        assert!(kube.calls.borrow().is_empty());
+    }
+    for ephemeral in [json!([]), json!([{"name": "debug", "image": image()}])] {
+        let kube = FakeKube::default();
+        let mut spec = pod_spec(&image()).unwrap();
+        spec["ephemeralContainers"] = ephemeral;
+        assert!(Session::create(&kube, "fs-test-unit", &spec).is_err());
+        assert!(kube.calls.borrow().is_empty());
+    }
+}
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&path);
+    std::fs::create_dir_all(&path).unwrap();
+    path
+}
+
+fn process_exists(pid: &str) -> bool {
+    std::path::Path::new("/proc").join(pid).exists()
+}
+
+fn is_zombie(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .map(|stat| {
+            stat.rsplit(')')
+                .next()
+                .unwrap_or("")
+                .trim_start()
+                .starts_with('Z')
+        })
+        .unwrap_or(false)
+}
+
+#[test]
+fn hanging_subprocess_is_killed_with_its_group_and_reaped_at_the_deadline() {
+    let dir = scratch("fs-test-hang");
+    let pids = dir.join("pids");
+    let started = Instant::now();
+    let error = Process
+        .run(
+            "sh",
+            &[
+                "-c",
+                "echo $$ > \"$0\"; sleep 600 & echo $! >> \"$0\"; wait",
+                pids.to_str().unwrap(),
+            ],
+            None,
+            started + Duration::from_secs(1),
+        )
+        .unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(error.contains("deadline"), "{error}");
+    let text = std::fs::read_to_string(&pids).unwrap();
+    let [child, grandchild] = text.lines().collect::<Vec<_>>()[..] else {
+        panic!("expected two pids: {text}");
+    };
+    assert!(!process_exists(child), "child {child} was not reaped");
+    // The grandchild is reparented; once killed it is gone or awaits its new parent's reap.
+    let gone = (0..100).any(|_| {
+        let gone = !process_exists(grandchild) || is_zombie(grandchild);
+        if !gone {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        gone
+    });
+    assert!(gone, "grandchild {grandchild} survived the group kill");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn an_expired_deadline_spawns_nothing() {
+    let dir = scratch("fs-test-expired");
+    let marker = dir.join("ran");
+    let error = Process
+        .run(
+            "sh",
+            &["-c", "touch \"$0\"", marker.to_str().unwrap()],
+            None,
+            Instant::now(),
+        )
+        .unwrap_err();
+    assert!(error.contains("deadline"));
+    assert!(!marker.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn large_pipes_in_both_directions_neither_deadlock_nor_truncate() {
+    let deadline = || Instant::now() + Duration::from_secs(20);
+    let output = Process
+        .run(
+            "sh",
+            &["-c", "head -c 400000 /dev/zero | tr '\\0' a"],
+            None,
+            deadline(),
+        )
+        .unwrap();
+    assert_eq!(output.len(), 400_000);
+    let big = json!({"blob": "x".repeat(1_000_000)});
+    let counted = Process
+        .run("sh", &["-c", "wc -c"], Some(&big), deadline())
+        .unwrap();
+    assert_eq!(counted.trim(), "1000011");
+    // A child that never reads its stdin cannot hold a large write past the deadline.
+    let started = Instant::now();
+    assert!(
+        Process
+            .run(
+                "sh",
+                &["-c", "sleep 600"],
+                Some(&big),
+                started + Duration::from_secs(1)
+            )
+            .is_err()
+    );
+    assert!(started.elapsed() < Duration::from_secs(10));
+}
+
+fn enabled() -> Config {
+    Config::Enabled {
+        repo: "registry.invalid/worker".into(),
+    }
+}
+
+#[test]
+fn hung_kubectl_ends_the_wait_at_the_budget_and_cleanup_still_runs() {
+    let cli = Cli::new(Commands {
+        rootless: true,
+        hang: &["get"],
+        ..Commands::default()
+    })
+    .with_budget(Duration::from_secs(2));
+    let started = Instant::now();
+    let error = cli.execute(&enabled(), &NamespaceMode::Create).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(error.contains("deadline"), "{error}");
+    let calls = cli.runner.calls.borrow();
+    assert!(calls.last().unwrap().1.contains(&"delete".into()));
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|c| c.1.contains(&"delete".into()))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn hung_cleanup_is_killed_on_its_own_deadline_and_reported() {
+    let cli = Cli::new(Commands {
+        rootless: true,
+        hang: &["get", "delete"],
+        ..Commands::default()
+    })
+    .with_budget(Duration::from_secs(1))
+    .with_cleanup_timeout(Duration::from_secs(1));
+    let started = Instant::now();
+    let error = cli.execute(&enabled(), &NamespaceMode::Create).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(30));
+    assert!(error.contains("deadline"), "{error}");
+    assert!(error.contains("operator cleanup required"), "{error}");
+    assert!(error.contains("fs-test-"), "{error}");
+}
+
+#[test]
+fn every_command_deadline_comes_from_the_remaining_budget_except_cleanup() {
+    let started = Instant::now();
+    let cli = Cli::new(Commands {
+        rootless: true,
+        ..Commands::default()
+    })
+    .with_budget(Duration::from_secs(5))
+    .with_cleanup_timeout(Duration::from_secs(60));
+    cli.execute(&enabled(), &NamespaceMode::Create).unwrap();
+    let finished = Instant::now();
+    let calls = cli.runner.calls.borrow();
+    let deadlines = cli.runner.deadlines.borrow();
+    assert_eq!(calls.len(), deadlines.len());
+    for ((_, args, _), deadline) in calls.iter().zip(deadlines.iter()) {
+        if args.contains(&"delete".into()) {
+            assert!(*deadline > started + Duration::from_secs(5));
+            assert!(*deadline <= Instant::now() + Duration::from_secs(60));
+        } else {
+            assert!(*deadline > started);
+            assert!(*deadline <= finished + Duration::from_secs(5));
+        }
     }
 }
 
