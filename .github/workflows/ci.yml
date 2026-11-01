@@ -64,3 +64,42 @@ jobs:
         run: |
           python3 -m json.tool docs/backlog.json > /dev/null
           python3 -m json.tool docs/requirements-and-stories.json > /dev/null
+
+  images:
+    name: images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      # Authenticated pulls of the docker.io builder images (anonymous pulls are rate-limited
+      # per runner IP). Skipped when the secret is unavailable, e.g. on pull requests from forks.
+      - name: Log in to Docker Hub (pull only)
+        if: env.DOCKERHUB_USERNAME != ''
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+      - name: Build context excludes docs/, target/ and .git
+        run: |
+          printf 'FROM scratch\nCOPY . /ctx\n' | docker build --quiet -f - --output "type=local,dest=$RUNNER_TEMP/context" .
+          for path in docs target .git; do
+            if [ -e "$RUNNER_TEMP/context/ctx/$path" ]; then
+              echo "::error::the build context contains $path (check .dockerignore)"; exit 1
+            fi
+          done
+      - name: Build the worker image
+        run: docker build -f worker/Containerfile -t falcone-serverless-worker:ci .
+      - name: Build the controller image
+        run: docker build -f controller/Containerfile -t falcone-serverless-controller:ci .
+      - name: Images run as a numeric non-root user
+        run: |
+          for image in falcone-serverless-worker:ci falcone-serverless-controller:ci; do
+            user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            echo "$image runs as '$user'"
+            if ! printf '%s' "$user" | grep -Eq '^[1-9][0-9]*(:[0-9]+)?$'; then
+              echo "::error::$image must run as a numeric non-root user (got '$user')"; exit 1
+            fi
+          done
