@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
@@ -106,14 +108,27 @@ func TestReleaseWorkflowWritesOnlyInTheReleaseAssetJob(t *testing.T) {
 	}
 }
 
-func TestReleaseWorkflowNeverOverwritesImmutableTags(t *testing.T) {
+func TestReleaseWorkflowSerializesEveryPublishingRun(t *testing.T) {
 	text := readFile(t, releaseWorkflow)
+	// One fixed group: a v1.2.3 tag push, the Release for it and a manual 1.2.3 run (or two
+	// versions of one commit, sharing its sha tag) can never race on an immutable tag.
+	if !strings.Contains(text, "concurrency:\n") || !strings.Contains(text, "  group: release-images\n  cancel-in-progress: false\n") {
+		t.Error("every publishing run must share one concurrency group")
+	}
+}
+
+func TestReleaseWorkflowKeepsSinglePlatformDigests(t *testing.T) {
+	text := readFile(t, releaseWorkflow)
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "imagetools create") && !strings.Contains(line, "--prefer-index=false") {
+			t.Errorf("imagetools create without --prefer-index=false changes the digest: %s", strings.TrimSpace(line))
+		}
+	}
 	for _, want := range []string{
-		"refusing to overwrite an immutable tag",
-		"mode=existing",
-		"${{ steps.refs.outputs.version_ref }}\n            ${{ steps.refs.outputs.sha_ref }}",
+		"run: bash .github/scripts/release-image-refs.sh ",
+		"if: steps.refs.outputs.mode == 'retag'",
+		"if: steps.refs.outputs.mode == 'build'",
 		"name: Verify the pushed references",
-		// :latest moves only for tag pushes, in its own guarded step.
 		"if [ \"$EVENT\" = push ]; then latest=true; fi",
 		"if: env.PUSH == 'true' && env.LATEST == 'true'",
 	} {
@@ -127,6 +142,101 @@ func TestReleaseWorkflowNeverOverwritesImmutableTags(t *testing.T) {
 			!strings.Contains(line, "Move :latest") && !strings.Contains(line, "${REPO}:latest") {
 			t.Errorf(":latest outside its guarded step: %s", trimmed)
 		}
+	}
+}
+
+const (
+	digestA = "sha256:" + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	digestB = "sha256:" + "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// fakeImagetools answers `inspect --format ... <ref>` from per-reference states: a digest,
+// "absent" (manifest not found), "error" (any other registry failure) or "malformed".
+const fakeImagetools = `#!/usr/bin/env bash
+ref="${@: -1}"
+state="$(cat "$FAKE_DIR/$(printf '%s' "$ref" | tr '/:' '__')" 2>/dev/null || echo absent)"
+case "$state" in
+  absent) echo "ERROR: docker.io/x: not found" >&2; exit 1 ;;
+  error) echo "ERROR: unexpected status: 429 Too Many Requests" >&2; exit 1 ;;
+  malformed) echo '{"digest":"sha256:XYZ"}' ;;
+  *) printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s"}\n' "$state" ;;
+esac
+`
+
+func runRefs(t *testing.T, push string, states map[string]string) (map[string]string, string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	fake := dir + "/imagetools"
+	if err := os.WriteFile(fake, []byte(fakeImagetools), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for ref, state := range states {
+		name := strings.NewReplacer("/", "_", ":", "_").Replace(ref)
+		if err := os.WriteFile(dir+"/"+name, []byte(state), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cmd := exec.Command("bash", "../.github/scripts/release-image-refs.sh",
+		"docker.io/gntik/falcone-serverless-worker", "1.2.3", "0123456789ab", push)
+	cmd.Env = append(os.Environ(), "IMAGETOOLS="+fake, "FAKE_DIR="+dir)
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	out := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		if key, value, ok := strings.Cut(line, "="); ok {
+			out[key] = value
+		}
+	}
+	return out, stderr.String(), err
+}
+
+func TestReleaseImageRefsDecidesFromTheRegistryState(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed")
+	}
+	const version = "docker.io/gntik/falcone-serverless-worker:1.2.3"
+	const sha = "docker.io/gntik/falcone-serverless-worker:sha-0123456789ab"
+	cases := []struct {
+		name     string
+		push     string
+		states   map[string]string
+		mode     string
+		existing string
+		fails    string
+	}{
+		{name: "both absent: build", push: "true", states: nil, mode: "build"},
+		{name: "dry run: no lookups", push: "false", states: map[string]string{version: "error", sha: "error"}, mode: "build"},
+		{name: "same digest: keep", push: "true", states: map[string]string{version: digestA, sha: digestA}, mode: "existing", existing: digestA},
+		{name: "commit already published: retag", push: "true", states: map[string]string{sha: digestA}, mode: "retag", existing: digestA},
+		{name: "version from another commit", push: "true", states: map[string]string{version: digestA}, fails: "refusing to overwrite an immutable tag"},
+		{name: "different digests", push: "true", states: map[string]string{version: digestA, sha: digestB}, fails: "refusing to overwrite an immutable tag"},
+		{name: "registry error is not absence", push: "true", states: map[string]string{version: "error", sha: "error"}, fails: "refusing to guess that it is absent"},
+		{name: "one lookup fails", push: "true", states: map[string]string{version: "error"}, fails: "refusing to guess that it is absent"},
+		{name: "malformed digest", push: "true", states: map[string]string{version: "malformed", sha: digestA}, fails: "malformed digest"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, stderr, err := runRefs(t, c.push, c.states)
+			if c.fails != "" {
+				if err == nil || !strings.Contains(stderr, c.fails) {
+					t.Fatalf("expected a failure with %q, got err=%v stderr=%q out=%v", c.fails, err, stderr, out)
+				}
+				if _, ok := out["mode"]; ok {
+					t.Fatalf("a failed decision must not print a mode: %v", out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected failure: %v %s", err, stderr)
+			}
+			if out["mode"] != c.mode || out["existing_digest"] != c.existing {
+				t.Fatalf("got mode=%q existing=%q, want %q %q", out["mode"], out["existing_digest"], c.mode, c.existing)
+			}
+			if out["version_ref"] != version || out["sha_ref"] != sha {
+				t.Fatalf("references: %v", out)
+			}
+		})
 	}
 }
 

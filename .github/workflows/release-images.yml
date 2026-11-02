@@ -6,8 +6,9 @@ name: release-images
 # Triggers: a strict vX.Y.Z tag push, a published GitHub Release, or a manual run.
 # Every publish writes the version tag (X.Y.Z) and an immutable sha-<commit> tag; tag
 # pushes also move :latest. A version or sha tag that already exists is never
-# overwritten: an existing pair that resolves to one digest is verified and kept, any
-# other combination fails. release-images.json (image, reference, digest) goes to the
+# overwritten (.github/scripts/release-image-refs.sh decides, failing on any registry
+# error): an existing pair that resolves to one digest is kept, a version of a commit
+# already published under its sha tag points at that digest, any other state fails. release-images.json (image, reference, digest) goes to the
 # run summary and, for a published Release, to the Release assets; the chart pins its
 # images by digest from it (FR-DEP-02). A manual run with dry_run builds without
 # pushing. Images are not signed here (FR-DEP-02 signing is tracked separately).
@@ -32,8 +33,9 @@ permissions:
   contents: read
 
 concurrency:
-  # A tag push and the Release published for that tag run one after the other.
-  group: release-images-${{ github.event.release.tag_name || inputs.version || github.ref_name }}
+  # Every publishing run, whatever its trigger or version spelling, runs one at a time:
+  # runs that share a version or a commit's sha tag can never race on an immutable tag.
+  group: release-images
   cancel-in-progress: false
 
 env:
@@ -145,33 +147,13 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Compute references and check existing immutable tags
         id: refs
-        run: |
-          repo="docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}"
-          version_ref="${repo}:${VERSION}"
-          sha_ref="${repo}:sha-${SHORT_SHA}"
-          digest_of() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>/dev/null | jq -r '.digest // empty'; }
-          version_digest=""; sha_digest=""
-          if [ "$PUSH" = true ]; then
-            version_digest="$(digest_of "$version_ref" || true)"
-            sha_digest="$(digest_of "$sha_ref" || true)"
-          fi
-          mode=build
-          if [ -n "$version_digest" ] || [ -n "$sha_digest" ]; then
-            if [ "$version_digest" = "$sha_digest" ]; then
-              mode=existing
-              echo "$version_ref and $sha_ref already resolve to $version_digest: kept, not rebuilt"
-            else
-              echo "::error::$version_ref ($version_digest) and $sha_ref ($sha_digest) do not resolve to one digest; refusing to overwrite an immutable tag"
-              exit 1
-            fi
-          fi
-          {
-            echo "repo=$repo"
-            echo "version_ref=$version_ref"
-            echo "sha_ref=$sha_ref"
-            echo "mode=$mode"
-            echo "existing_digest=$version_digest"
-          } >> "$GITHUB_OUTPUT"
+        run: bash .github/scripts/release-image-refs.sh "docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}" "$VERSION" "$SHORT_SHA" "$PUSH" >> "$GITHUB_OUTPUT"
+      - name: Point the version at the commit's existing image
+        if: steps.refs.outputs.mode == 'retag'
+        env:
+          VERSION_REF: ${{ steps.refs.outputs.version_ref }}
+          SHA_REF: ${{ steps.refs.outputs.sha_ref }}
+        run: docker buildx imagetools create --prefer-index=false --tag "$VERSION_REF" "$SHA_REF"
       - name: Build${{ needs.meta.outputs.push == 'true' && ' and push' || ' (dry run)' }}
         id: build
         if: steps.refs.outputs.mode == 'build'
@@ -200,7 +182,7 @@ jobs:
           digest_of() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" | jq -r '.digest'; }
           version_digest="$(digest_of "$VERSION_REF")"
           sha_digest="$(digest_of "$SHA_REF")"
-          expected="$BUILT"; [ "$MODE" = existing ] && expected="$EXISTING"
+          expected="$BUILT"; [ "$MODE" != build ] && expected="$EXISTING"
           if [ "$version_digest" != "$sha_digest" ] || [ "$version_digest" != "$expected" ]; then
             echo "::error::$VERSION_REF ($version_digest), $SHA_REF ($sha_digest) and the expected digest ($expected) differ"; exit 1
           fi
@@ -212,7 +194,8 @@ jobs:
           REPO: ${{ steps.refs.outputs.repo }}
           DIGEST: ${{ steps.verify.outputs.digest }}
         run: |
-          docker buildx imagetools create --tag "${REPO}:latest" "${REPO}@${DIGEST}"
+          # --prefer-index=false keeps the single-platform manifest (and its digest) as is.
+          docker buildx imagetools create --prefer-index=false --tag "${REPO}:latest" "${REPO}@${DIGEST}"
           actual="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${REPO}:latest" | jq -r '.digest')"
           [ "$actual" = "$DIGEST" ] || { echo "::error::${REPO}:latest resolves to $actual, not $DIGEST"; exit 1; }
       - name: Record the image
