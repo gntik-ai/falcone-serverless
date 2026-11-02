@@ -296,6 +296,9 @@ fn guard_deployment(object: &Value, run: &Run) -> Result<(), String> {
         return Err("refused: the pod must run exactly one container".into());
     }
     let container = &pod["containers"][0];
+    if !container["securityContext"]["runAsUser"].is_null() {
+        return Err("refused: the container must not override the pod runAsUser".into());
+    }
     if !container["image"].as_str().is_some_and(pinned_image) {
         return Err("refused: image must be pinned by @sha256 digest".into());
     }

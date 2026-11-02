@@ -929,6 +929,9 @@ fn a_fixture_that_omits_or_overrides_a_posture_field_is_refused() {
         (format!("{POD}/runAsNonRoot"), json!(false)),
         (format!("{POD}/runAsUser"), json!(0)),
         (format!("{POD}/runAsUser"), json!(1_000_770_000_u64)),
+        (format!("{CONTAINER}/runAsUser"), json!(IMAGE_UID)),
+        (format!("{CONTAINER}/runAsUser"), json!(1_000_770_000_u64)),
+        (format!("{CONTAINER}/runAsUser"), json!(0)),
         (
             format!("{POD}/seccompProfile"),
             json!({"type": "Unconfined"}),
@@ -993,6 +996,10 @@ fn the_guard_checks_the_rendered_uid_and_namespace() {
         }
         assert!(render::guard(Phase::Fixture, &object, &run).is_err());
     }
+    let mut container_uid = rendered.clone();
+    container_uid["spec"]["template"]["spec"]["containers"][0]["securityContext"]["runAsUser"] =
+        json!(IMAGE_UID);
+    assert!(render::guard(Phase::Fixture, &container_uid, &run).is_err());
     let mut elsewhere = rendered.clone();
     elsewhere["metadata"]["namespace"] = json!("in-falcone-staging");
     assert!(render::guard(Phase::Fixture, &elsewhere, &run).is_err());
