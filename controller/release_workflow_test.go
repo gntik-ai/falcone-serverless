@@ -125,7 +125,7 @@ func TestReleaseWorkflowKeepsSinglePlatformDigests(t *testing.T) {
 		}
 	}
 	for _, want := range []string{
-		"run: bash .github/scripts/release-image-refs.sh ",
+		"bash .github/scripts/release-image-refs.sh \"docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}\" ",
 		"if: steps.refs.outputs.mode == 'retag'",
 		"if: steps.refs.outputs.mode == 'build'",
 		"name: Verify the pushed references",
@@ -166,7 +166,7 @@ case "$state" in
 esac
 `
 
-func runRefs(t *testing.T, push string, states map[string]string) (map[string]string, string, error) {
+func runRefs(t *testing.T, push, newRepository string, states map[string]string) (map[string]string, string, error) {
 	t.Helper()
 	dir := t.TempDir()
 	fake := dir + "/imagetools"
@@ -180,7 +180,7 @@ func runRefs(t *testing.T, push string, states map[string]string) (map[string]st
 		}
 	}
 	cmd := exec.Command("bash", "../.github/scripts/release-image-refs.sh",
-		"docker.io/gntik/falcone-serverless-worker", "1.2.3", "0123456789ab", push)
+		"docker.io/gntik/falcone-serverless-worker", "1.2.3", "0123456789ab", push, newRepository)
 	cmd.Env = append(os.Environ(), "IMAGETOOLS="+fake, "FAKE_DIR="+dir)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -203,6 +203,7 @@ func TestReleaseImageRefsDecidesFromTheRegistryState(t *testing.T) {
 	cases := []struct {
 		name     string
 		push     string
+		newRepo  string
 		states   map[string]string
 		mode     string
 		existing string
@@ -220,10 +221,16 @@ func TestReleaseImageRefsDecidesFromTheRegistryState(t *testing.T) {
 		{name: "a token endpoint 404 is not absence", push: "true", states: map[string]string{version: "token404", sha: "token404"}, fails: "refusing to guess that it is absent"},
 		{name: "a missing repository is not absence", push: "true", states: map[string]string{version: "norepo", sha: "norepo"}, fails: "refusing to guess that it is absent"},
 		{name: "not found for another reference is not absence", push: "true", states: map[string]string{version: "otherref", sha: "otherref"}, fails: "refusing to guess that it is absent"},
+		{name: "a repository the first push creates: build without lookups", push: "true", newRepo: "true", states: map[string]string{version: "norepo", sha: "norepo"}, mode: "build"},
+		{name: "an existing repository still decides from its tags", push: "true", newRepo: "false", states: map[string]string{version: digestA}, fails: "refusing to overwrite an immutable tag"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			out, stderr, err := runRefs(t, c.push, c.states)
+			newRepo := c.newRepo
+			if newRepo == "" {
+				newRepo = "false"
+			}
+			out, stderr, err := runRefs(t, c.push, newRepo, c.states)
 			if c.fails != "" {
 				if err == nil || !strings.Contains(stderr, c.fails) {
 					t.Fatalf("expected a failure with %q, got err=%v stderr=%q out=%v", c.fails, err, stderr, out)
@@ -257,5 +264,30 @@ func TestReleaseWorkflowDryRunPushesNothing(t *testing.T) {
 	}
 	if !strings.Contains(jobs["build"], "push: ${{ needs.meta.outputs.push == 'true' }}") {
 		t.Error("the build pushes only when the run publishes")
+	}
+}
+
+// The first publish may create the Docker Hub repositories, but only from a manual run with
+// create_repositories, and every push then requires its repository to be public.
+func TestReleaseWorkflowCreatesRepositoriesOnlyWhenAsked(t *testing.T) {
+	text := readFile(t, releaseWorkflow)
+	jobs := workflowJobs(t, text)
+	if !strings.Contains(jobs["meta"], `if [ "$EVENT" = workflow_dispatch ] && [ "$CREATE_REPOSITORIES" = true ] && [ "$push" = true ]; then create=true; fi`) {
+		t.Error("only a manual publishing run may create repositories")
+	}
+	if !strings.Contains(jobs["preflight"], `if [ "$status" = 404 ] && [ "$CREATE" = true ]; then`) {
+		t.Error("the preflight accepts a missing repository only in a create_repositories run")
+	}
+	if !strings.Contains(jobs["build"], `"$PUSH" "$new_repository" >> "$GITHUB_OUTPUT"`) ||
+		!strings.Contains(jobs["build"], `if [ "$PUSH" = true ] && [ "$CREATE" = true ]; then`) {
+		t.Error("the references step treats a repository as new only in a create_repositories run")
+	}
+	public, ok := strings.CutPrefix(jobs["build"][strings.Index(jobs["build"], "- name: The repository is public"):], "- name: The repository is public\n")
+	if !ok || !strings.Contains(public, "if: env.PUSH == 'true'") || !strings.Contains(public, "is_private") {
+		t.Error("every push checks that its repository is public")
+	}
+	if strings.Index(jobs["build"], "name: The repository is public") < strings.Index(jobs["build"], "name: Verify the pushed references") ||
+		strings.Index(jobs["build"], "name: The repository is public") > strings.Index(jobs["build"], "name: Move :latest") {
+		t.Error("the visibility check runs after the push is verified and before :latest moves")
 	}
 }

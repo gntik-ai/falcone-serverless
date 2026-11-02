@@ -12,6 +12,10 @@ name: release-images
 # run summary and, for a published Release, to the Release assets; the chart pins its
 # images by digest from it (FR-DEP-02). A manual run with dry_run builds without
 # pushing. Images are not signed here (FR-DEP-02 signing is tracked separately).
+#
+# The first publish creates the Docker Hub repositories: run it manually with
+# create_repositories (and dry_run off). Only then may a repository that does not exist yet
+# be pushed to, and every push checks afterwards that its repository is public.
 
 on:
   push:
@@ -28,6 +32,10 @@ on:
         description: 'Build without pushing'
         type: boolean
         default: true
+      create_repositories:
+        description: 'First publish: let the push create a missing repository (it must end up public)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,6 +62,7 @@ jobs:
       push: ${{ steps.meta.outputs.push }}
       latest: ${{ steps.meta.outputs.latest }}
       short_sha: ${{ steps.meta.outputs.short_sha }}
+      create: ${{ steps.meta.outputs.create }}
     steps:
       - name: Resolve the version and what this run publishes
         id: meta
@@ -62,6 +71,7 @@ jobs:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
           INPUT_VERSION: ${{ inputs.version }}
           DRY_RUN: ${{ inputs.dry_run }}
+          CREATE_REPOSITORIES: ${{ inputs.create_repositories }}
           REF_NAME: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
         run: |
@@ -77,13 +87,16 @@ jobs:
           push=true; latest=false
           if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then push=false; fi
           if [ "$EVENT" = push ]; then latest=true; fi
+          create=false
+          if [ "$EVENT" = workflow_dispatch ] && [ "$CREATE_REPOSITORIES" = true ] && [ "$push" = true ]; then create=true; fi
           {
             echo "version=$version"
             echo "push=$push"
             echo "latest=$latest"
             echo "short_sha=${SHA:0:12}"
+            echo "create=$create"
           } >> "$GITHUB_OUTPUT"
-          echo "version=$version push=$push latest=$latest"
+          echo "version=$version push=$push latest=$latest create=$create"
 
   preflight:
     name: preflight
@@ -100,13 +113,19 @@ jobs:
           for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
             if [ -z "${!name}" ]; then echo "::error::the repository secret $name is not set"; exit 1; fi
           done
-      # The workflow never creates a Docker Hub repository or changes its visibility.
-      - name: Target repositories exist and are public
+      # The workflow never changes a repository's visibility. A missing repository is created
+      # by the first push only when the run was started with create_repositories.
+      - name: Target repositories are public, or created by this run
+        env:
+          CREATE: ${{ needs.meta.outputs.create }}
         run: |
           for image in falcone-serverless-worker falcone-serverless-controller; do
             status="$(curl -sS -o repo.json -w '%{http_code}' "https://hub.docker.com/v2/repositories/${DOCKERHUB_NAMESPACE}/${image}/")"
+            if [ "$status" = 404 ] && [ "$CREATE" = true ]; then
+              echo "docker.io/${DOCKERHUB_NAMESPACE}/${image}: absent, the first push creates it"; continue
+            fi
             if [ "$status" != 200 ]; then
-              echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${image} does not exist (HTTP $status); create it as a public repository"; exit 1
+              echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${image} is not publicly visible (HTTP $status); for the first publish, run this workflow manually with create_repositories"; exit 1
             fi
             if [ "$(jq -r '.is_private' repo.json)" != false ]; then
               echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${image} is not public"; exit 1
@@ -150,7 +169,17 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Compute references and check existing immutable tags
         id: refs
-        run: bash .github/scripts/release-image-refs.sh "docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}" "$VERSION" "$SHORT_SHA" "$PUSH" >> "$GITHUB_OUTPUT"
+        env:
+          CREATE: ${{ needs.meta.outputs.create }}
+        run: |
+          # A repository that is not publicly visible yet is new only in a create_repositories
+          # run (the preflight refused it otherwise): it holds no tag, so nothing is looked up.
+          new_repository=false
+          if [ "$PUSH" = true ] && [ "$CREATE" = true ]; then
+            status="$(curl -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/${DOCKERHUB_NAMESPACE}/${IMAGE}/")"
+            if [ "$status" = 404 ]; then new_repository=true; fi
+          fi
+          bash .github/scripts/release-image-refs.sh "docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}" "$VERSION" "$SHORT_SHA" "$PUSH" "$new_repository" >> "$GITHUB_OUTPUT"
       - name: Point the version at the commit's existing image
         if: steps.refs.outputs.mode == 'retag'
         env:
@@ -191,6 +220,21 @@ jobs:
           fi
           echo "digest=$version_digest" >> "$GITHUB_OUTPUT"
           echo "$VERSION_REF = $SHA_REF = $version_digest"
+      - name: The repository is public
+        if: env.PUSH == 'true'
+        run: |
+          # Docker Hub gives a repository created by a push the namespace's default visibility.
+          # The images are pushed either way; a private repository fails the run until it is
+          # made public (Falcone pulls the official images anonymously).
+          for attempt in 1 2 3 4 5 6; do
+            status="$(curl -sS -o repo.json -w '%{http_code}' "https://hub.docker.com/v2/repositories/${DOCKERHUB_NAMESPACE}/${IMAGE}/")"
+            [ "$status" = 200 ] && break
+            sleep 10
+          done
+          if [ "$status" != 200 ] || [ "$(jq -r '.is_private' repo.json)" != false ]; then
+            echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE} is not public (HTTP $status); make it public on Docker Hub, then rerun"; exit 1
+          fi
+          echo "docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}: public"
       - name: Move :latest
         if: env.PUSH == 'true' && env.LATEST == 'true'
         env:

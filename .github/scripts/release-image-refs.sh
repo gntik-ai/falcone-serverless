@@ -2,11 +2,12 @@
 # Decide how release-images.yml publishes one image (#250), from the registry state of its
 # two immutable references, docker.io/<ns>/<image>:<version> and :sha-<commit>.
 #
-#   release-image-refs.sh <repo> <version> <short-sha> <push>
+#   release-image-refs.sh <repo> <version> <short-sha> <push> [<new-repository>]
 #
 # Prints key=value lines (repo, version_ref, sha_ref, mode, existing_digest) for
 # $GITHUB_OUTPUT. mode is:
-#   build     both references are absent (or this run does not push): build and push both;
+#   build     both references are absent (or this run does not push, or <new-repository> is
+#             true: a repository the first push creates holds no tag): build and push both;
 #   retag     only the sha reference exists: point the version at its digest, no rebuild;
 #   existing  both exist with one digest: keep them, rebuild nothing.
 # Any other state fails: a version that exists without this commit's sha tag, two different
@@ -20,6 +21,7 @@ repo="$1"
 version="$2"
 short_sha="$3"
 push="$4"
+new_repository="${5:-false}"
 version_ref="${repo}:${version}"
 sha_ref="${repo}:sha-${short_sha}"
 read -r -a imagetools <<< "${IMAGETOOLS:-docker buildx imagetools}"
@@ -52,7 +54,9 @@ lookup() {
 
 mode=build
 existing=""
-if [ "$push" = true ]; then
+if [ "$push" = true ] && [ "$new_repository" = true ]; then
+  echo "${repo} does not exist yet: the first push creates it, nothing to look up" >&2
+elif [ "$push" = true ]; then
   version_digest="$(lookup "$version_ref")"
   sha_digest="$(lookup "$sha_ref")"
   if [ "$version_digest" = ABSENT ] && [ "$sha_digest" = ABSENT ]; then
