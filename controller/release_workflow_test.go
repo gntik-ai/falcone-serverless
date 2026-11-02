@@ -112,7 +112,7 @@ func TestReleaseWorkflowSerializesEveryPublishingRun(t *testing.T) {
 	text := readFile(t, releaseWorkflow)
 	// One fixed group: a v1.2.3 tag push, the Release for it and a manual 1.2.3 run (or two
 	// versions of one commit, sharing its sha tag) can never race on an immutable tag.
-	if !strings.Contains(text, "concurrency:\n") || !strings.Contains(text, "  group: release-images\n  cancel-in-progress: false\n") {
+	if !strings.Contains(text, "concurrency:\n") || !strings.Contains(text, "  group: release-images\n  cancel-in-progress: false\n") || !strings.Contains(text, "\n  queue: max\n") {
 		t.Error("every publishing run must share one concurrency group")
 	}
 }
@@ -156,8 +156,11 @@ const fakeImagetools = `#!/usr/bin/env bash
 ref="${@: -1}"
 state="$(cat "$FAKE_DIR/$(printf '%s' "$ref" | tr '/:' '__')" 2>/dev/null || echo absent)"
 case "$state" in
-  absent) echo "ERROR: docker.io/x: not found" >&2; exit 1 ;;
+  absent) echo "ERROR: $ref: not found" >&2; exit 1 ;;
   error) echo "ERROR: unexpected status: 429 Too Many Requests" >&2; exit 1 ;;
+  token404) echo "ERROR: failed to fetch oauth token: unexpected status from GET request to https://auth.docker.io/token: 404 Not Found" >&2; exit 1 ;;
+  norepo) echo "ERROR: pull access denied, repository does not exist or may require authorization: server message: insufficient_scope: authorization failed" >&2; exit 1 ;;
+  otherref) echo "ERROR: docker.io/gntik/other:1.2.3: not found" >&2; exit 1 ;;
   malformed) echo '{"digest":"sha256:XYZ"}' ;;
   *) printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"%s"}\n' "$state" ;;
 esac
@@ -214,6 +217,9 @@ func TestReleaseImageRefsDecidesFromTheRegistryState(t *testing.T) {
 		{name: "registry error is not absence", push: "true", states: map[string]string{version: "error", sha: "error"}, fails: "refusing to guess that it is absent"},
 		{name: "one lookup fails", push: "true", states: map[string]string{version: "error"}, fails: "refusing to guess that it is absent"},
 		{name: "malformed digest", push: "true", states: map[string]string{version: "malformed", sha: digestA}, fails: "malformed digest"},
+		{name: "a token endpoint 404 is not absence", push: "true", states: map[string]string{version: "token404", sha: "token404"}, fails: "refusing to guess that it is absent"},
+		{name: "a missing repository is not absence", push: "true", states: map[string]string{version: "norepo", sha: "norepo"}, fails: "refusing to guess that it is absent"},
+		{name: "not found for another reference is not absence", push: "true", states: map[string]string{version: "otherref", sha: "otherref"}, fails: "refusing to guess that it is absent"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -10,7 +10,8 @@
 #   retag     only the sha reference exists: point the version at its digest, no rebuild;
 #   existing  both exist with one digest: keep them, rebuild nothing.
 # Any other state fails: a version that exists without this commit's sha tag, two different
-# digests, a registry error other than "not found", or a malformed digest. A failed lookup is
+# digests, a registry error other than buildx's "ERROR: <ref>: not found" for that very
+# reference, or a malformed digest. A failed lookup is
 # never read as "absent", so a transient registry error cannot lead to an overwrite.
 # IMAGETOOLS overrides the inspector command (tests); it defaults to docker buildx imagetools.
 set -euo pipefail
@@ -36,7 +37,9 @@ lookup() {
       return 1
     fi
     echo "$digest"
-  elif grep -qiE 'not found|manifest unknown' "$err"; then
+  elif grep -qxF "ERROR: $1: not found" "$err"; then
+    # Only buildx's own missing-manifest line for exactly this reference means "absent";
+    # any other "not found" (an auth token endpoint, a missing repository) is an error.
     rm -f "$err"
     echo ABSENT
   else

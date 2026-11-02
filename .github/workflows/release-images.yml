@@ -37,6 +37,9 @@ concurrency:
   # runs that share a version or a commit's sha tag can never race on an immutable tag.
   group: release-images
   cancel-in-progress: false
+  # Keep every waiting run (up to 100): with the default single pending slot a newer run
+  # cancels the waiting one, e.g. a Release event dropping its tag push (and :latest).
+  queue: max
 
 env:
   DOCKERHUB_NAMESPACE: gntik
