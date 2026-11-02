@@ -12,7 +12,7 @@ mod support;
 use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use support::kube_cluster::{KubeCluster, load_config, pod_view};
 use support::observation::{
     Admission, Collector, Condition, ContainerView, Exit, Observation, Review,
@@ -157,6 +157,104 @@ fn an_unparseable_kubeconfig_is_unverified_and_not_echoed() {
     let error = Kubeconfigs::parse(file.to_str()).unwrap_err();
     assert!(error.starts_with("UNVERIFIED"), "{error}");
     assert!(!error.contains("SECRET-LOOKING-VALUE"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_readable_file_without_a_usable_cluster_is_unverified_at_the_loader() {
+    let dir = scratch("unusable");
+    let cases = [
+        ("empty", String::new()),
+        (
+            "no-context",
+            json!({"apiVersion": "v1", "kind": "Config",
+                "clusters": [{"name": "c", "cluster": {"server": "https://x.invalid:6443"}}]})
+            .to_string(),
+        ),
+        (
+            "dangling-context",
+            json!({"apiVersion": "v1", "kind": "Config", "current-context": "ctx",
+                "contexts": [{"name": "ctx", "context": {"cluster": "gone", "user": "gone"}}]})
+            .to_string(),
+        ),
+    ];
+    for (name, text) in cases {
+        let file = dir.join(name);
+        std::fs::write(&file, text).unwrap();
+        let value = file.to_str().unwrap();
+        let error = Kubeconfigs::parse(Some(value)).unwrap_err();
+        assert!(error.starts_with("UNVERIFIED"), "{name}: {error}");
+        assert!(!error.contains(value), "paths are not echoed: {error}");
+        assert!(gate(Some("1"), Some(value), Some(&image()), None, None).is_err());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// Child half of the relative-path test: runs with a working directory the parent chose.
+#[test]
+fn relative_path_child() {
+    let Some(dir) = std::env::var_os("FS_TEST_RELATIVE_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let value = std::env::var("KUBECONFIG").unwrap();
+    assert!(Path::new(&value).is_relative(), "the list is relative");
+    let list = Kubeconfigs::parse(Some(&value)).unwrap();
+    let flags = list.kubectl_flags().unwrap();
+    let on_disk = std::fs::read_to_string(flags[0].strip_prefix("--kubeconfig=").unwrap()).unwrap();
+    // The client's view and the file kubectl reads must both point beneath the original
+    // directory, whatever the merged file's own location is.
+    for view in [
+        serde_json::to_value(list.merged()).unwrap(),
+        serde_json::from_str::<Value>(&on_disk).unwrap(),
+    ] {
+        let cluster = &view["clusters"][0]["cluster"];
+        let user = &view["users"][0]["user"];
+        let expected = |name: &str| dir.join("configs").join(name).to_str().unwrap().to_owned();
+        assert_eq!(cluster["certificate-authority"], expected("ca.crt"));
+        assert_eq!(user["client-certificate"], expected("client.crt"));
+        assert_eq!(user["client-key"], expected("client.key"));
+        assert_eq!(user["tokenFile"], expected("token"));
+    }
+    println!("relative-ok");
+}
+
+#[test]
+fn relative_file_references_resolve_the_same_for_the_client_and_kubectl() {
+    let dir = scratch("relative").canonicalize().unwrap();
+    std::fs::create_dir_all(dir.join("configs")).unwrap();
+    // Placeholder files: the loader must find each of them where the kubeconfig says.
+    for name in ["ca.crt", "client.crt", "client.key", "token"] {
+        std::fs::write(dir.join("configs").join(name), "placeholder\n").unwrap();
+    }
+    std::fs::write(
+        dir.join("configs/config"),
+        json!({"apiVersion": "v1", "kind": "Config", "current-context": "ctx",
+            "clusters": [{"name": "c", "cluster": {
+                "server": "https://rel.invalid:6443", "certificate-authority": "ca.crt"}}],
+            "contexts": [{"name": "ctx", "context": {"cluster": "c", "user": "u"}}],
+            "users": [{"name": "u", "user": {
+                "client-certificate": "client.crt", "client-key": "client.key",
+                "tokenFile": "token"}}]})
+        .to_string(),
+    )
+    .unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "relative_path_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("FS_TEST_RELATIVE_DIR", &dir)
+        .env("KUBECONFIG", "configs/config")
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}{stderr}");
+    assert!(stdout.contains("relative-ok"), "{stdout}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 

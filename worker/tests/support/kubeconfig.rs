@@ -3,12 +3,18 @@
 //! that is empty, has an empty entry, names a file that cannot be read or holds an invalid
 //! kubeconfig is UNVERIFIED before any API call, kubectl call or mutation.
 //!
-//! Every listed file is read with `Kubeconfig::read_from` and merged once, first file wins.
-//! The kube client is built from that merge and kubectl is pointed at a private file that
-//! holds the very same merge, so both harnesses always select the same cluster and identity.
-//! File contents are never printed or logged.
+//! Every listed file is made absolute, read with `Kubeconfig::read_from` and merged once, first
+//! file wins. Absolute paths matter: `read_from` resolves certificate, key and token-file
+//! references against the file's directory, and kubectl reads the merge from another
+//! directory, so a relative entry would make the two consumers resolve them differently.
+//! The merge must then pass `Config::from_custom_kubeconfig`, so a readable file that selects
+//! no usable cluster is UNVERIFIED here, before any API call or kubectl call. The kube client
+//! is built from that merge and kubectl is pointed at a private file that holds the very same
+//! merge, so both harnesses always select the same cluster and identity. File contents are
+//! never printed or logged.
 
-use kube::config::Kubeconfig;
+use kube::Config;
+use kube::config::{KubeConfigOptions, Kubeconfig};
 use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -64,6 +70,27 @@ fn write_merged(config: &Kubeconfig) -> Result<MergedFile, String> {
     Ok(merged)
 }
 
+/// Checks the merge with the very call the client is built from. It runs on its own thread
+/// and runtime so it works inside and outside an async context, and it reads local files only.
+fn validate(config: &Kubeconfig) -> Result<(), String> {
+    const UNUSABLE: &str = "UNVERIFIED: KUBECONFIG does not describe a usable cluster";
+    let config = config.clone();
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| UNUSABLE.to_owned())?
+            .block_on(Config::from_custom_kubeconfig(
+                config,
+                &KubeConfigOptions::default(),
+            ))
+            .map(drop)
+            .map_err(|_| UNUSABLE.to_owned())
+    })
+    .join()
+    .map_err(|_| UNUSABLE.to_owned())?
+}
+
 #[derive(Clone)]
 pub struct Kubeconfigs {
     paths: Vec<PathBuf>,
@@ -94,13 +121,15 @@ impl Kubeconfigs {
                     "UNVERIFIED: KUBECONFIG entry {number} is empty; ambient kubeconfig fallbacks are never used"
                 ));
             }
-            let path = Path::new(entry);
-            if !path.is_file() || File::open(path).is_err() {
+            let path = std::path::absolute(Path::new(entry)).map_err(|_| {
+                format!("UNVERIFIED: KUBECONFIG entry {number} is not a readable file")
+            })?;
+            if !path.is_file() || File::open(&path).is_err() {
                 return Err(format!(
                     "UNVERIFIED: KUBECONFIG entry {number} is not a readable file"
                 ));
             }
-            let file = Kubeconfig::read_from(path).map_err(|_| {
+            let file = Kubeconfig::read_from(&path).map_err(|_| {
                 format!("UNVERIFIED: KUBECONFIG entry {number} is not a valid kubeconfig")
             })?;
             merged = Some(match merged {
@@ -109,11 +138,13 @@ impl Kubeconfigs {
                     format!("UNVERIFIED: KUBECONFIG entry {number} cannot be merged")
                 })?,
             });
-            paths.push(path.to_path_buf());
+            paths.push(path);
         }
+        let merged = merged.ok_or("UNVERIFIED: KUBECONFIG lists no files")?;
+        validate(&merged)?;
         Ok(Self {
             paths,
-            merged: Arc::new(merged.ok_or("UNVERIFIED: KUBECONFIG lists no files")?),
+            merged: Arc::new(merged),
             on_disk: Arc::default(),
         })
     }
