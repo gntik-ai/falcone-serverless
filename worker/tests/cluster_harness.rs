@@ -2,23 +2,40 @@
 //!
 //! Manual operator evidence (never a CI gate): FS_TEST_CLUSTER=1
 //! FS_TEST_IMAGE_REPO=<registry/repo> cargo test -p falcone-serverless-worker
-//! --test cluster_harness --locked. Uses ambient kubeconfig and rootless podman login.
-//! Test images remain in the registry. Shared mode retains run-labelled pods;
-//! it never mutates namespaces or existing objects. SIGKILL can bypass cleanup.
+//! --test cluster_harness --locked. Needs KUBECONFIG (a list of existing files, never an
+//! ambient fallback) and a rootless podman login. Test images remain in the registry.
+//! Shared mode never creates or deletes a namespace and deletes only objects labelled with
+//! its own run. SIGKILL can bypass cleanup.
 
 mod support;
 
 use falcone_serverless_worker::{Role, check};
 use serde_json::{Value, json};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::time::Duration;
 use support::cli::{Cli, Process, Runner, kill_tree};
 use support::{
-    Config, Kube, Namespace, NamespaceMode, Session, deployment, final_uid, namespace_name,
-    pod_spec,
+    Config, Kube, Kubeconfigs, Namespace, NamespaceApi, NamespaceMode, Session, deployment,
+    final_uid, namespace_name, pod_spec, test_namespace,
 };
 
 const CONTAINERFILE: &str = include_str!("../Containerfile");
+
+/// A real, readable file stands in for the operator's kubeconfig; it is never read.
+fn kubeconfigs() -> Kubeconfigs {
+    static FILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let path = FILE.get_or_init(|| {
+        let path = std::env::temp_dir().join(format!("fs-test-kubeconfig-{}", std::process::id()));
+        std::fs::write(&path, "placeholder").unwrap();
+        path.to_str().unwrap().to_owned()
+    });
+    Kubeconfigs::parse(Some(path)).unwrap()
+}
+
+fn new_cli<R: Runner>(runner: R) -> Cli<R> {
+    Cli::new(runner, kubeconfigs())
+}
 
 #[test]
 fn final_image_user_is_numeric_and_non_root() {
@@ -81,7 +98,7 @@ fn worker_spec_is_restricted_and_uses_an_arbitrary_uid() {
 fn namespaces_are_unique_guarded_dns_labels_with_restricted_admission() {
     let mut seen = std::collections::HashSet::new();
     for _ in 0..128 {
-        let name = namespace_name();
+        let name = namespace_name("worker");
         assert!(seen.insert(name.clone()));
         assert!(name.starts_with("fs-test-"));
         assert!(name.len() <= 63);
@@ -146,14 +163,21 @@ fn config_depends_only_on_supplied_values() {
 #[derive(Default)]
 struct FakeKube {
     calls: RefCell<Vec<&'static str>>,
+    deleted_runs: RefCell<Vec<String>>,
     fail_pod: bool,
     fail_namespace: bool,
     fail_delete: bool,
+    deny_review: bool,
+    labels: Option<BTreeMap<String, String>>,
     phase: Option<&'static str>,
     log: Option<&'static str>,
 }
 
-impl Kube for FakeKube {
+impl NamespaceApi for FakeKube {
+    fn can_create_namespaces(&self) -> Result<bool, String> {
+        self.calls.borrow_mut().push("review create namespaces");
+        Ok(!self.deny_review)
+    }
     fn create_namespace(&self, _: &Namespace) -> Result<(), String> {
         self.calls.borrow_mut().push("create namespace");
         if self.fail_namespace {
@@ -162,6 +186,26 @@ impl Kube for FakeKube {
             Ok(())
         }
     }
+    fn namespace_labels(&self, _: &Namespace) -> Result<Option<BTreeMap<String, String>>, String> {
+        self.calls.borrow_mut().push("get namespace");
+        Ok(self.labels.clone())
+    }
+    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
+        self.calls.borrow_mut().push("delete namespace");
+        if self.fail_delete {
+            Err("delete denied".into())
+        } else {
+            Ok(())
+        }
+    }
+    fn delete_run_objects(&self, _: &Namespace, run: &str) -> Result<(), String> {
+        self.calls.borrow_mut().push("delete run objects");
+        self.deleted_runs.borrow_mut().push(run.into());
+        Ok(())
+    }
+}
+
+impl Kube for FakeKube {
     fn create_pod(&self, _: &Namespace, pod: &Value) -> Result<(), String> {
         self.calls.borrow_mut().push("create pod");
         assert_eq!(pod["kind"], "Pod");
@@ -187,14 +231,6 @@ impl Kube for FakeKube {
             .log
             .unwrap_or("falcone-serverless-worker 0.1.0\n")
             .into())
-    }
-    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
-        self.calls.borrow_mut().push("delete namespace");
-        if self.fail_delete {
-            Err("delete denied".into())
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -250,7 +286,12 @@ fn namespace_cleanup_runs_once_on_success_error_and_unwind() {
         assert_eq!(result.is_err(), panic);
         assert_eq!(
             *kube.calls.borrow(),
-            ["create namespace", "create pod", "delete namespace"]
+            [
+                "review create namespaces",
+                "create namespace",
+                "create pod",
+                "delete namespace"
+            ]
         );
     }
     let kube = FakeKube {
@@ -260,7 +301,12 @@ fn namespace_cleanup_runs_once_on_success_error_and_unwind() {
     assert!(Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap()).is_err());
     assert_eq!(
         *kube.calls.borrow(),
-        ["create namespace", "create pod", "delete namespace"]
+        [
+                "review create namespaces",
+                "create namespace",
+                "create pod",
+                "delete namespace"
+            ]
     );
 }
 
@@ -289,7 +335,21 @@ fn guarded_create_refuses_bad_names_and_images_before_client_access() {
         .err()
         .unwrap();
     assert!(error.contains("FS_TEST_NAMESPACE_MODE"));
-    assert_eq!(*kube.calls.borrow(), ["create namespace"]);
+    assert_eq!(
+        *kube.calls.borrow(),
+        ["review create namespaces", "create namespace"]
+    );
+    // A denied review fails as unverified, names the switch and mutates nothing.
+    let kube = FakeKube {
+        deny_review: true,
+        ..FakeKube::default()
+    };
+    let error = Session::create(&kube, "fs-test-unit", &pod_spec(&image()).unwrap())
+        .err()
+        .unwrap();
+    assert!(error.starts_with("UNVERIFIED"), "{error}");
+    assert!(error.contains("FS_TEST_NAMESPACE_MODE=shared"), "{error}");
+    assert_eq!(*kube.calls.borrow(), ["review create namespaces"]);
 }
 
 #[test]
@@ -315,7 +375,7 @@ fn init_containers_need_digest_pinned_images_before_any_client_call() {
     }
     let kube = FakeKube::default();
     Session::create(&kube, "fs-test-unit", &with_init(image())).unwrap();
-    assert_eq!(kube.calls.borrow().first(), Some(&"create namespace"));
+    assert_eq!(kube.calls.borrow().get(1), Some(&"create namespace"));
     let mut spec = pod_spec(&image()).unwrap();
     spec["ephemeralContainers"] = json!([{"name": "debug", "image": image()}]);
     let kube = FakeKube::default();
@@ -325,7 +385,7 @@ fn init_containers_need_digest_pinned_images_before_any_client_call() {
 
 #[test]
 fn cli_refuses_unpinned_init_containers_before_any_runner_call() {
-    let cli = Cli::new(Commands::default());
+    let cli = new_cli(Commands::default());
     let ns = Namespace::new("fs-test-adapter").unwrap();
     let pod_with_init = |init_image: &str| {
         let mut spec = pod_spec(&image()).unwrap();
@@ -362,6 +422,7 @@ fn completed_pod_requires_success_and_the_worker_version() {
     assert_eq!(
         *kube.calls.borrow(),
         [
+            "review create namespaces",
             "create namespace",
             "create pod",
             "wait",
@@ -402,12 +463,18 @@ fn namespace_switch_is_explicit_and_shared_mode_never_mutates_namespaces() {
     assert!(NamespaceMode::parse(Some("unknown"), None).is_err());
     assert!(NamespaceMode::parse(Some("shared"), Some("default")).is_err());
     let mode = NamespaceMode::parse(Some("shared"), Some("fs-test-unit")).unwrap();
-    let kube = FakeKube::default();
+    let kube = FakeKube {
+        labels: restricted_labels(),
+        ..FakeKube::default()
+    };
     {
         let _session =
             Session::create_in(&kube, "fs-test-unit", &pod_spec(&image()).unwrap(), &mode).unwrap();
     }
-    assert_eq!(*kube.calls.borrow(), ["create pod"]);
+    assert_eq!(
+        *kube.calls.borrow(),
+        ["get namespace", "create pod", "delete run objects"]
+    );
 }
 
 type Invocation = (String, Vec<String>, Option<Value>);
@@ -443,6 +510,12 @@ impl Runner for Commands {
         if let Some(index) = args.iter().position(|arg| *arg == "--digestfile") {
             std::fs::write(args[index + 1], format!("sha256:{}\n", "b".repeat(64))).unwrap();
         }
+        if args.contains(&"can-i") {
+            return Ok("yes\n".into());
+        }
+        if args.contains(&"namespace") && args.contains(&"get") {
+            return Ok(r#"{"metadata":{"labels":{"pod-security.kubernetes.io/enforce":"restricted"}}}"#.into());
+        }
         if args.contains(&"get") {
             return Ok(self.phase.unwrap_or("Succeeded").into());
         }
@@ -453,9 +526,21 @@ impl Runner for Commands {
     }
 }
 
+impl Runner for &Commands {
+    fn run(
+        &self,
+        program: &str,
+        args: &[&str],
+        input: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        <Commands as Runner>::run(self, program, args, input, timeout)
+    }
+}
+
 #[test]
 fn registry_adapter_builds_rootless_and_returns_the_pushed_digest() {
-    let cli = Cli::new(Commands {
+    let cli = new_cli(Commands {
         rootless: true,
         ..Commands::default()
     });
@@ -499,7 +584,7 @@ fn registry_adapter_builds_rootless_and_returns_the_pushed_digest() {
             ..Commands::default()
         },
     ] {
-        let cli = Cli::new(runner);
+        let cli = new_cli(runner);
         assert!(
             cli.build_push("registry.invalid/worker", "fs-test-unit")
                 .is_err()
@@ -510,14 +595,18 @@ fn registry_adapter_builds_rootless_and_returns_the_pushed_digest() {
 
 #[test]
 fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
-    let cli = Cli::new(Commands::default());
+    let cli = new_cli(Commands::default());
     {
         let session =
             Session::create(&cli, "fs-test-adapter", &pod_spec(&image()).unwrap()).unwrap();
         session.verify().unwrap();
     }
     let calls = cli.runner.calls.borrow();
-    assert_eq!(calls.len(), 5);
+    assert_eq!(calls.len(), 6);
+    let flag = format!("--kubeconfig={}", kubeconfigs().paths()[0].display());
+    assert!(calls.iter().all(|(_, args, _)| args.contains(&flag)));
+    assert!(calls[0].1.contains(&"can-i".into()));
+    let calls = &calls[1..];
     assert!(calls.iter().all(|(program, args, _)| program == "kubectl"
         && args.iter().any(|arg| arg.starts_with("--request-timeout="))));
     let namespace = calls[0].2.as_ref().unwrap();
@@ -533,9 +622,8 @@ fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
     assert!(calls[2].1.contains(&"get".into()));
     assert!(calls[3].1.contains(&"logs".into()));
     assert!(calls[4].1.contains(&"delete".into()));
-    drop(calls);
     let ns = Namespace::new("fs-test-adapter").unwrap();
-    let cli = Cli::new(Commands {
+    let cli = new_cli(Commands {
         phase: Some("Failed"),
         ..Commands::default()
     });
@@ -544,7 +632,7 @@ fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
             .unwrap(),
         "Failed"
     );
-    let cli = Cli::new(Commands::default());
+    let cli = new_cli(Commands::default());
     assert!(
         cli.wait_terminal(&ns, "fs-test-adapter", Duration::ZERO)
             .is_err()
@@ -576,7 +664,7 @@ fn every_kubectl_call_gets_a_bounded_deadline_and_cleanup_its_own() {
             Ok("Succeeded".into())
         }
     }
-    let cli = Cli::new(Recording(RefCell::default()));
+    let cli = new_cli(Recording(RefCell::default()));
     let ns = Namespace::new("fs-test-adapter").unwrap();
     cli.wait_terminal(&ns, "fs-test-adapter", Duration::from_secs(5))
         .unwrap();
@@ -591,7 +679,7 @@ fn every_kubectl_call_gets_a_bounded_deadline_and_cleanup_its_own() {
 
 #[test]
 fn disabled_cluster_mode_never_invokes_tools() {
-    let cli = Cli::new(Commands {
+    let cli = new_cli(Commands {
         fail: true,
         ..Commands::default()
     });
@@ -602,7 +690,7 @@ fn disabled_cluster_mode_never_invokes_tools() {
 
 #[test]
 fn enabled_cluster_flow_builds_pushes_runs_and_cleans_up() {
-    let cli = Cli::new(Commands {
+    let cli = new_cli(Commands {
         rootless: true,
         ..Commands::default()
     });
@@ -636,7 +724,7 @@ fn enabled_cluster_flow_builds_pushes_runs_and_cleans_up() {
 const LONG: Duration = Duration::from_secs(30);
 
 #[test]
-fn subprocess_errors_suppress_output_and_name_ambient_prerequisites() {
+fn subprocess_errors_suppress_output_and_name_the_prerequisites() {
     let runner = Process;
     let error = runner
         .run(
@@ -647,7 +735,7 @@ fn subprocess_errors_suppress_output_and_name_ambient_prerequisites() {
         )
         .unwrap_err();
     assert!(!error.contains("output-canary"));
-    assert!(error.contains("ambient"));
+    assert!(error.contains("KUBECONFIG"));
     assert_eq!(
         runner
             .run("sh", &["-c", "printf ready"], None, LONG)
@@ -699,10 +787,26 @@ struct HangingKube {
     calls: RefCell<Vec<&'static str>>,
 }
 
-impl Kube for HangingKube {
+impl NamespaceApi for HangingKube {
+    fn can_create_namespaces(&self) -> Result<bool, String> {
+        Ok(true)
+    }
     fn create_namespace(&self, _: &Namespace) -> Result<(), String> {
         Ok(())
     }
+    fn namespace_labels(&self, _: &Namespace) -> Result<Option<BTreeMap<String, String>>, String> {
+        Ok(None)
+    }
+    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
+        self.calls.borrow_mut().push("delete namespace");
+        Ok(())
+    }
+    fn delete_run_objects(&self, _: &Namespace, _: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+impl Kube for HangingKube {
     fn create_pod(&self, _: &Namespace, _: &Value) -> Result<(), String> {
         Ok(())
     }
@@ -717,10 +821,6 @@ impl Kube for HangingKube {
     }
     fn logs(&self, _: &Namespace, _: &str) -> Result<String, String> {
         Ok(String::new())
-    }
-    fn delete_namespace(&self, _: &Namespace) -> Result<(), String> {
-        self.calls.borrow_mut().push("delete namespace");
-        Ok(())
     }
 }
 
@@ -895,16 +995,209 @@ fn explicit_cleanup_reports_failure_without_deleting_twice() {
     }
 }
 
+fn restricted_labels() -> Option<BTreeMap<String, String>> {
+    Some(BTreeMap::from([(
+        "pod-security.kubernetes.io/enforce".to_owned(),
+        "restricted".to_owned(),
+    )]))
+}
+
+#[test]
+fn test_namespace_in_create_mode_reviews_then_creates_and_deletes() {
+    let kube = FakeKube::default();
+    {
+        let guard = test_namespace("suite", &kube, &NamespaceMode::Create).unwrap();
+        assert!(guard.namespace().name().starts_with("fs-test-suite-"));
+        assert_eq!(
+            *kube.calls.borrow(),
+            ["review create namespaces", "create namespace"]
+        );
+    }
+    assert_eq!(kube.calls.borrow().last(), Some(&"delete namespace"));
+    assert!(kube.deleted_runs.borrow().is_empty());
+    // A panic after acquiring the namespace still deletes it.
+    let kube = FakeKube::default();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = test_namespace("suite", &kube, &NamespaceMode::Create).unwrap();
+        panic!("exercise unwinding");
+    }));
+    assert!(result.is_err());
+    assert_eq!(kube.calls.borrow().last(), Some(&"delete namespace"));
+}
+
+#[test]
+fn test_namespace_in_shared_mode_never_creates_or_deletes_a_namespace() {
+    let mode = NamespaceMode::parse(Some("shared"), Some("fs-test-shared")).unwrap();
+    let kube = FakeKube {
+        labels: restricted_labels(),
+        ..FakeKube::default()
+    };
+    let run = {
+        let guard = test_namespace("suite", &kube, &mode).unwrap();
+        assert_eq!(guard.namespace().name(), "fs-test-shared");
+        guard.run().to_owned()
+    };
+    assert_eq!(*kube.calls.borrow(), ["get namespace", "delete run objects"]);
+    assert_eq!(*kube.deleted_runs.borrow(), [run]);
+    // Close reports the cleanup once and the later drop does nothing more.
+    let kube = FakeKube {
+        labels: restricted_labels(),
+        ..FakeKube::default()
+    };
+    test_namespace("suite", &kube, &mode).unwrap().close().unwrap();
+    assert_eq!(kube.deleted_runs.borrow().len(), 1);
+}
+
+#[test]
+fn shared_mode_without_a_usable_namespace_is_unverified_before_any_mutation() {
+    for missing in [None, Some("")] {
+        let error = NamespaceMode::parse(Some("shared"), missing).unwrap_err();
+        assert!(error.starts_with("UNVERIFIED"), "{error}");
+    }
+    for off_limits in ["in-falcone-staging", "default", "kube-system", "musematic-x"] {
+        assert!(NamespaceMode::parse(Some("shared"), Some(off_limits)).is_err());
+    }
+    let mode = NamespaceMode::parse(Some("shared"), Some("fs-test-shared")).unwrap();
+    for labels in [
+        None,
+        Some(BTreeMap::new()),
+        Some(BTreeMap::from([(
+            "pod-security.kubernetes.io/enforce".to_owned(),
+            "baseline".to_owned(),
+        )])),
+    ] {
+        let kube = FakeKube {
+            labels,
+            ..FakeKube::default()
+        };
+        let error = test_namespace("suite", &kube, &mode).err().unwrap();
+        assert!(error.starts_with("UNVERIFIED"), "{error}");
+        assert_eq!(*kube.calls.borrow(), ["get namespace"]);
+    }
+}
+
+#[test]
+fn shared_session_labels_its_pod_and_deletes_only_that_run() {
+    let mode = NamespaceMode::parse(Some("shared"), Some("fs-test-unit")).unwrap();
+    let kube = FakeKube {
+        labels: restricted_labels(),
+        ..FakeKube::default()
+    };
+    drop(Session::create_in(&kube, "fs-test-unit", &pod_spec(&image()).unwrap(), &mode).unwrap());
+    assert_eq!(
+        *kube.calls.borrow(),
+        ["get namespace", "create pod", "delete run objects"]
+    );
+    assert_eq!(*kube.deleted_runs.borrow(), ["fs-test-unit"]);
+}
+
+/// The whole opt-in decision with every input supplied, so it needs no process environment.
+fn opt_in<R: Runner>(
+    runner: R,
+    cluster: Option<&str>,
+    repo: Option<&str>,
+    kubeconfig: Option<&str>,
+    mode: Option<&str>,
+    namespace: Option<&str>,
+) -> Result<bool, String> {
+    let config = Config::parse(cluster, repo)?;
+    if config == Config::Disabled {
+        println!("UNVERIFIED: FS_TEST_CLUSTER=1 is not set; the cluster test did not run");
+        return Ok(false);
+    }
+    let mode = NamespaceMode::parse(mode, namespace)?;
+    // The credential boundary is checked before the first client or kubectl call.
+    let kubeconfigs = Kubeconfigs::parse(kubeconfig)?;
+    Cli::new(runner, kubeconfigs).execute(&config, &mode)?;
+    Ok(true)
+}
+
+#[test]
+fn invalid_kubeconfig_is_unverified_before_any_kubectl_call() {
+    let existing = kubeconfigs().paths()[0].to_str().unwrap().to_owned();
+    let trailing = format!("{existing}:");
+    let missing = format!("{existing}-missing");
+    for kubeconfig in [
+        None,
+        Some(""),
+        Some(":"),
+        Some("::"),
+        Some(trailing.as_str()),
+        Some(missing.as_str()),
+    ] {
+        let commands = Commands {
+            rootless: true,
+            ..Commands::default()
+        };
+        let error = opt_in(
+            &commands,
+            Some("1"),
+            Some("registry.invalid/worker"),
+            kubeconfig,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("UNVERIFIED"), "{kubeconfig:?}: {error}");
+        assert!(commands.calls.borrow().is_empty(), "{kubeconfig:?}");
+    }
+}
+
+#[test]
+fn every_kubectl_call_names_each_listed_kubeconfig() {
+    let existing = kubeconfigs().paths()[0].to_str().unwrap().to_owned();
+    let commands = Commands {
+        rootless: true,
+        ..Commands::default()
+    };
+    let list = format!("{existing}:{existing}");
+    assert!(
+        opt_in(
+            &commands,
+            Some("1"),
+            Some("registry.invalid/worker"),
+            Some(&list),
+            None,
+            None,
+        )
+        .unwrap()
+    );
+    let calls = commands.calls.borrow();
+    let kubectl: Vec<_> = calls.iter().filter(|call| call.0 == "kubectl").collect();
+    assert!(kubectl.len() >= 5);
+    for (_, args, _) in kubectl {
+        assert_eq!(
+            args.iter()
+                .filter(|arg| **arg == format!("--kubeconfig={existing}"))
+                .count(),
+            2,
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn disabled_cluster_test_prints_unverified_and_makes_no_calls() {
+    let commands = Commands::default();
+    assert!(!opt_in(&commands, None, None, None, None, None).unwrap());
+    assert!(!opt_in(&commands, Some("0"), None, Some(":"), None, None).unwrap());
+    assert!(commands.calls.borrow().is_empty());
+}
+
 #[test]
 fn cluster_worker_image() -> Result<(), String> {
     let cluster = std::env::var("FS_TEST_CLUSTER").ok();
     let repo = std::env::var("FS_TEST_IMAGE_REPO").ok();
-    let config = Config::parse(cluster.as_deref(), repo.as_deref())?;
-    if config == Config::Disabled {
-        return Ok(());
-    }
+    let kubeconfig = std::env::var("KUBECONFIG").ok();
     let mode = std::env::var("FS_TEST_NAMESPACE_MODE").ok();
     let namespace = std::env::var("FS_TEST_NAMESPACE").ok();
-    let mode = NamespaceMode::parse(mode.as_deref(), namespace.as_deref())?;
-    Cli::new(Process).execute(&config, &mode)
+    opt_in(
+        Process,
+        cluster.as_deref(),
+        repo.as_deref(),
+        kubeconfig.as_deref(),
+        mode.as_deref(),
+        namespace.as_deref(),
+    )
+    .map(drop)
 }
