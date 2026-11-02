@@ -1,0 +1,279 @@
+name: release-images
+
+# Publish the falcone-serverless platform images as the official images under
+# docker.io/gntik, the namespace Falcone's own release images use (#250).
+#
+# Triggers: a strict vX.Y.Z tag push, a published GitHub Release, or a manual run.
+# Every publish writes the version tag (X.Y.Z) and an immutable sha-<commit> tag; tag
+# pushes also move :latest. A version or sha tag that already exists is never
+# overwritten: an existing pair that resolves to one digest is verified and kept, any
+# other combination fails. release-images.json (image, reference, digest) goes to the
+# run summary and, for a published Release, to the Release assets; the chart pins its
+# images by digest from it (FR-DEP-02). A manual run with dry_run builds without
+# pushing. Images are not signed here (FR-DEP-02 signing is tracked separately).
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (X.Y.Z or vX.Y.Z)'
+        required: true
+      dry_run:
+        description: 'Build without pushing'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # A tag push and the Release published for that tag run one after the other.
+  group: release-images-${{ github.event.release.tag_name || inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  DOCKERHUB_NAMESPACE: gntik
+
+jobs:
+  meta:
+    name: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      push: ${{ steps.meta.outputs.push }}
+      latest: ${{ steps.meta.outputs.latest }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
+    steps:
+      - name: Resolve the version and what this run publishes
+        id: meta
+        env:
+          EVENT: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          case "$EVENT" in
+            release) raw="$RELEASE_TAG" ;;
+            workflow_dispatch) raw="$INPUT_VERSION" ;;
+            *) raw="$REF_NAME" ;;
+          esac
+          version="${raw#v}"
+          if ! printf '%s' "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            echo "::error::'$raw' is not a strict vX.Y.Z version"; exit 1
+          fi
+          push=true; latest=false
+          if [ "$EVENT" = workflow_dispatch ] && [ "$DRY_RUN" = true ]; then push=false; fi
+          if [ "$EVENT" = push ]; then latest=true; fi
+          {
+            echo "version=$version"
+            echo "push=$push"
+            echo "latest=$latest"
+            echo "short_sha=${SHA:0:12}"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$version push=$push latest=$latest"
+
+  preflight:
+    name: preflight
+    needs: meta
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Secrets are configured
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          for name in DOCKERHUB_USERNAME DOCKERHUB_TOKEN; do
+            if [ -z "${!name}" ]; then echo "::error::the repository secret $name is not set"; exit 1; fi
+          done
+      # The workflow never creates a Docker Hub repository or changes its visibility.
+      - name: Target repositories exist and are public
+        run: |
+          for image in falcone-serverless-worker falcone-serverless-controller; do
+            status="$(curl -sS -o repo.json -w '%{http_code}' "https://hub.docker.com/v2/repositories/${DOCKERHUB_NAMESPACE}/${image}/")"
+            if [ "$status" != 200 ]; then
+              echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${image} does not exist (HTTP $status); create it as a public repository"; exit 1
+            fi
+            if [ "$(jq -r '.is_private' repo.json)" != false ]; then
+              echo "::error::docker.io/${DOCKERHUB_NAMESPACE}/${image} is not public"; exit 1
+            fi
+            echo "docker.io/${DOCKERHUB_NAMESPACE}/${image}: public"
+          done
+
+  build:
+    name: build (${{ matrix.image }})
+    needs: [meta, preflight]
+    if: always() && needs.meta.result == 'success' && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # The other trusted images (compiler/build-runner, oci-shim, egress gateway, intake,
+        # assembler) join here with one entry when their build issues land.
+        include:
+          - image: falcone-serverless-worker
+            containerfile: worker/Containerfile
+          - image: falcone-serverless-controller
+            containerfile: controller/Containerfile
+    env:
+      IMAGE: ${{ matrix.image }}
+      VERSION: ${{ needs.meta.outputs.version }}
+      SHORT_SHA: ${{ needs.meta.outputs.short_sha }}
+      PUSH: ${{ needs.meta.outputs.push }}
+      LATEST: ${{ needs.meta.outputs.latest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to Docker Hub
+        if: env.PUSH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Compute references and check existing immutable tags
+        id: refs
+        run: |
+          repo="docker.io/${DOCKERHUB_NAMESPACE}/${IMAGE}"
+          version_ref="${repo}:${VERSION}"
+          sha_ref="${repo}:sha-${SHORT_SHA}"
+          digest_of() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" 2>/dev/null | jq -r '.digest // empty'; }
+          version_digest=""; sha_digest=""
+          if [ "$PUSH" = true ]; then
+            version_digest="$(digest_of "$version_ref" || true)"
+            sha_digest="$(digest_of "$sha_ref" || true)"
+          fi
+          mode=build
+          if [ -n "$version_digest" ] || [ -n "$sha_digest" ]; then
+            if [ "$version_digest" = "$sha_digest" ]; then
+              mode=existing
+              echo "$version_ref and $sha_ref already resolve to $version_digest: kept, not rebuilt"
+            else
+              echo "::error::$version_ref ($version_digest) and $sha_ref ($sha_digest) do not resolve to one digest; refusing to overwrite an immutable tag"
+              exit 1
+            fi
+          fi
+          {
+            echo "repo=$repo"
+            echo "version_ref=$version_ref"
+            echo "sha_ref=$sha_ref"
+            echo "mode=$mode"
+            echo "existing_digest=$version_digest"
+          } >> "$GITHUB_OUTPUT"
+      - name: Build${{ needs.meta.outputs.push == 'true' && ' and push' || ' (dry run)' }}
+        id: build
+        if: steps.refs.outputs.mode == 'build'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          platforms: linux/amd64
+          push: ${{ needs.meta.outputs.push == 'true' }}
+          provenance: false
+          tags: |
+            ${{ steps.refs.outputs.version_ref }}
+            ${{ steps.refs.outputs.sha_ref }}
+      - name: Verify the pushed references
+        id: verify
+        env:
+          VERSION_REF: ${{ steps.refs.outputs.version_ref }}
+          SHA_REF: ${{ steps.refs.outputs.sha_ref }}
+          MODE: ${{ steps.refs.outputs.mode }}
+          BUILT: ${{ steps.build.outputs.digest }}
+          EXISTING: ${{ steps.refs.outputs.existing_digest }}
+        run: |
+          if [ "$PUSH" != true ]; then
+            echo "digest=${BUILT}" >> "$GITHUB_OUTPUT"; echo "dry run: nothing pushed"; exit 0
+          fi
+          digest_of() { docker buildx imagetools inspect --format '{{json .Manifest}}' "$1" | jq -r '.digest'; }
+          version_digest="$(digest_of "$VERSION_REF")"
+          sha_digest="$(digest_of "$SHA_REF")"
+          expected="$BUILT"; [ "$MODE" = existing ] && expected="$EXISTING"
+          if [ "$version_digest" != "$sha_digest" ] || [ "$version_digest" != "$expected" ]; then
+            echo "::error::$VERSION_REF ($version_digest), $SHA_REF ($sha_digest) and the expected digest ($expected) differ"; exit 1
+          fi
+          echo "digest=$version_digest" >> "$GITHUB_OUTPUT"
+          echo "$VERSION_REF = $SHA_REF = $version_digest"
+      - name: Move :latest
+        if: env.PUSH == 'true' && env.LATEST == 'true'
+        env:
+          REPO: ${{ steps.refs.outputs.repo }}
+          DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          docker buildx imagetools create --tag "${REPO}:latest" "${REPO}@${DIGEST}"
+          actual="$(docker buildx imagetools inspect --format '{{json .Manifest}}' "${REPO}:latest" | jq -r '.digest')"
+          [ "$actual" = "$DIGEST" ] || { echo "::error::${REPO}:latest resolves to $actual, not $DIGEST"; exit 1; }
+      - name: Record the image
+        env:
+          REF: ${{ steps.refs.outputs.version_ref }}
+          DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          jq -n --arg image "$IMAGE" --arg reference "$REF" --arg digest "$DIGEST" --argjson pushed "$PUSH" \
+            '{image: $image, reference: $reference, digest: $digest, pushed: $pushed}' > "image-${IMAGE}.json"
+          cat "image-${IMAGE}.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.image }}
+          path: image-${{ matrix.image }}.json
+          retention-days: 30
+
+  summary:
+    name: release-images.json
+    needs: [meta, build]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          merge-multiple: true
+      - name: Write release-images.json and the run summary
+        env:
+          VERSION: ${{ needs.meta.outputs.version }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          jq -s --arg version "$VERSION" --arg commit "$COMMIT" \
+            '{version: $version, commit: $commit, images: (sort_by(.image))}' image-*.json > release-images.json
+          {
+            echo "### release-images.json"
+            echo
+            echo '```json'
+            cat release-images.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-images
+          path: release-images.json
+          retention-days: 90
+
+  release-asset:
+    name: attach to the Release
+    needs: [meta, summary]
+    if: github.event_name == 'release' && needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-images
+      - name: Upload release-images.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" release-images.json --clobber --repo "$GITHUB_REPOSITORY"
