@@ -36,12 +36,12 @@ const VALID: &str = include_str!("fixtures/valid.wat");
 const INFINITE_LOOP: &str = include_str!("fixtures/infinite_loop.wat");
 
 use crate::{
-    outcome::{self, Outcome, RunError, RunResult},
+    outcome::{self, Outcome, ProbeError, RunError, RunResult},
     runner::Harness,
 };
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{self, Write},
     path::Path,
     sync::mpsc,
     thread,
@@ -159,7 +159,7 @@ impl Harness for RealHarness {
             Err(error) => return Outcome::failed(error.to_string(), "io"),
         };
         let path = format!("/tmp/was01-write-probe-{}-{stamp}", std::process::id());
-        outcome::tmp_writable(write_probe(Path::new(&path)))
+        outcome::tmp_writable(round_trip(&DiskStorage, Path::new(&path), &probe_payload()))
     }
 
     fn non_root_uid(&mut self) -> Outcome {
@@ -188,6 +188,84 @@ fn write_probe(path: &Path) -> Result<(), String> {
     // Cleanup cannot turn a successful root write into read-only evidence.
     let _ = fs::remove_file(path);
     write.map_err(|error| error.to_string())
+}
+
+/// The storage boundary of the temp-storage probe, so read failures can be injected.
+trait ProbeStorage {
+    /// Creates the probe file; fails when it already exists.
+    fn create_new(&self, path: &Path) -> io::Result<()>;
+    fn write(&self, path: &Path, payload: &[u8]) -> io::Result<()>;
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
+    fn remove(&self, path: &Path) -> io::Result<()>;
+}
+
+struct DiskStorage;
+
+impl ProbeStorage for DiskStorage {
+    fn create_new(&self, path: &Path) -> io::Result<()> {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map(drop)
+    }
+
+    fn write(&self, path: &Path, payload: &[u8]) -> io::Result<()> {
+        let mut file = OpenOptions::new().write(true).open(path)?;
+        file.write_all(payload)?;
+        file.flush()?;
+        file.sync_all()
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        fs::read(path)
+    }
+
+    fn remove(&self, path: &Path) -> io::Result<()> {
+        fs::remove_file(path)
+    }
+}
+
+/// Writes `payload` to a new file, reads it back and compares. A file that already
+/// existed is never touched; a file this probe created is always removed, and a cleanup
+/// failure cannot turn a failed readback into a pass.
+fn round_trip(storage: &impl ProbeStorage, path: &Path, payload: &[u8]) -> Result<(), ProbeError> {
+    storage
+        .create_new(path)
+        .map_err(|error| ProbeError::Write(error.to_string()))?;
+    let verdict = storage
+        .write(path, payload)
+        .map_err(|error| ProbeError::Write(error.to_string()))
+        .and_then(|()| {
+            let read = storage
+                .read(path)
+                .map_err(|error| ProbeError::Readback(format!("readback failed: {error}")))?;
+            if read == payload {
+                Ok(())
+            } else {
+                Err(ProbeError::Readback(
+                    "readback differs from the written payload".into(),
+                ))
+            }
+        });
+    let _ = storage.remove(path);
+    verdict
+}
+
+/// 32 bytes from std's randomly keyed hasher; the runner has no rand dependency.
+fn probe_payload() -> Vec<u8> {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |stamp| stamp.as_nanos());
+    (0..4u8)
+        .flat_map(|lane| {
+            RandomState::new()
+                .hash_one((std::process::id(), stamp, lane))
+                .to_le_bytes()
+        })
+        .collect()
 }
 
 struct Ticker {
@@ -249,5 +327,151 @@ mod tests {
             let store = build_store(&engine, mode).unwrap();
             assert_eq!(store.get_fuel().unwrap(), expected, "{mode:?}");
         }
+    }
+
+    use std::{cell::RefCell, io, path::PathBuf};
+
+    #[derive(Default)]
+    struct FakeStorage {
+        calls: RefCell<Vec<String>>,
+        files: RefCell<Option<Vec<u8>>>,
+        exists: bool,
+        write_error: bool,
+        read_error: bool,
+        corrupt: bool,
+        remove_error: bool,
+    }
+
+    impl ProbeStorage for FakeStorage {
+        fn create_new(&self, _: &Path) -> io::Result<()> {
+            self.calls.borrow_mut().push("create".into());
+            if self.exists {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            *self.files.borrow_mut() = Some(Vec::new());
+            Ok(())
+        }
+        fn write(&self, _: &Path, payload: &[u8]) -> io::Result<()> {
+            self.calls.borrow_mut().push("write".into());
+            if self.write_error {
+                return Err(io::Error::other("no space left"));
+            }
+            *self.files.borrow_mut() = Some(payload.to_vec());
+            Ok(())
+        }
+        fn read(&self, _: &Path) -> io::Result<Vec<u8>> {
+            self.calls.borrow_mut().push("read".into());
+            if self.read_error {
+                return Err(io::Error::other("input/output error"));
+            }
+            let mut bytes = self.files.borrow().clone().unwrap();
+            if self.corrupt {
+                bytes[0] ^= 0xff;
+            }
+            Ok(bytes)
+        }
+        fn remove(&self, _: &Path) -> io::Result<()> {
+            self.calls.borrow_mut().push("remove".into());
+            *self.files.borrow_mut() = None;
+            if self.remove_error {
+                Err(io::Error::other("busy"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    const PAYLOAD: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn matching_round_trip_writes_reads_then_removes() {
+        let storage = FakeStorage::default();
+        assert_eq!(round_trip(&storage, Path::new("/p"), PAYLOAD), Ok(()));
+        assert_eq!(
+            *storage.calls.borrow(),
+            ["create", "write", "read", "remove"]
+        );
+    }
+
+    #[test]
+    fn read_error_and_mismatch_are_readback_failures() {
+        for storage in [
+            FakeStorage {
+                read_error: true,
+                ..FakeStorage::default()
+            },
+            FakeStorage {
+                corrupt: true,
+                ..FakeStorage::default()
+            },
+        ] {
+            let error = round_trip(&storage, Path::new("/p"), PAYLOAD).unwrap_err();
+            assert!(matches!(error, ProbeError::Readback(_)), "{error:?}");
+            assert_eq!(storage.calls.borrow().last().unwrap(), "remove");
+            let outcome = outcome::tmp_writable(Err(error));
+            assert_eq!(outcome.status, outcome::Status::Failed);
+            assert_eq!(outcome.error_class, Some("posture"));
+        }
+    }
+
+    #[test]
+    fn write_and_open_errors_stay_io_and_skip_the_readback() {
+        let storage = FakeStorage {
+            write_error: true,
+            ..FakeStorage::default()
+        };
+        let error = round_trip(&storage, Path::new("/p"), PAYLOAD).unwrap_err();
+        assert!(matches!(error, ProbeError::Write(_)));
+        assert_eq!(*storage.calls.borrow(), ["create", "write", "remove"]);
+        assert_eq!(outcome::tmp_writable(Err(error)).error_class, Some("io"));
+    }
+
+    #[test]
+    fn a_preexisting_file_is_neither_overwritten_nor_removed() {
+        let storage = FakeStorage {
+            exists: true,
+            ..FakeStorage::default()
+        };
+        let error = round_trip(&storage, Path::new("/p"), PAYLOAD).unwrap_err();
+        assert!(matches!(error, ProbeError::Write(_)));
+        assert_eq!(*storage.calls.borrow(), ["create"]);
+    }
+
+    #[test]
+    fn cleanup_failure_cannot_change_the_verdict() {
+        let ok = FakeStorage {
+            remove_error: true,
+            ..FakeStorage::default()
+        };
+        assert_eq!(round_trip(&ok, Path::new("/p"), PAYLOAD), Ok(()));
+        let corrupt = FakeStorage {
+            remove_error: true,
+            corrupt: true,
+            ..FakeStorage::default()
+        };
+        assert!(matches!(
+            round_trip(&corrupt, Path::new("/p"), PAYLOAD),
+            Err(ProbeError::Readback(_))
+        ));
+    }
+
+    #[test]
+    fn real_round_trip_in_a_temp_dir_passes_and_leaves_nothing() {
+        let dir = std::env::temp_dir().join(format!("was01-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path: PathBuf = dir.join("probe");
+        let payload = probe_payload();
+        assert_eq!(payload.len(), 32);
+        assert_ne!(payload, probe_payload(), "payload must be random per call");
+        assert_eq!(round_trip(&DiskStorage, &path, &payload), Ok(()));
+        assert!(!path.exists());
+        // A preexisting file survives untouched and fails the probe as a write error.
+        fs::write(&path, b"keep").unwrap();
+        assert!(matches!(
+            round_trip(&DiskStorage, &path, &payload),
+            Err(ProbeError::Write(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

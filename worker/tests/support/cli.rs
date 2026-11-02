@@ -1,5 +1,6 @@
-use super::{Config, Kube, Namespace, namespace_name, pinned_image};
+use super::{Config, Kube, Kubeconfigs, Namespace, NamespaceApi, namespace_name, pinned_image};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,6 +29,7 @@ pub trait Runner {
 
 pub struct Cli<R> {
     pub runner: R,
+    kubeconfigs: Kubeconfigs,
 }
 
 impl<R: Runner> Cli<R> {
@@ -35,7 +37,7 @@ impl<R: Runner> Cli<R> {
         let Config::Enabled { repo } = config else {
             return Ok(());
         };
-        let run = namespace_name();
+        let run = namespace_name("worker");
         let image = self.build_push(repo, &run)?;
         let spec = super::pod_spec(&image)?;
         let session = match mode {
@@ -46,8 +48,25 @@ impl<R: Runner> Cli<R> {
         session.close()
     }
 
-    pub fn new(runner: R) -> Self {
-        Self { runner }
+    pub fn new(runner: R, kubeconfigs: Kubeconfigs) -> Self {
+        Self {
+            runner,
+            kubeconfigs,
+        }
+    }
+
+    /// Every kubectl call names the one merged kubeconfig the kube client also uses, so it
+    /// never falls back to an ambient `~/.kube/config` or the in-cluster configuration.
+    fn kubectl(
+        &self,
+        args: &[&str],
+        input: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<String, String> {
+        let flags = self.kubeconfigs.kubectl_flags()?;
+        let mut all: Vec<&str> = flags.iter().map(String::as_str).collect();
+        all.extend_from_slice(args);
+        self.runner.run("kubectl", &all, input, timeout)
     }
 
     pub fn build_push(&self, repo: &str, run: &str) -> Result<String, String> {
@@ -126,7 +145,7 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> Result<Self, String> {
-        let path = std::env::temp_dir().join(namespace_name());
+        let path = std::env::temp_dir().join(namespace_name("scratch"));
         fs::create_dir(&path).map_err(|_| "cannot create private test scratch directory")?;
         Ok(Self(path))
     }
@@ -138,10 +157,24 @@ impl Drop for Scratch {
     }
 }
 
-impl<R: Runner> Kube for Cli<R> {
+impl<R: Runner> NamespaceApi for Cli<R> {
+    fn can_create_namespaces(&self) -> Result<bool, String> {
+        // `auth can-i` is a SelfSubjectAccessReview; it exits non-zero on "no".
+        let answer = self.kubectl(
+            &[
+                "--request-timeout=15s",
+                "auth",
+                "can-i",
+                "create",
+                "namespaces",
+            ],
+            None,
+            KUBECTL_CALL,
+        )?;
+        Ok(answer.trim() == "yes")
+    }
     fn create_namespace(&self, namespace: &Namespace) -> Result<(), String> {
-        self.runner.run(
-            "kubectl",
+        self.kubectl(
             &["--request-timeout=15s", "create", "-f", "-"],
             Some(&namespace.manifest()),
             KUBECTL_CALL,
@@ -149,6 +182,85 @@ impl<R: Runner> Kube for Cli<R> {
         Ok(())
     }
 
+    fn namespace_labels(
+        &self,
+        namespace: &Namespace,
+    ) -> Result<Option<BTreeMap<String, String>>, String> {
+        let text = self.kubectl(
+            &[
+                "--request-timeout=15s",
+                "get",
+                "namespace",
+                namespace.name(),
+                "--ignore-not-found=true",
+                "-o",
+                "json",
+            ],
+            None,
+            KUBECTL_CALL,
+        )?;
+        if text.trim().is_empty() {
+            return Ok(None);
+        }
+        let object: Value =
+            serde_json::from_str(&text).map_err(|_| "namespace answer is not JSON".to_string())?;
+        Ok(Some(
+            object["metadata"]["labels"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_owned())))
+                .collect(),
+        ))
+    }
+
+    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String> {
+        self.kubectl(
+            &[
+                "--request-timeout=60s",
+                "delete",
+                "namespace",
+                namespace.name(),
+                "--ignore-not-found=true",
+                "--wait=true",
+                "--timeout=60s",
+            ],
+            None,
+            KUBECTL_CLEANUP,
+        )?;
+        Ok(())
+    }
+
+    fn delete_run_objects(&self, namespace: &Namespace, run: &str) -> Result<(), String> {
+        if run.is_empty()
+            || !run
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return Err("run label must be a DNS-1123 fragment".into());
+        }
+        let selector = format!("{}={run}", super::RUN_LABEL);
+        self.kubectl(
+            &[
+                "--request-timeout=60s",
+                "--namespace",
+                namespace.name(),
+                "delete",
+                "pods,deployments,roles,rolebindings,serviceaccounts",
+                "--selector",
+                &selector,
+                "--ignore-not-found=true",
+                "--wait=true",
+                "--timeout=60s",
+            ],
+            None,
+            KUBECTL_CLEANUP,
+        )?;
+        Ok(())
+    }
+}
+
+impl<R: Runner> Kube for Cli<R> {
     fn create_pod(&self, namespace: &Namespace, pod: &Value) -> Result<(), String> {
         let name = pod["metadata"]["name"]
             .as_str()
@@ -162,8 +274,7 @@ impl<R: Runner> Kube for Cli<R> {
             return Err("pod identity must match its guarded namespace and run label".into());
         }
         super::validate_spec(&pod["spec"])?;
-        self.runner.run(
-            "kubectl",
+        self.kubectl(
             &[
                 "--request-timeout=15s",
                 "--namespace",
@@ -195,8 +306,7 @@ impl<R: Runner> Kube for Cli<R> {
                 "--request-timeout={}ms",
                 remaining.as_millis().clamp(1, 15000)
             );
-            let phase = self.runner.run(
-                "kubectl",
+            let phase = self.kubectl(
                 &[
                     &request_timeout,
                     "--namespace",
@@ -222,8 +332,7 @@ impl<R: Runner> Kube for Cli<R> {
 
     fn logs(&self, namespace: &Namespace, pod: &str) -> Result<String, String> {
         Namespace::new(pod)?;
-        self.runner.run(
-            "kubectl",
+        self.kubectl(
             &[
                 "--request-timeout=15s",
                 "--namespace",
@@ -238,24 +347,6 @@ impl<R: Runner> Kube for Cli<R> {
             None,
             KUBECTL_CALL,
         )
-    }
-
-    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String> {
-        self.runner.run(
-            "kubectl",
-            &[
-                "--request-timeout=60s",
-                "delete",
-                "namespace",
-                namespace.name(),
-                "--ignore-not-found=true",
-                "--wait=true",
-                "--timeout=60s",
-            ],
-            None,
-            KUBECTL_CLEANUP,
-        )?;
-        Ok(())
     }
 }
 
@@ -288,7 +379,7 @@ impl Runner for Process {
         use std::time::Instant;
         let error = || {
             format!(
-                "{program} failed: verify the executable, ambient kubeconfig and rootless podman registry login; command output suppressed"
+                "{program} failed: verify the executable, the KUBECONFIG files and the rootless podman registry login; command output suppressed"
             )
         };
         let started = Instant::now();
