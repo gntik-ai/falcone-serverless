@@ -23,6 +23,32 @@ Design and implementation backlog. Option A selects Wasmtime/WASI execution insi
 
 The design preserves Falcone-specific contracts and integrates with Keycloak, SeaweedFS and Temporal. Untrusted code runs through qualified Wasm profiles; long-running work uses checkpoint/resume orchestration.
 
+## Releasing images
+
+The official images are published to Docker Hub by `.github/workflows/release-images.yml`:
+
+- `docker.io/gntik/falcone-serverless-worker`
+- `docker.io/gntik/falcone-serverless-controller`
+
+To release:
+
+1. Push a strict `vX.Y.Z` tag (for example `git tag v0.1.0 && git push origin v0.1.0`), or publish a GitHub Release for such a tag.
+2. Each image gets the tags `X.Y.Z` and `sha-<commit>`. A tag push also moves `:latest`.
+3. A version or `sha-` tag that already exists is never overwritten. An existing pair that resolves to one digest is verified and kept; any other combination fails the run.
+4. Read the digests from `release-images.json`, which lists each image's reference and `sha256` digest:
+   - in the run summary;
+   - as the run artifact `release-images`;
+   - for a published Release, as a Release asset.
+
+   The Falcone chart pins the images by digest from this file.
+
+A manual run (Actions → release-images → Run workflow) takes a version and builds without pushing while `dry_run` is checked.
+
+The run needs:
+
+- the repository secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`;
+- both Docker Hub repositories created as public repositories beforehand. The workflow never creates them or changes their visibility.
+
 ## License
 
 MIT, the same as Falcone. See [LICENSE](LICENSE).
