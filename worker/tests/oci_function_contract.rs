@@ -359,9 +359,36 @@ fn filesystem_probe_allows_scratch_and_catches_sentinel_changes() {
     }
 }
 
+fn assert_process_rules(output: Output, expected: &[&str]) {
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(
+        output.status.code(),
+        Some(i32::from(!stdout.is_empty())),
+        "{stdout}"
+    );
+    let ids: Vec<_> = stdout
+        .lines()
+        .filter_map(|line| {
+            let (rule, detail) = line.split_once(':').unwrap();
+            if rule == "OCI-V1-BINDING" && !expected.contains(&rule) {
+                // Host noise may make complete ownership evidence unavailable. It
+                // must never conceal a positively observed exclusive-binding failure.
+                assert!(!detail.contains("not listening exclusively"), "{line}");
+                assert!(detail.contains("inspection unstable"), "{line}");
+                None
+            } else {
+                Some(rule)
+            }
+        })
+        .collect();
+    assert_eq!(ids, expected, "{stdout}");
+}
+
 fn process_case(mode: &str, expected: &[&str]) {
     let port = free_port();
-    assert_rules(
+    assert_process_rules(
         tester(
             Some(port),
             &[
@@ -444,6 +471,16 @@ fn binding_snapshot_rejects_wildcard_ipv6_and_other_loopbacks() {
             .collect::<Vec<_>>(),
         ["OCI-V1-BINDING"]
     );
+}
+
+#[test]
+fn binding_snapshot_names_the_second_wildcard_listener() {
+    let tcp = "sl local_address rem_address st\n0: 0100007F:1F90 00000000:0000 0A\n1: 00000000:2329 00000000:0000 0A\n";
+    let verdict = contract::check_binding_snapshot(tcp, "sl local_address rem_address st\n", 8080);
+    let detail = verdict
+        .get("OCI-V1-BINDING")
+        .expect("extra listener must fail");
+    assert!(detail.contains("0.0.0.0:9001"), "{detail}");
 }
 
 #[test]
@@ -692,6 +729,629 @@ fn source_only_image_context_has_identical_contract_assets() {
             fs::read(contracts().join(fixture.path)).unwrap(),
             "{}",
             fixture.path
+        );
+    }
+}
+
+mod process_seam {
+    use super::contract::{BindingVerdict, ProcessEvent, ProcessTable, ProcessTree};
+    use rustix::process::Signal;
+    use std::{
+        cell::RefCell,
+        collections::{BTreeMap, BTreeSet},
+        io,
+        rc::Rc,
+        time::{Duration, Instant},
+    };
+
+    #[derive(Clone)]
+    struct Task {
+        state: char,
+        children: Vec<u32>,
+        sockets: BTreeSet<u64>,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Scenario {
+        Stable,
+        ForkDuringFdRead,
+        SocketTransfer,
+        WildcardDuringResample,
+        MalformedSocketState,
+        MalformedTaskState,
+        MalformedTaskEntry,
+        MalformedTcpEntry,
+        ReadCrossingDeadline,
+        ReparentingMidWalk,
+        ForkThenExit,
+        UnreadableFd,
+        VanishedTid,
+        ZombieLeaderLiveThread,
+        StateAfterLastFdSample,
+        PidfdUnavailable,
+        CleanupForkThenExit,
+        CleanupExhaustion,
+        IgnoreTermOnly,
+    }
+    struct SyntheticProc {
+        tasks: BTreeMap<u32, BTreeMap<u32, Task>>,
+        tcp: String,
+        now: Instant,
+        scenario: Scenario,
+        delivered: bool,
+        signals: Rc<RefCell<Vec<(u32, Signal)>>>,
+        alive: Rc<RefCell<BTreeSet<u32>>>,
+    }
+    const HEADER: &str = "sl local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n";
+    fn row(local: &str, state: &str, inode: u64) -> String {
+        format!(
+            "0: {local} 00000000:0000 {state} 00000000:00000000 00:00000000 00000000 1000 0 {inode}\n"
+        )
+    }
+    impl SyntheticProc {
+        fn compliant() -> Self {
+            let task = |children, sockets| Task {
+                state: 'T',
+                children,
+                sockets,
+            };
+            Self {
+                tasks: [
+                    (1, [(1, task(vec![10], BTreeSet::new()))].into()),
+                    (10, [(10, task(vec![], [42].into()))].into()),
+                ]
+                .into(),
+                tcp: format!("{HEADER}{}", row("0100007F:1F90", "0A", 42)),
+                now: Instant::now(),
+                scenario: Scenario::Stable,
+                delivered: false,
+                signals: Rc::default(),
+                alive: Rc::new(RefCell::new([10].into())),
+            }
+        }
+        fn tree(self) -> ProcessTree<Self> {
+            let deadline = self.now + Duration::from_secs(60);
+            ProcessTree::new(self, 10, 1, BTreeMap::new(), deadline)
+        }
+    }
+    impl ProcessTable for SyntheticProc {
+        type Handle = u32;
+        fn read(&mut self, path: &str) -> io::Result<String> {
+            if path == "/proc/net/tcp" {
+                if self.scenario == Scenario::MalformedTcpEntry {
+                    return Ok(self.tcp.replace(" 1000 ", " bad-uid "));
+                }
+                if self.scenario == Scenario::ReadCrossingDeadline {
+                    self.now += Duration::from_secs(61);
+                }
+                if self.scenario == Scenario::MalformedSocketState {
+                    return Ok(format!("{HEADER}{}", row("0100007F:1F90", "FE", 42)));
+                }
+                return Ok(self.tcp.clone());
+            }
+            if path == "/proc/net/tcp6" {
+                return Ok(HEADER.into());
+            }
+            let parts: Vec<_> = path.split('/').collect();
+            let pid = parts[2].parse::<u32>().unwrap();
+            let tid = parts[4].parse::<u32>().unwrap();
+            let task = self
+                .tasks
+                .get(&pid)
+                .and_then(|tasks| tasks.get(&tid))
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            match parts[5] {
+                "children" => Ok(task
+                    .children
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")),
+                "stat" if self.scenario == Scenario::MalformedTaskEntry && pid == 10 => Ok(
+                    format!("{tid} (synthetic) T bad-parent {}", vec!["0"; 18].join(" ")),
+                ),
+                "stat" => Ok(format!(
+                    "{tid} (synthetic) {} {}",
+                    if pid == 10 && self.scenario == Scenario::MalformedTaskState {
+                        '?'
+                    } else {
+                        task.state
+                    },
+                    vec!["0"; 19].join(" ")
+                )),
+                _ => panic!("unexpected path: {path}"),
+            }
+        }
+        fn list(&mut self, path: &str, _: Instant) -> io::Result<Vec<u32>> {
+            if path == "/proc" {
+                return Ok(self.tasks.keys().copied().collect());
+            }
+            let pid = path.split('/').nth(2).unwrap().parse::<u32>().unwrap();
+            if pid == 10 && self.scenario == Scenario::VanishedTid {
+                return Ok(vec![10, 11]);
+            }
+            self.tasks
+                .get(&pid)
+                .map(|tasks| tasks.keys().copied().collect())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+        fn sockets(&mut self, pid: u32, tid: u32, _: Instant) -> io::Result<BTreeSet<u64>> {
+            if pid == 10 && self.scenario == Scenario::UnreadableFd {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let sockets = self
+                .tasks
+                .get(&pid)
+                .and_then(|tasks| tasks.get(&tid))
+                .map(|task| task.sockets.clone())
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+            if pid == 10 && !self.delivered {
+                match self.scenario {
+                    Scenario::ForkDuringFdRead => {
+                        self.delivered = true;
+                        self.tasks
+                            .get_mut(&10)
+                            .unwrap()
+                            .get_mut(&10)
+                            .unwrap()
+                            .children
+                            .push(20);
+                        self.tasks.insert(
+                            20,
+                            [(
+                                20,
+                                Task {
+                                    state: 'T',
+                                    children: vec![],
+                                    sockets: BTreeSet::new(),
+                                },
+                            )]
+                            .into(),
+                        );
+                    }
+                    Scenario::ReparentingMidWalk | Scenario::ForkThenExit => {
+                        self.delivered = true;
+                        self.tasks
+                            .get_mut(&1)
+                            .unwrap()
+                            .get_mut(&1)
+                            .unwrap()
+                            .children
+                            .push(20);
+                        self.tasks.insert(
+                            20,
+                            [(
+                                20,
+                                Task {
+                                    state: 'T',
+                                    children: vec![],
+                                    sockets: [43].into(),
+                                },
+                            )]
+                            .into(),
+                        );
+                        self.tcp.push_str(&row("00000000:2329", "0A", 43));
+                        if self.scenario == Scenario::ForkThenExit {
+                            self.tasks.remove(&10);
+                            self.tasks
+                                .get_mut(&1)
+                                .unwrap()
+                                .get_mut(&1)
+                                .unwrap()
+                                .children
+                                .retain(|id| *id != 10);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(sockets)
+        }
+        fn open(&mut self, pid: u32, _: Instant) -> io::Result<u32> {
+            if self.scenario == Scenario::PidfdUnavailable || !self.tasks.contains_key(&pid) {
+                Err(io::ErrorKind::NotFound.into())
+            } else {
+                Ok(pid)
+            }
+        }
+        fn is_current(&mut self, pid: &u32, _: Instant) -> io::Result<bool> {
+            Ok(self.tasks.contains_key(pid))
+        }
+        fn signal(&mut self, pid: &u32, signal: Signal) -> io::Result<()> {
+            self.signals.borrow_mut().push((*pid, signal));
+            if let Some(tasks) = self.tasks.get_mut(pid) {
+                for task in tasks.values_mut() {
+                    match signal {
+                        Signal::STOP if task.state != 'Z' => task.state = 'T',
+                        Signal::CONT if task.state == 'T' => task.state = 'S',
+                        Signal::TERM if self.scenario == Scenario::IgnoreTermOnly => {}
+                        Signal::TERM | Signal::KILL
+                            if self.scenario != Scenario::CleanupExhaustion =>
+                        {
+                            task.state = 'Z'
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn reap(&mut self, pid: &u32, _: Instant) -> io::Result<bool> {
+            if self
+                .tasks
+                .get(pid)
+                .is_some_and(|tasks| tasks.values().all(|t| t.state == 'Z'))
+            {
+                let tasks = self.tasks.remove(pid).unwrap();
+                let children: Vec<_> = tasks.values().flat_map(|t| t.children.clone()).collect();
+                for tasks in self.tasks.values_mut() {
+                    for task in tasks.values_mut() {
+                        task.children.retain(|id| id != pid);
+                    }
+                }
+                self.tasks
+                    .get_mut(&1)
+                    .unwrap()
+                    .get_mut(&1)
+                    .unwrap()
+                    .children
+                    .extend(children);
+                self.alive.borrow_mut().remove(pid);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+        fn now(&self) -> Instant {
+            self.now
+        }
+        fn sleep(&mut self, duration: Duration) {
+            self.now += duration;
+        }
+        fn event(&mut self, event: ProcessEvent) {
+            if self.delivered {
+                return;
+            }
+            match (self.scenario, event) {
+                (Scenario::SocketTransfer, ProcessEvent::FdSampleComplete) => {
+                    self.delivered = true;
+                    self.tasks
+                        .get_mut(&10)
+                        .unwrap()
+                        .get_mut(&10)
+                        .unwrap()
+                        .sockets
+                        .clear();
+                    self.tasks
+                        .get_mut(&1)
+                        .unwrap()
+                        .get_mut(&1)
+                        .unwrap()
+                        .sockets
+                        .insert(42);
+                }
+                (Scenario::WildcardDuringResample, ProcessEvent::FdResampleComplete) => {
+                    self.delivered = true;
+                    self.tcp.push_str(&row("00000000:2329", "0A", 43));
+                    self.tasks
+                        .get_mut(&10)
+                        .unwrap()
+                        .get_mut(&10)
+                        .unwrap()
+                        .sockets
+                        .insert(43);
+                }
+                (Scenario::CleanupForkThenExit, ProcessEvent::BeforeReap(20)) => {
+                    self.delivered = true;
+                    self.tasks.get_mut(&20).unwrap().get_mut(&20).unwrap().state = 'Z';
+                    self.tasks.insert(
+                        21,
+                        [(
+                            21,
+                            Task {
+                                state: 'S',
+                                children: vec![],
+                                sockets: BTreeSet::new(),
+                            },
+                        )]
+                        .into(),
+                    );
+                    self.tasks
+                        .get_mut(&1)
+                        .unwrap()
+                        .get_mut(&1)
+                        .unwrap()
+                        .children
+                        .push(21);
+                    self.alive.borrow_mut().insert(21);
+                }
+                (Scenario::StateAfterLastFdSample, ProcessEvent::FdResampleComplete) => {
+                    self.delivered = true;
+                    // An in-tree exit becomes visible after the last fd evidence.
+                    self.tasks.get_mut(&10).unwrap().get_mut(&10).unwrap().state = 'Z';
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn sole_tree_owned_loopback_listener_is_compliant() {
+        assert_eq!(
+            SyntheticProc::compliant()
+                .tree()
+                .inspect_binding(8080)
+                .unwrap(),
+            BindingVerdict::Compliant
+        );
+    }
+
+    #[test]
+    fn listener_without_any_fd_owner_never_passes() {
+        let mut proc = SyntheticProc::compliant();
+        proc.tasks
+            .get_mut(&10)
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .sockets
+            .clear();
+        assert_ne!(
+            proc.tree().inspect_binding(8080).unwrap(),
+            BindingVerdict::Compliant
+        );
+    }
+    #[test]
+    fn named_lifecycle_anomalies_never_yield_compliant() {
+        for scenario in [
+            Scenario::ForkDuringFdRead,
+            Scenario::SocketTransfer,
+            Scenario::WildcardDuringResample,
+            Scenario::MalformedSocketState,
+            Scenario::MalformedTaskState,
+            Scenario::MalformedTaskEntry,
+            Scenario::MalformedTcpEntry,
+            Scenario::ReadCrossingDeadline,
+            Scenario::ReparentingMidWalk,
+            Scenario::ForkThenExit,
+            Scenario::UnreadableFd,
+            Scenario::VanishedTid,
+            Scenario::ZombieLeaderLiveThread,
+            Scenario::StateAfterLastFdSample,
+            Scenario::PidfdUnavailable,
+        ] {
+            let mut proc = SyntheticProc::compliant();
+            proc.scenario = scenario;
+            if scenario == Scenario::ZombieLeaderLiveThread {
+                proc.tasks.get_mut(&10).unwrap().get_mut(&10).unwrap().state = 'Z';
+                proc.tasks.get_mut(&10).unwrap().insert(
+                    11,
+                    Task {
+                        state: 'T',
+                        children: vec![],
+                        sockets: [43].into(),
+                    },
+                );
+                proc.tcp.push_str(&row("00000000:2329", "0A", 43));
+            }
+            let verdict = proc.tree().inspect_binding(8080);
+            if scenario == Scenario::ReadCrossingDeadline {
+                assert_eq!(verdict.unwrap_err().kind(), io::ErrorKind::TimedOut);
+            } else {
+                let verdict = verdict.unwrap();
+                assert_ne!(verdict, BindingVerdict::Compliant, "{scenario:?}");
+                if let BindingVerdict::Unstable(detail) = verdict {
+                    assert!(detail.contains("inspection unstable"), "{detail}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extra_tree_listener_names_the_wildcard_and_outside_listener_is_excluded() {
+        let mut proc = SyntheticProc::compliant();
+        proc.tcp.push_str(&row("00000000:2329", "0A", 43));
+        proc.tasks
+            .get_mut(&10)
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .sockets
+            .insert(43);
+        let BindingVerdict::Violation(detail) = proc.tree().inspect_binding(8080).unwrap() else {
+            panic!("exclusive binding diagnostic required");
+        };
+        assert!(detail.contains("0.0.0.0:9001"), "{detail}");
+        let mut proc = SyntheticProc::compliant();
+        proc.tcp.push_str(&row("00000000:2329", "0A", 43));
+        proc.tasks
+            .get_mut(&1)
+            .unwrap()
+            .get_mut(&1)
+            .unwrap()
+            .sockets
+            .insert(43);
+        assert_eq!(
+            proc.tree().inspect_binding(8080).unwrap(),
+            BindingVerdict::Compliant
+        );
+    }
+
+    #[test]
+    fn cleanup_discovers_child_adopted_between_refresh_and_reap() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::CleanupForkThenExit;
+        proc.tasks
+            .get_mut(&10)
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .children
+            .push(20);
+        proc.tasks.insert(
+            20,
+            [(
+                20,
+                Task {
+                    state: 'S',
+                    children: vec![],
+                    sockets: BTreeSet::new(),
+                },
+            )]
+            .into(),
+        );
+        proc.alive.borrow_mut().insert(20);
+        let alive = proc.alive.clone();
+        let mut tree = proc.tree();
+        assert!(tree.terminate().unwrap());
+        assert!(
+            alive.borrow().is_empty(),
+            "cleanup returned with a surviving adopted child"
+        );
+    }
+
+    #[test]
+    fn short_absolute_deadline_still_reserves_the_kill_and_reap_bound() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::IgnoreTermOnly;
+        let deadline = proc.now + Duration::from_secs(2);
+        let alive = proc.alive.clone();
+        let mut tree = ProcessTree::new(proc, 10, 1, BTreeMap::new(), deadline);
+        assert!(!tree.terminate().unwrap());
+        assert!(alive.borrow().is_empty());
+    }
+
+    #[test]
+    fn drop_after_reap_or_cleanup_exhaustion_sends_no_signal() {
+        for exhausted in [false, true] {
+            let mut proc = SyntheticProc::compliant();
+            if exhausted {
+                proc.scenario = Scenario::CleanupExhaustion;
+            }
+            let signals = proc.signals.clone();
+            let mut tree = proc.tree();
+            if exhausted {
+                assert!(tree.terminate().is_err());
+            } else {
+                assert!(tree.terminate().unwrap());
+            }
+            signals.borrow_mut().clear();
+            drop(tree);
+            assert!(
+                signals.borrow().is_empty(),
+                "Drop signalled after completed cleanup"
+            );
+        }
+    }
+}
+
+#[test]
+fn escaped_sigterm_ignoring_child_is_killed_and_reaped() {
+    use rustix::process::{
+        Pid, PidfdFlags, Signal, WaitOptions, pidfd_open, pidfd_send_signal, waitpid,
+    };
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = contract::Candidate::spawn(8080, std::ffi::OsStr::new("/bin/sh"), &[
+        "-c".into(),
+        "/usr/bin/setsid /bin/sh -c 'trap \"\" TERM; echo $$ > \"$TMPDIR/escaped-pid\"; exec /bin/sleep 60' & wait".into(),
+    ], &probe).unwrap();
+    let ready = Instant::now();
+    let descendant = loop {
+        if let Ok(text) = fs::read_to_string(probe.scratch().join("escaped-pid"))
+            && let Ok(pid) = text.trim().parse::<i32>()
+        {
+            break Pid::from_raw(pid).unwrap();
+        }
+        assert!(ready.elapsed() < Duration::from_secs(5));
+        thread::sleep(Duration::from_millis(10));
+    };
+    // Keep a process handle so a red test also cleans up without numeric signals.
+    let handle = pidfd_open(descendant, PidfdFlags::empty()).unwrap();
+    let start = Instant::now();
+    child.terminate().unwrap();
+    drop(child);
+    let survived = rustix::process::test_kill_process(descendant).is_ok();
+    if survived {
+        let _ = pidfd_send_signal(&handle, Signal::KILL);
+        while waitpid(Some(descendant), WaitOptions::NOHANG)
+            .ok()
+            .flatten()
+            .is_none()
+            && start.elapsed() < contract::TERM_GRACE + Duration::from_secs(2)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    assert!(!survived, "escaped descendant survived cleanup");
+    assert!(start.elapsed() < contract::TERM_GRACE + Duration::from_secs(2));
+}
+
+#[test]
+fn scratch_cleanup_crossing_deadline_returns_deadline_error() {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut probe = contract::FilesystemProbe::new_until(deadline).unwrap();
+    let error = probe
+        .cleanup_with(|root, until| {
+            fs::remove_dir_all(root)?;
+            thread::sleep(
+                until.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn tester_rejects_a_reference_that_only_accepts_one_deadline_literal() {
+    let port = free_port();
+    let _candidate = reference(port, "literal-deadline");
+    assert_rules(tester(Some(port), &["http"]), &["OCI-V1-REQUEST"]);
+}
+
+#[test]
+fn dual_listener_process_diagnostic_names_the_wildcard() {
+    let output = tester(
+        Some(free_port()),
+        &[
+            "process",
+            "--",
+            env!("CARGO_BIN_EXE_oci-contract-reference"),
+            "dual-listener",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("OCI-V1-BINDING: candidate is not listening exclusively on 127.0.0.1:$PORT: listener 0.0.0.0:"), "{stdout}");
+    assert_rules(output, &["OCI-V1-BINDING"]);
+}
+
+#[test]
+fn reference_deadlines_are_checked_over_http() {
+    use std::io::Write;
+    let port = free_port();
+    let _candidate = reference(port, "compliant");
+    for (deadline, status) in [
+        ("2026-10-31T12:00:00Z", 200),
+        ("2026-10-31T12:00:00.5Z", 200),
+        ("2026-10-31T12:00:00.123456789Z", 200),
+        ("yesterday", 400),
+        ("2026-10-31T12:00:00+00:00", 400),
+        ("2026-10-31T12:00:00.1234567890Z", 400),
+        ("2026-10-31T12:00:00z", 400),
+        ("2026-02-30T12:00:00Z", 400),
+    ] {
+        let mut value = contract::request(json!({}));
+        value["context"]["deadline"] = json!(deadline);
+        let body = serde_json::to_vec(&value).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(stream, "POST /invoke HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        stream.write_all(&body).unwrap();
+        assert_eq!(
+            contract::read_response(&mut stream).unwrap().status,
+            status,
+            "{deadline}"
         );
     }
 }

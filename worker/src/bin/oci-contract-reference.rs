@@ -1,4 +1,6 @@
 //! Test-only local reference, not copied into the worker image. Never runs tenant code.
+#[path = "../oci_contract.rs"]
+pub mod contract;
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -12,6 +14,25 @@ use std::{
 
 const LIMIT: usize = 6_000_000;
 const LOG_LIMIT: usize = 256_000;
+
+#[test]
+fn reference_accepts_utc_deadline_syntax() {
+    for (deadline, valid) in [
+        ("2026-10-31T12:00:00Z", true),
+        ("2026-10-31T12:00:00.5Z", true),
+        ("2026-10-31T12:00:00.123456789Z", true),
+        ("yesterday", false),
+        ("2026-10-31T12:00:00+00:00", false),
+        ("2026-10-31T12:00:00.1234567890Z", false),
+        ("2026-10-31T12:00:00z", false),
+        ("2026-02-30T12:00:00Z", false),
+        ("2026-10-31T24:00:00Z", false),
+    ] {
+        let value =
+            json!({"params":{}, "context":{"handle":"h", "invocationId":"i", "deadline":deadline}});
+        assert_eq!(valid_request(&value), valid, "{deadline}");
+    }
+}
 
 fn valid_request(value: &Value) -> bool {
     let Some(object) = value.as_object() else {
@@ -34,7 +55,7 @@ fn valid_request(value: &Value) -> bool {
         && context
             .get("deadline")
             .and_then(Value::as_str)
-            .is_some_and(|s| s == "2026-10-31T12:00:00Z")
+            .is_some_and(contract::utc_deadline)
 }
 
 fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {
@@ -79,7 +100,11 @@ fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {
         let request: Option<Value> = serde_json::from_slice(&bytes[end..]).ok();
         if mode != "OCI-V1-REQUEST"
             && (!header.contains("content-type: application/json\r\n")
-                || !request.as_ref().is_some_and(valid_request))
+                || !request.as_ref().is_some_and(valid_request)
+                || (mode == "literal-deadline"
+                    && request.as_ref().is_some_and(|value| {
+                        value["context"]["deadline"] != "2026-10-31T12:00:00Z"
+                    })))
         {
             status = 400;
         } else if mode != "OCI-V1-PARAMS-LIMIT"
@@ -153,6 +178,8 @@ fn main() {
         port,
     ))
     .unwrap();
+    let _extra_listener =
+        (mode == "dual-listener").then(|| TcpListener::bind(("0.0.0.0", 0)).unwrap());
     match mode.as_str() {
         "OCI-V1-FILESYSTEM" | "write-cwd" => fs::write("created", b"violation").unwrap(),
         "write-home" => fs::write(
