@@ -302,11 +302,11 @@ fn namespace_cleanup_runs_once_on_success_error_and_unwind() {
     assert_eq!(
         *kube.calls.borrow(),
         [
-                "review create namespaces",
-                "create namespace",
-                "create pod",
-                "delete namespace"
-            ]
+            "review create namespaces",
+            "create namespace",
+            "create pod",
+            "delete namespace"
+        ]
     );
 }
 
@@ -514,7 +514,10 @@ impl Runner for Commands {
             return Ok("yes\n".into());
         }
         if args.contains(&"namespace") && args.contains(&"get") {
-            return Ok(r#"{"metadata":{"labels":{"pod-security.kubernetes.io/enforce":"restricted"}}}"#.into());
+            return Ok(
+                r#"{"metadata":{"labels":{"pod-security.kubernetes.io/enforce":"restricted"}}}"#
+                    .into(),
+            );
         }
         if args.contains(&"get") {
             return Ok(self.phase.unwrap_or("Succeeded").into());
@@ -1037,14 +1040,20 @@ fn test_namespace_in_shared_mode_never_creates_or_deletes_a_namespace() {
         assert_eq!(guard.namespace().name(), "fs-test-shared");
         guard.run().to_owned()
     };
-    assert_eq!(*kube.calls.borrow(), ["get namespace", "delete run objects"]);
+    assert_eq!(
+        *kube.calls.borrow(),
+        ["get namespace", "delete run objects"]
+    );
     assert_eq!(*kube.deleted_runs.borrow(), [run]);
     // Close reports the cleanup once and the later drop does nothing more.
     let kube = FakeKube {
         labels: restricted_labels(),
         ..FakeKube::default()
     };
-    test_namespace("suite", &kube, &mode).unwrap().close().unwrap();
+    test_namespace("suite", &kube, &mode)
+        .unwrap()
+        .close()
+        .unwrap();
     assert_eq!(kube.deleted_runs.borrow().len(), 1);
 }
 
@@ -1054,7 +1063,12 @@ fn shared_mode_without_a_usable_namespace_is_unverified_before_any_mutation() {
         let error = NamespaceMode::parse(Some("shared"), missing).unwrap_err();
         assert!(error.starts_with("UNVERIFIED"), "{error}");
     }
-    for off_limits in ["in-falcone-staging", "default", "kube-system", "musematic-x"] {
+    for off_limits in [
+        "in-falcone-staging",
+        "default",
+        "kube-system",
+        "musematic-x",
+    ] {
         assert!(NamespaceMode::parse(Some("shared"), Some(off_limits)).is_err());
     }
     let mode = NamespaceMode::parse(Some("shared"), Some("fs-test-shared")).unwrap();

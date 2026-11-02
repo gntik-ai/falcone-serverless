@@ -1,4 +1,6 @@
-use super::{Namespace, NamespaceApi, NamespaceMode, NamespacePlan, RUN_LABEL, TestNamespace, validate_spec};
+use super::{
+    Namespace, NamespaceApi, NamespaceMode, NamespacePlan, RUN_LABEL, TestNamespace, validate_spec,
+};
 use serde_json::{Value, json};
 
 use std::time::Duration;

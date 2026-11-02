@@ -68,9 +68,9 @@ impl NamespaceMode {
                 let namespace = namespace.filter(|name| !name.trim().is_empty()).ok_or(
                     "UNVERIFIED: FS_TEST_NAMESPACE is required for FS_TEST_NAMESPACE_MODE=shared",
                 )?;
-                Ok(Self::Shared(Namespace::new(namespace).map_err(|error| {
-                    format!("UNVERIFIED: FS_TEST_NAMESPACE: {error}")
-                })?))
+                Ok(Self::Shared(Namespace::new(namespace).map_err(
+                    |error| format!("UNVERIFIED: FS_TEST_NAMESPACE: {error}"),
+                )?))
             }
             _ => Err("FS_TEST_NAMESPACE_MODE must be create or shared".into()),
         }

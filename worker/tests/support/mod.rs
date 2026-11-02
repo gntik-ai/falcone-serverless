@@ -15,6 +15,6 @@ pub use namespace::{
     Namespace, NamespaceApi, NamespaceMode, NamespacePlan, RUN_LABEL, TestNamespace,
     namespace_name, test_namespace,
 };
-pub use pod::{deployment, pod_spec};
 use pod::validate_spec;
+pub use pod::{deployment, pod_spec};
 pub use session::{Kube, Session};

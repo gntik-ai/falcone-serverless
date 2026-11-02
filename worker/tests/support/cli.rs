@@ -49,7 +49,10 @@ impl<R: Runner> Cli<R> {
     }
 
     pub fn new(runner: R, kubeconfigs: Kubeconfigs) -> Self {
-        Self { runner, kubeconfigs }
+        Self {
+            runner,
+            kubeconfigs,
+        }
     }
 
     /// Every kubectl call names the listed kubeconfig files, so it never falls back to an
@@ -158,7 +161,13 @@ impl<R: Runner> NamespaceApi for Cli<R> {
     fn can_create_namespaces(&self) -> Result<bool, String> {
         // `auth can-i` is a SelfSubjectAccessReview; it exits non-zero on "no".
         let answer = self.kubectl(
-            &["--request-timeout=15s", "auth", "can-i", "create", "namespaces"],
+            &[
+                "--request-timeout=15s",
+                "auth",
+                "can-i",
+                "create",
+                "namespaces",
+            ],
             None,
             KUBECTL_CALL,
         )?;

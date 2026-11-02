@@ -1,0 +1,34 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {"name": "was01-qualification", "labels": {"app.kubernetes.io/name": "was01-qualification"}},
+  "spec": {
+    "replicas": 1,
+    "selector": {"matchLabels": {"app.kubernetes.io/name": "was01-qualification"}},
+    "template": {
+      "metadata": {"labels": {"app.kubernetes.io/name": "was01-qualification"}},
+      "spec": {
+        "serviceAccountName": "was01-workload",
+        "automountServiceAccountToken": false,
+        "enableServiceLinks": false,
+        "securityContext": {"runAsNonRoot": true, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [
+          {
+            "name": "runner",
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {"drop": ["ALL"]}
+            },
+            "resources": {
+              "requests": {"cpu": "100m", "memory": "128Mi"},
+              "limits": {"cpu": "500m", "memory": "512Mi"}
+            },
+            "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}]
+          }
+        ],
+        "volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "16Mi"}}]
+      }
+    }
+  }
+}
