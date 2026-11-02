@@ -22,8 +22,10 @@ use support::{
 
 const CONTAINERFILE: &str = include_str!("../Containerfile");
 
-/// A kubeconfig file with a placeholder cluster and no real credential.
+/// A kubeconfig file with a placeholder cluster and no real credential. Every call writes its
+/// own file, so tests running in parallel never read one another's half-written fixture.
 fn kubeconfig_file(name: &str, server: &str, token: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
     let dir = DIR.get_or_init(|| {
         let dir =
@@ -31,7 +33,10 @@ fn kubeconfig_file(name: &str, server: &str, token: &str) -> String {
         std::fs::create_dir_all(&dir).unwrap();
         dir
     });
-    let path = dir.join(name);
+    let path = dir.join(format!(
+        "{name}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(
         &path,
         serde_json::json!({
@@ -1237,6 +1242,22 @@ fn an_unparseable_kubeconfig_is_unverified_before_any_kubectl_call() {
     assert!(error.starts_with("UNVERIFIED"), "{error}");
     assert!(commands.calls.borrow().is_empty());
     std::fs::remove_file(junk).unwrap();
+}
+
+#[test]
+fn parallel_loaders_never_see_a_partial_fixture() {
+    let threads: Vec<_> = (0..16)
+        .map(|_| {
+            std::thread::spawn(|| {
+                for _ in 0..50 {
+                    assert_eq!(kubeconfigs().paths().len(), 1);
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
 }
 
 #[test]
