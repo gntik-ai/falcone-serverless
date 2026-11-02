@@ -654,7 +654,7 @@ pub fn check_process(
     let mut probe = FilesystemProbe::new_until(deadline)?;
     let mut child = Candidate::spawn_until(port, executable, args, &probe, deadline)?;
     let inspected: io::Result<Diagnostics> = (|| {
-        let mut diagnostics = check_http_until(port, deadline)?;
+        let mut diagnostics = check_http_until(port, inspection_deadline(deadline))?;
         if !diagnostics.contains_key("OCI-V1-HEALTHZ") {
             match child.inspect_binding(port)? {
                 BindingVerdict::Compliant => {}
@@ -860,35 +860,6 @@ impl Drop for FilesystemProbe {
     }
 }
 
-pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
-    let mut diagnostics = Diagnostics::new();
-    let mut seen = false;
-    for (table, ipv6) in [(tcp, false), (tcp6, true)] {
-        for line in table.lines().skip(1) {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.get(3) != Some(&"0A") {
-                continue;
-            }
-            let Some(local) = fields.get(1).and_then(|s| endpoint(s, ipv6).ok()) else {
-                diagnostics.insert("OCI-V1-BINDING", "inspection unstable: malformed listener");
-                return diagnostics;
-            };
-            if local != SocketAddr::from((Ipv4Addr::LOCALHOST, port)) {
-                diagnostics.insert("OCI-V1-BINDING", format!("candidate is not listening exclusively on 127.0.0.1:$PORT: listener {local}"));
-                return diagnostics;
-            }
-            seen = true;
-        }
-    }
-    if !seen {
-        diagnostics.insert(
-            "OCI-V1-BINDING",
-            "candidate has no listener on 127.0.0.1:$PORT",
-        );
-    }
-    diagnostics
-}
-
 fn endpoint(text: &str, ipv6: bool) -> io::Result<SocketAddr> {
     let invalid = || io::Error::other("malformed TCP endpoint");
     let (address, port) = text.split_once(':').ok_or_else(invalid)?;
@@ -930,6 +901,14 @@ fn endpoint(text: &str, ipv6: bool) -> io::Result<SocketAddr> {
 /// This adds at most one second to TERM_GRACE; procfs reads are checked on return.
 pub const CLEANUP_BOUND: Duration = Duration::from_secs(1);
 pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
+
+fn inspection_deadline(deadline: Instant) -> Instant {
+    // All earlier phases share this cap; termination retains its grace and kill
+    // allowance inside the single absolute deadline established by check_process.
+    deadline
+        .checked_sub(TERM_GRACE + CLEANUP_BOUND)
+        .unwrap_or(deadline)
+}
 
 pub struct Candidate {
     tree: ProcessTree<Procfs>,
@@ -1223,6 +1202,7 @@ pub struct ProcessTree<P: ProcessTable> {
     supervisor: u32,
     excluded: BTreeMap<u32, P::Handle>,
     deadline: Instant,
+    inspecting: bool,
     handles: BTreeMap<u32, P::Handle>,
     reaped: BTreeSet<u32>,
     cleanup_done: bool,
@@ -1241,13 +1221,21 @@ impl<P: ProcessTable> ProcessTree<P> {
             supervisor,
             excluded,
             deadline,
+            inspecting: false,
             handles: BTreeMap::new(),
             reaped: BTreeSet::new(),
             cleanup_done: false,
         }
     }
+    fn operation_deadline(&self) -> Instant {
+        if self.inspecting {
+            inspection_deadline(self.deadline)
+        } else {
+            self.deadline
+        }
+    }
     fn check_time(&self) -> io::Result<()> {
-        if self.table.now() >= self.deadline {
+        if self.table.now() >= self.operation_deadline() {
             Err(deadline_error())
         } else {
             Ok(())
@@ -1261,7 +1249,7 @@ impl<P: ProcessTable> ProcessTree<P> {
     }
     fn list(&mut self, path: &str) -> io::Result<Vec<u32>> {
         self.check_time()?;
-        let result = self.table.list(path, self.deadline);
+        let result = self.table.list(path, self.operation_deadline());
         self.check_time()?;
         let mut ids = result?;
         ids.sort_unstable();
@@ -1327,14 +1315,26 @@ impl<P: ProcessTable> ProcessTree<P> {
         Ok((state, start))
     }
     fn discover(&mut self, pid: u32) -> io::Result<()> {
+        self.discover_from(pid, None)
+    }
+    fn discover_from(&mut self, pid: u32, parent: Option<(u32, u32)>) -> io::Result<()> {
         self.check_time()?;
         if self.reaped.contains(&pid) {
             return Err(io::Error::other("reaped PID reappeared"));
         }
         if !self.handles.contains_key(&pid) {
-            let handle = self.table.open(pid, self.deadline);
+            let handle = self.table.open(pid, self.operation_deadline());
             self.check_time()?;
-            self.handles.insert(pid, handle?);
+            let handle = handle?;
+            if let Some((parent, tid)) = parent
+                && !self.children(parent, tid)?.contains(&pid)
+            {
+                // A stopped parent cannot fork a replacement child. Its original
+                // child may have auto-reaped before open(), yielding an unrelated
+                // pidfd. Never retain or signal that handle, even during cleanup.
+                return Err(io::Error::other("child changed while opening pidfd"));
+            }
+            self.handles.insert(pid, handle);
         }
         Ok(())
     }
@@ -1353,7 +1353,7 @@ impl<P: ProcessTable> ProcessTree<P> {
             for pid in self.children(self.supervisor, tid)? {
                 self.check_time()?;
                 let outside = match self.excluded.get(&pid) {
-                    Some(handle) => self.table.is_current(handle, self.deadline)?,
+                    Some(handle) => self.table.is_current(handle, self.operation_deadline())?,
                     None => false,
                 };
                 self.check_time()?;
@@ -1365,16 +1365,16 @@ impl<P: ProcessTable> ProcessTree<P> {
         Ok(roots.into_iter().collect())
     }
     fn stopped_tree(&mut self) -> io::Result<TreeSnapshot> {
-        let mut pending = self.adopted()?;
-        pending.push(self.root);
+        let mut pending: Vec<_> = self.adopted()?.into_iter().map(|pid| (pid, None)).collect();
+        pending.push((self.root, None));
         let mut visited = BTreeSet::new();
         let mut snapshot = BTreeMap::new();
-        while let Some(pid) = pending.pop() {
+        while let Some((pid, parent)) = pending.pop() {
             self.check_time()?;
             if visited.contains(&pid) {
                 continue;
             }
-            self.discover(pid)?;
+            self.discover_from(pid, parent)?;
             self.send(pid, rustix::process::Signal::STOP)?;
             // STOP delivery is asynchronous. Evidence begins only after all tasks stop.
             let tasks = loop {
@@ -1407,7 +1407,7 @@ impl<P: ProcessTable> ProcessTree<P> {
                 let children = self.children(pid, tid)?;
                 for child in &children {
                     self.check_time()?;
-                    pending.push(*child);
+                    pending.push((*child, Some((pid, tid))));
                 }
                 snapshot.insert(
                     (pid, tid),
@@ -1487,7 +1487,7 @@ impl<P: ProcessTable> ProcessTree<P> {
             };
             for tid in tids {
                 self.check_time()?;
-                let result = self.table.sockets(pid, tid, self.deadline);
+                let result = self.table.sockets(pid, tid, self.operation_deadline());
                 self.check_time()?;
                 match result {
                     Ok(inodes) => {
@@ -1615,6 +1615,12 @@ impl<P: ProcessTable> ProcessTree<P> {
         })
     }
     pub fn inspect_binding(&mut self, port: u16) -> io::Result<BindingVerdict> {
+        self.inspecting = true;
+        let result = self.inspect_binding_until(port);
+        self.inspecting = false;
+        result
+    }
+    fn inspect_binding_until(&mut self, port: u16) -> io::Result<BindingVerdict> {
         let mut unstable = None;
         let mut result = Ok(BindingVerdict::Unstable("inspection unstable".into()));
         for _ in 0..5 {
@@ -1726,6 +1732,18 @@ impl<P: ProcessTable> ProcessTree<P> {
     fn cleanup_until(&mut self, until: Instant) -> io::Result<()> {
         // Mark BEFORE doing work: errors and exhausted budgets must not restart in Drop.
         self.cleanup_done = true;
+        let result = self.cleanup_poll(until);
+        if result.is_err() {
+            // A deadline forbids further discovery/waiting, never the final kill.
+            // These nonblocking pidfd signals cannot hit a reused numeric PID.
+            // Keep the original error: this attempt does not establish cleanup.
+            for handle in self.handles.values() {
+                let _ = self.table.signal(handle, rustix::process::Signal::KILL);
+            }
+        }
+        result
+    }
+    fn cleanup_poll(&mut self, until: Instant) -> io::Result<()> {
         let mut empty_scans = 0;
         loop {
             self.cleanup_time(until)?;

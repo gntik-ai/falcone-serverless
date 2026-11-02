@@ -440,50 +440,6 @@ fn legacy_replayers_and_boundary_envelopes_pass() {
 }
 
 #[test]
-fn binding_snapshot_rejects_wildcard_ipv6_and_other_loopbacks() {
-    let header = "  sl  local_address rem_address st\n";
-    let good = format!("{header} 0: 0100007F:1F90 00000000:0000 0A\n");
-    assert!(contract::check_binding_snapshot(&good, header, 8080).is_empty());
-    for bad in ["00000000", "0200007F"] {
-        let tcp = format!("{header} 0: {bad}:1F90 00000000:0000 0A\n");
-        assert_eq!(
-            contract::check_binding_snapshot(&tcp, header, 8080)
-                .keys()
-                .copied()
-                .collect::<Vec<_>>(),
-            ["OCI-V1-BINDING"]
-        );
-    }
-    let ipv6 = format!(
-        "{header} 0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A\n"
-    );
-    assert_eq!(
-        contract::check_binding_snapshot(&good, &ipv6, 8080)
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        ["OCI-V1-BINDING"]
-    );
-    assert_eq!(
-        contract::check_binding_snapshot(header, header, 8080)
-            .keys()
-            .copied()
-            .collect::<Vec<_>>(),
-        ["OCI-V1-BINDING"]
-    );
-}
-
-#[test]
-fn binding_snapshot_names_the_second_wildcard_listener() {
-    let tcp = "sl local_address rem_address st\n0: 0100007F:1F90 00000000:0000 0A\n1: 00000000:2329 00000000:0000 0A\n";
-    let verdict = contract::check_binding_snapshot(tcp, "sl local_address rem_address st\n", 8080);
-    let detail = verdict
-        .get("OCI-V1-BINDING")
-        .expect("extra listener must fail");
-    assert!(detail.contains("0.0.0.0:9001"), "{detail}");
-}
-
-#[test]
 fn utc_deadlines_match_the_published_schema() {
     let schema: Value = serde_json::from_str(contract::REQUEST_SCHEMA).unwrap();
     let validator = jsonschema::options()
@@ -673,6 +629,7 @@ mod process_seam {
         MalformedTaskEntry,
         MalformedTcpEntry,
         ReadCrossingDeadline,
+        StopWaitConsumesInspectionBudget,
         ReparentingMidWalk,
         ForkThenExit,
         UnreadableFd,
@@ -680,6 +637,7 @@ mod process_seam {
         ZombieLeaderLiveThread,
         StateAfterLastFdSample,
         PidfdUnavailable,
+        ReusedChildBeforeOpen,
         CleanupForkThenExit,
         CleanupExhaustion,
         IgnoreTermOnly,
@@ -687,6 +645,7 @@ mod process_seam {
     struct SyntheticProc {
         tasks: BTreeMap<u32, BTreeMap<u32, Task>>,
         tcp: String,
+        tcp6: String,
         now: Instant,
         scenario: Scenario,
         delivered: bool,
@@ -713,6 +672,7 @@ mod process_seam {
                 ]
                 .into(),
                 tcp: format!("{HEADER}{}", row("0100007F:1F90", "0A", 42)),
+                tcp6: HEADER.into(),
                 now: Instant::now(),
                 scenario: Scenario::Stable,
                 delivered: false,
@@ -741,7 +701,7 @@ mod process_seam {
                 return Ok(self.tcp.clone());
             }
             if path == "/proc/net/tcp6" {
-                return Ok(HEADER.into());
+                return Ok(self.tcp6.clone());
             }
             let parts: Vec<_> = path.split('/').collect();
             let pid = parts[2].parse::<u32>().unwrap();
@@ -859,6 +819,25 @@ mod process_seam {
             Ok(sockets)
         }
         fn open(&mut self, pid: u32, _: Instant) -> io::Result<u32> {
+            if pid == 20 && self.scenario == Scenario::ReusedChildBeforeOpen && !self.delivered {
+                self.delivered = true;
+                // The stopped parent ignores SIGCHLD: its exited child has been
+                // auto-reaped and the kernel reused the PID outside the tree.
+                self.tasks
+                    .get_mut(&10)
+                    .unwrap()
+                    .get_mut(&10)
+                    .unwrap()
+                    .children
+                    .clear();
+                self.tasks
+                    .get_mut(&30)
+                    .unwrap()
+                    .get_mut(&30)
+                    .unwrap()
+                    .children
+                    .push(20);
+            }
             if self.scenario == Scenario::PidfdUnavailable || !self.tasks.contains_key(&pid) {
                 Err(io::ErrorKind::NotFound.into())
             } else {
@@ -873,9 +852,16 @@ mod process_seam {
             if let Some(tasks) = self.tasks.get_mut(pid) {
                 for task in tasks.values_mut() {
                     match signal {
+                        Signal::STOP
+                            if self.scenario == Scenario::StopWaitConsumesInspectionBudget => {}
                         Signal::STOP if task.state != 'Z' => task.state = 'T',
                         Signal::CONT if task.state == 'T' => task.state = 'S',
-                        Signal::TERM if self.scenario == Scenario::IgnoreTermOnly => {}
+                        Signal::TERM
+                            if matches!(
+                                self.scenario,
+                                Scenario::IgnoreTermOnly
+                                    | Scenario::StopWaitConsumesInspectionBudget
+                            ) => {}
                         Signal::TERM | Signal::KILL
                             if self.scenario != Scenario::CleanupExhaustion =>
                         {
@@ -1080,6 +1066,45 @@ mod process_seam {
     }
 
     #[test]
+    fn tree_owned_wildcards_ipv6_and_other_loopbacks_violate_exclusive_binding() {
+        for (local, expected) in [
+            ("00000000:2329", "0.0.0.0:9001"),
+            ("0200007F:2329", "127.0.0.2:9001"),
+            ("00000000000000000000000000000000:2329", "[::]:9001"),
+        ] {
+            let mut proc = SyntheticProc::compliant();
+            let entry = row(local, "0A", 43);
+            if local.len() > 13 {
+                proc.tcp6.push_str(&entry.replacen(
+                    "00000000:0000",
+                    "00000000000000000000000000000000:0000",
+                    1,
+                ));
+            } else {
+                proc.tcp.push_str(&entry);
+            }
+            proc.tasks
+                .get_mut(&10)
+                .unwrap()
+                .get_mut(&10)
+                .unwrap()
+                .sockets
+                .insert(43);
+            let BindingVerdict::Violation(detail) = proc.tree().inspect_binding(8080).unwrap()
+            else {
+                panic!("expected exclusive-binding violation for {expected}");
+            };
+            assert!(detail.contains(expected), "{detail}");
+        }
+        let mut proc = SyntheticProc::compliant();
+        proc.tcp = HEADER.into();
+        assert!(matches!(
+            proc.tree().inspect_binding(8080).unwrap(),
+            BindingVerdict::Violation(_)
+        ));
+    }
+
+    #[test]
     fn extra_tree_listener_names_the_wildcard_and_outside_listener_is_excluded() {
         let mut proc = SyntheticProc::compliant();
         proc.tcp.push_str(&row("00000000:2329", "0A", 43));
@@ -1106,6 +1131,52 @@ mod process_seam {
         assert_eq!(
             proc.tree().inspect_binding(8080).unwrap(),
             BindingVerdict::Compliant
+        );
+    }
+
+    #[test]
+    fn reused_child_pid_outside_the_stopped_parent_is_never_signalled() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::ReusedChildBeforeOpen;
+        proc.tasks
+            .get_mut(&10)
+            .unwrap()
+            .get_mut(&10)
+            .unwrap()
+            .children
+            .push(20);
+        for pid in [20, 30] {
+            proc.tasks.insert(
+                pid,
+                [(
+                    pid,
+                    Task {
+                        state: 'S',
+                        children: vec![],
+                        sockets: BTreeSet::new(),
+                    },
+                )]
+                .into(),
+            );
+        }
+        proc.alive.borrow_mut().insert(20);
+        let alive = proc.alive.clone();
+        let signals = proc.signals.clone();
+        let mut tree = proc.tree();
+        assert!(matches!(
+            tree.inspect_binding(8080).unwrap(),
+            BindingVerdict::Unstable(_)
+        ));
+        tree.terminate().unwrap();
+        drop(tree);
+        assert_eq!(
+            *alive.borrow(),
+            [20].into(),
+            "the unrelated process was killed or reaped"
+        );
+        assert!(
+            signals.borrow().iter().all(|(pid, _)| *pid != 20),
+            "the unrelated process received a signal"
         );
     }
 
@@ -1139,6 +1210,50 @@ mod process_seam {
         assert!(
             alive.borrow().is_empty(),
             "cleanup returned with a surviving adopted child"
+        );
+    }
+
+    #[test]
+    fn deadline_crossing_still_kills_retained_processes_and_drop_does_not_retry() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::ReadCrossingDeadline;
+        let signals = proc.signals.clone();
+        let mut tree = proc.tree();
+        assert_eq!(
+            tree.inspect_binding(8080).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            tree.terminate().unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(
+            signals.borrow().contains(&(10, Signal::KILL)),
+            "the deadline left the stopped candidate alive"
+        );
+        signals.borrow_mut().clear();
+        drop(tree);
+        assert!(
+            signals.borrow().is_empty(),
+            "Drop restarted exhausted cleanup"
+        );
+    }
+
+    #[test]
+    fn stop_wait_leaves_time_to_kill_and_reap_within_the_absolute_deadline() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::StopWaitConsumesInspectionBudget;
+        proc.tasks.get_mut(&10).unwrap().get_mut(&10).unwrap().state = 'D';
+        let alive = proc.alive.clone();
+        let mut tree = proc.tree();
+        assert_eq!(
+            tree.inspect_binding(8080).unwrap_err().kind(),
+            io::ErrorKind::TimedOut
+        );
+        assert!(!tree.terminate().unwrap());
+        assert!(
+            alive.borrow().is_empty(),
+            "candidate was not killed and reaped"
         );
     }
 
