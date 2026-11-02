@@ -79,7 +79,7 @@ fn ruleset_application_failure_is_distinct_from_abi_probe_and_blocks_every_build
 }
 
 #[test]
-fn configured_forbidden_paths_are_probed_at_startup_and_before_build() {
+fn configured_forbidden_paths_are_probed_before_build_after_passing_readiness() {
     let root = TempRoot::new();
     let forbidden = TempRoot::new();
     let path = forbidden.0.join("signing-key");
@@ -90,14 +90,27 @@ fn configured_forbidden_paths_are_probed_at_startup_and_before_build() {
     assert!(launcher.check_readiness().ready);
     // Only a dangling symlink: a presence probe must not follow or read it.
     std::os::unix::fs::symlink("missing", &path).unwrap();
-    assert_eq!(
-        launcher.check_readiness().failure,
-        Some(Failure::CredentialMount)
-    );
     assert!(launcher.connect(1));
     assert_eq!(launcher.build(1, Profile::Rust), BuildOutcome::NotReady);
     assert_eq!(launcher.report().failure, Some(Failure::CredentialMount));
     assert!(launcher.kernel().spawned.is_empty());
+}
+
+#[test]
+fn configured_forbidden_path_present_at_startup_fails_readiness() {
+    let root = TempRoot::new();
+    let forbidden = TempRoot::new();
+    let path = forbidden.0.join("signing-key");
+    std::os::unix::fs::symlink("missing", &path).unwrap();
+    let mut arguments = root.config().arguments();
+    arguments.push(path.into_os_string());
+    let config = RunnerConfig::from_arguments(&arguments).unwrap();
+    let mut launcher = Launcher::new(config, MockKernel::default());
+    let report = launcher.check_readiness();
+    assert!(!report.ready);
+    assert_eq!(report.failure, Some(Failure::CredentialMount));
+    assert!(launcher.kernel().spawned.is_empty());
+    assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 
 #[test]
