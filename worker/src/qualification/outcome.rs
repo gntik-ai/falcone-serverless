@@ -113,10 +113,19 @@ pub fn root_fs_read_only(mountinfo: Option<&str>, write: Result<(), String>) -> 
     }
 }
 
-pub fn tmp_writable(write: Result<(), String>) -> Outcome {
-    match write {
+/// Why the temp-storage round trip failed. Only a failed readback is a posture
+/// finding: the volume accepted the write but did not hand the data back.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ProbeError {
+    Write(String),
+    Readback(String),
+}
+
+pub fn tmp_writable(probe: Result<(), ProbeError>) -> Outcome {
+    match probe {
         Ok(()) => Outcome::passed("/tmp write probe succeeded"),
-        Err(reason) => Outcome::failed(reason, "io"),
+        Err(ProbeError::Write(reason)) => Outcome::failed(reason, "io"),
+        Err(ProbeError::Readback(reason)) => Outcome::failed(reason, "posture"),
     }
 }
 
@@ -221,8 +230,31 @@ mod tests {
         }
         assert_eq!(status(root_fs_read_only(Some(ro), Ok(()))), "failed");
         assert_eq!(status(root_fs_read_only(None, Ok(()))), "failed");
-        assert_eq!(status(tmp_writable(Ok(()))), "passed");
-        assert_eq!(status(tmp_writable(Err("denied".into()))), "failed");
+    }
+
+    #[test]
+    fn tmp_evidence_needs_the_verified_round_trip() {
+        let passed = tmp_writable(Ok(()));
+        assert_eq!(passed.reason, "/tmp write probe succeeded");
+        assert_eq!(passed.error_class, None);
+        assert_eq!(status(passed), "passed");
+        for error in [
+            ProbeError::Write("denied".into()),
+            ProbeError::Write("read-only file system".into()),
+        ] {
+            let outcome = tmp_writable(Err(error));
+            assert_eq!(outcome.error_class, Some("io"));
+            assert_eq!(status(outcome), "failed");
+        }
+        for error in [
+            ProbeError::Readback("read failed".into()),
+            ProbeError::Readback("payload mismatch".into()),
+        ] {
+            let outcome = tmp_writable(Err(error));
+            assert_eq!(outcome.error_class, Some("posture"));
+            assert!(!outcome.reason.is_empty());
+            assert_eq!(status(outcome), "failed");
+        }
     }
 
     #[test]
