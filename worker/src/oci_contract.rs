@@ -6,6 +6,10 @@
 //! or passing file descriptors to the candidate. Such a process can itself open
 //! a forbidden listener. Once every in-tree task is stopped, it cannot resume
 //! itself; final task-state reads close transitions originating inside the tree.
+#[path = "oci_deadline.rs"]
+mod deadline;
+pub use deadline::utc_deadline;
+
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -242,56 +246,6 @@ fn shape(value: &Value, schema: &Value, root: &Value, strings: bool) -> bool {
         None => true,
         _ => false,
     }
-}
-
-pub fn utc_deadline(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    if bytes.len() < 20
-        || !bytes.is_ascii()
-        || bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes[10] != b'T'
-        || bytes[13] != b':'
-        || bytes[16] != b':'
-        || !text.ends_with('Z')
-    {
-        return false;
-    }
-    let number = |start, end| {
-        text[start..end]
-            .bytes()
-            .all(|b| b.is_ascii_digit())
-            .then(|| text[start..end].parse::<u32>().ok())
-            .flatten()
-    };
-    let (Some(year), Some(month), Some(day), Some(hour), Some(minute), Some(second)) = (
-        number(0, 4),
-        number(5, 7),
-        number(8, 10),
-        number(11, 13),
-        number(14, 16),
-        number(17, 19),
-    ) else {
-        return false;
-    };
-    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-    let days = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => 0,
-    };
-    let fraction = &bytes[19..bytes.len() - 1];
-    day > 0
-        && day <= days
-        && hour < 24
-        && minute < 60
-        && (second < 60 || (second == 60 && hour == 23 && minute == 59))
-        && (fraction.is_empty()
-            || (fraction[0] == b'.'
-                && (2..=10).contains(&fraction.len())
-                && fraction[1..].iter().all(u8::is_ascii_digit)))
 }
 
 pub struct Response {
@@ -1599,10 +1553,6 @@ impl<P: ProcessTable> ProcessTree<P> {
                     remote: endpoint(fields[2], ipv6)?,
                     state,
                     inode: fields[9].parse().map_err(|_| invalid())?,
-                    evidence: fields[4..]
-                        .iter()
-                        .map(|field| (*field).to_owned())
-                        .collect(),
                 });
             }
         }
@@ -1711,11 +1661,12 @@ impl<P: ProcessTable> ProcessTree<P> {
 }
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct TcpEntry {
+    // Compare socket identity and state, not changing queue/timer counters.
+    // Those counters are still validated when parsing each procfs row.
     local: SocketAddr,
     remote: SocketAddr,
     state: u8,
     inode: u64,
-    evidence: Vec<String>,
 }
 fn deadline_error() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "conformance deadline exceeded")

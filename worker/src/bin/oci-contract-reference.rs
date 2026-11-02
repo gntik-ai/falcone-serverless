@@ -1,6 +1,6 @@
 //! Test-only local reference, not copied into the worker image. Never runs tenant code.
-#[path = "../oci_contract.rs"]
-pub mod contract;
+#[path = "../oci_deadline.rs"]
+mod deadline;
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -55,7 +55,7 @@ fn valid_request(value: &Value) -> bool {
         && context
             .get("deadline")
             .and_then(Value::as_str)
-            .is_some_and(contract::utc_deadline)
+            .is_some_and(deadline::utc_deadline)
 }
 
 fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {

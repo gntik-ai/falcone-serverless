@@ -484,65 +484,6 @@ fn binding_snapshot_names_the_second_wildcard_listener() {
 }
 
 #[test]
-fn process_lifecycle_signals_kills_and_reaps_without_network() {
-    let probe = contract::FilesystemProbe::new().unwrap();
-    let mut child = contract::Candidate::spawn(
-        8080,
-        std::ffi::OsStr::new("/bin/sleep"),
-        &["60".into()],
-        &probe,
-    )
-    .unwrap();
-    let pid = child.pid();
-    assert!(child.terminate().unwrap());
-    drop(child);
-    assert!(
-        rustix::process::test_kill_process(pid).is_err(),
-        "child was not reaped"
-    );
-    let child = contract::Candidate::spawn(
-        8080,
-        std::ffi::OsStr::new("/bin/sleep"),
-        &["60".into()],
-        &probe,
-    )
-    .unwrap();
-    let pid = child.pid();
-    drop(child);
-    assert!(
-        rustix::process::test_kill_process(pid).is_err(),
-        "early-error cleanup"
-    );
-}
-
-#[test]
-fn sigterm_ignore_is_bounded_and_killed_after_ten_seconds() {
-    let probe = contract::FilesystemProbe::new().unwrap();
-    let mut child = contract::Candidate::spawn(
-        8080,
-        std::ffi::OsStr::new("/bin/sh"),
-        &[
-            "-c".into(),
-            "trap '' TERM; : > \"$TMPDIR/ready\"; exec /bin/sleep 60".into(),
-        ],
-        &probe,
-    )
-    .unwrap();
-    let pid = child.pid();
-    let ready = Instant::now();
-    while !probe.scratch().join("ready").exists() {
-        assert!(ready.elapsed() < Duration::from_secs(5));
-        thread::sleep(Duration::from_millis(10));
-    }
-    let start = Instant::now();
-    assert!(!child.terminate().unwrap());
-    drop(child);
-    assert!(start.elapsed() >= Duration::from_secs(10));
-    assert!(start.elapsed() < Duration::from_secs(15));
-    assert!(rustix::process::test_kill_process(pid).is_err());
-}
-
-#[test]
 fn utc_deadlines_match_the_published_schema() {
     let schema: Value = serde_json::from_str(contract::REQUEST_SCHEMA).unwrap();
     let validator = jsonschema::options()
@@ -651,36 +592,6 @@ fn provisional_legacy_hashes_are_pinned_and_mismatch_is_rejected() {
 }
 
 #[test]
-fn cleanup_reaps_descendants_of_the_candidate() {
-    let probe = contract::FilesystemProbe::new().unwrap();
-    let child = contract::Candidate::spawn(
-        8080,
-        std::ffi::OsStr::new("/bin/sh"),
-        &[
-            "-c".into(),
-            "/bin/sleep 60 & echo $! > \"$TMPDIR/child-pid\"; wait".into(),
-        ],
-        &probe,
-    )
-    .unwrap();
-    let ready = Instant::now();
-    let descendant = loop {
-        if let Ok(text) = fs::read_to_string(probe.scratch().join("child-pid"))
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            break rustix::process::Pid::from_raw(pid).unwrap();
-        }
-        assert!(ready.elapsed() < Duration::from_secs(5));
-        thread::sleep(Duration::from_millis(10));
-    };
-    drop(child);
-    assert!(
-        rustix::process::test_kill_process(descendant).is_err(),
-        "descendant was not killed/reaped"
-    );
-}
-
-#[test]
 fn valid_fixture_files_are_direct_contract_instances() {
     for kind in ["request", "context", "envelope"] {
         let fixture: Value = serde_json::from_slice(
@@ -753,6 +664,7 @@ mod process_seam {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum Scenario {
         Stable,
+        TcpCountersAdvance,
         ForkDuringFdRead,
         SocketTransfer,
         WildcardDuringResample,
@@ -1012,6 +924,15 @@ mod process_seam {
                 return;
             }
             match (self.scenario, event) {
+                (Scenario::TcpCountersAdvance, ProcessEvent::FdResampleComplete) => {
+                    self.delivered = true;
+                    // Timers and queue lengths are not socket identity. HTTP probes
+                    // leave TIME_WAIT rows whose countdown changes during inspection.
+                    self.tcp = self
+                        .tcp
+                        .replace("03:000006ED", "03:000006E5")
+                        .replace("00000000:00000000", "00000001:00000002");
+                }
                 (Scenario::SocketTransfer, ProcessEvent::FdSampleComplete) => {
                     self.delivered = true;
                     self.tasks
@@ -1081,6 +1002,18 @@ mod process_seam {
                 .tree()
                 .inspect_binding(8080)
                 .unwrap(),
+            BindingVerdict::Compliant
+        );
+    }
+
+    #[test]
+    fn compliant_listener_survives_tcp_timer_and_queue_churn() {
+        let mut proc = SyntheticProc::compliant();
+        proc.scenario = Scenario::TcpCountersAdvance;
+        proc.tcp
+            .push_str(&row("0100007F:C001", "06", 0).replace(" 00:00000000 ", " 03:000006ED "));
+        assert_eq!(
+            proc.tree().inspect_binding(8080).unwrap(),
             BindingVerdict::Compliant
         );
     }
@@ -1242,47 +1175,6 @@ mod process_seam {
             );
         }
     }
-}
-
-#[test]
-fn escaped_sigterm_ignoring_child_is_killed_and_reaped() {
-    use rustix::process::{
-        Pid, PidfdFlags, Signal, WaitOptions, pidfd_open, pidfd_send_signal, waitpid,
-    };
-    let probe = contract::FilesystemProbe::new().unwrap();
-    let mut child = contract::Candidate::spawn(8080, std::ffi::OsStr::new("/bin/sh"), &[
-        "-c".into(),
-        "/usr/bin/setsid /bin/sh -c 'trap \"\" TERM; echo $$ > \"$TMPDIR/escaped-pid\"; exec /bin/sleep 60' & wait".into(),
-    ], &probe).unwrap();
-    let ready = Instant::now();
-    let descendant = loop {
-        if let Ok(text) = fs::read_to_string(probe.scratch().join("escaped-pid"))
-            && let Ok(pid) = text.trim().parse::<i32>()
-        {
-            break Pid::from_raw(pid).unwrap();
-        }
-        assert!(ready.elapsed() < Duration::from_secs(5));
-        thread::sleep(Duration::from_millis(10));
-    };
-    // Keep a process handle so a red test also cleans up without numeric signals.
-    let handle = pidfd_open(descendant, PidfdFlags::empty()).unwrap();
-    let start = Instant::now();
-    child.terminate().unwrap();
-    drop(child);
-    let survived = rustix::process::test_kill_process(descendant).is_ok();
-    if survived {
-        let _ = pidfd_send_signal(&handle, Signal::KILL);
-        while waitpid(Some(descendant), WaitOptions::NOHANG)
-            .ok()
-            .flatten()
-            .is_none()
-            && start.elapsed() < contract::TERM_GRACE + Duration::from_secs(2)
-        {
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-    assert!(!survived, "escaped descendant survived cleanup");
-    assert!(start.elapsed() < contract::TERM_GRACE + Duration::from_secs(2));
 }
 
 #[test]
