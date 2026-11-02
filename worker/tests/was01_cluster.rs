@@ -13,8 +13,10 @@ use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use support::kube_cluster::{KubeCluster, load_config};
-use support::observation::{Admission, Condition, Observation, Review};
+use support::kube_cluster::{KubeCluster, load_config, pod_view};
+use support::observation::{
+    Admission, Collector, Condition, ContainerView, Exit, Observation, Review,
+};
 use support::render::{self, BOOTSTRAP, FIXTURE, Phase, Run};
 use support::was01::{
     DENIED, Evidence, Identity, Observed, Settings, Token, Was01Cluster, guarded_apply, qualify,
@@ -140,16 +142,21 @@ fn kubeconfig_lists_with_empty_or_unreadable_entries_are_unverified() {
         assert!(error.starts_with("UNVERIFIED"), "{value:?}: {error}");
         assert!(!error.contains(&existing), "paths are not echoed: {error}");
     }
-    let two = format!("{existing}:{existing}");
-    let list = Kubeconfigs::parse(Some(&two)).unwrap();
-    assert_eq!(list.paths().len(), 2);
-    assert_eq!(
-        list.kubectl_flags(),
-        [
-            format!("--kubeconfig={existing}"),
-            format!("--kubeconfig={existing}")
-        ]
-    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn an_unparseable_kubeconfig_is_unverified_and_not_echoed() {
+    let dir = scratch("invalid");
+    let file = dir.join("config");
+    std::fs::write(
+        &file,
+        "clusters: [\n  not: [valid yaml: SECRET-LOOKING-VALUE",
+    )
+    .unwrap();
+    let error = Kubeconfigs::parse(file.to_str()).unwrap_err();
+    assert!(error.starts_with("UNVERIFIED"), "{error}");
+    assert!(!error.contains("SECRET-LOOKING-VALUE"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -161,30 +168,107 @@ fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
         .block_on(future)
 }
 
-#[test]
-fn every_listed_file_is_loaded_through_read_from_and_custom_config() {
-    let dir = scratch("merge");
-    // The first file names a user that only the second file defines.
+/// Two files that only work together: the first selects the context and names the cluster
+/// and the user, but defines no user; the second defines that user and a conflicting cluster.
+fn split_pair(dir: &std::path::Path) -> (String, String) {
     let first = dir.join("first");
     let second = dir.join("second");
-    std::fs::write(&first, kubeconfig_text("https://first.invalid:6443", "u")).unwrap();
     std::fs::write(
-        &second,
-        json!({"apiVersion": "v1", "kind": "Config",
-            "users": [{"name": "only-in-second", "user": {"token": "placeholder"}}]})
+        &first,
+        json!({"apiVersion": "v1", "kind": "Config", "current-context": "ctx",
+            "clusters": [{"name": "c", "cluster": {"server": "https://first.invalid:6443"}}],
+            "contexts": [{"name": "ctx", "context": {"cluster": "c", "user": "u"}}]})
         .to_string(),
     )
     .unwrap();
-    let both =
-        Kubeconfigs::parse(Some(&format!("{}:{}", first.display(), second.display()))).unwrap();
+    std::fs::write(
+        &second,
+        json!({"apiVersion": "v1", "kind": "Config",
+            "clusters": [{"name": "c", "cluster": {"server": "https://second.invalid:6443"}}],
+            "contexts": [{"name": "ctx", "context": {"cluster": "c", "user": "other"}}],
+            "users": [{"name": "u", "user": {"token": "second-file-token"}}]})
+        .to_string(),
+    )
+    .unwrap();
+    (
+        first.to_str().unwrap().to_owned(),
+        second.to_str().unwrap().to_owned(),
+    )
+}
+
+fn identity(config: &kube::Config) -> Value {
+    serde_json::to_value(&config.auth_info).unwrap()
+}
+
+#[test]
+fn every_listed_file_is_loaded_through_read_from_and_custom_config() {
+    let dir = scratch("merge");
+    let (first, second) = split_pair(&dir);
+    let both = Kubeconfigs::parse(Some(&format!("{first}:{second}"))).unwrap();
+    assert_eq!(both.paths().len(), 2);
     let config = block_on(load_config(&both)).unwrap();
+    // The first file wins every name it defines, and the identity it selects only exists in
+    // the second file: ignoring either file would change one of these.
     assert_eq!(config.cluster_url.host(), Some("first.invalid"));
-    // Only the listed files are consulted: the second one alone has no cluster to talk to.
-    let only_second = Kubeconfigs::parse(Some(second.to_str().unwrap())).unwrap();
+    assert_eq!(identity(&config)["token"], "second-file-token");
+    // The first file alone has no user, so its identity differs: the second file matters.
+    let only_first = Kubeconfigs::parse(Some(&first)).unwrap();
+    let alone = block_on(load_config(&only_first)).unwrap();
+    assert_eq!(alone.cluster_url.host(), Some("first.invalid"));
+    assert_ne!(identity(&alone), identity(&config));
+    // The order is the precedence.
+    let reversed = Kubeconfigs::parse(Some(&format!("{second}:{first}"))).unwrap();
+    let config = block_on(load_config(&reversed)).unwrap();
+    assert_eq!(config.cluster_url.host(), Some("second.invalid"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn kubectl_is_given_the_same_merged_configuration_as_the_client() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch("kubectl");
+    let (first, second) = split_pair(&dir);
+    let list = Kubeconfigs::parse(Some(&format!("{first}:{second}"))).unwrap();
+    let flags = list.kubectl_flags().unwrap();
+    // One flag: repeating it would make kubectl use only the last file.
+    assert_eq!(flags.len(), 1);
+    assert_eq!(list.kubectl_flags().unwrap(), flags);
+    let merged = PathBuf::from(flags[0].strip_prefix("--kubeconfig=").unwrap());
+    assert!(merged.to_str() != Some(first.as_str()) && merged.to_str() != Some(second.as_str()));
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&merged), 0o600);
+    assert_eq!(mode(merged.parent().unwrap()), 0o700);
+
+    // The file selects the very cluster and identity the client does.
+    let client = block_on(load_config(&list)).unwrap();
+    let from_file = Kubeconfigs::parse(merged.to_str()).unwrap();
+    let kubectl = block_on(load_config(&from_file)).unwrap();
+    assert_eq!(kubectl.cluster_url, client.cluster_url);
+    assert_eq!(identity(&kubectl), identity(&client));
+    assert_eq!(kubectl.default_namespace, client.default_namespace);
+
+    // And kubectl itself agrees, where it is installed.
+    if let Ok(output) = std::process::Command::new("kubectl")
+        .args(["config", "view", "--raw", "--minify", "-o", "json"])
+        .arg(&flags[0])
+        .env_remove("KUBECONFIG")
+        .output()
+        && output.status.success()
+    {
+        let view: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            view["clusters"][0]["cluster"]["server"],
+            "https://first.invalid:6443"
+        );
+        assert_eq!(view["users"][0]["user"]["token"], "second-file-token");
+    }
+
+    drop(from_file);
+    drop(list);
     assert!(
-        block_on(load_config(&only_second))
-            .unwrap_err()
-            .starts_with("UNVERIFIED")
+        !merged.exists(),
+        "the merged file is removed with its owner"
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
@@ -237,12 +321,15 @@ fn an_invalid_kubeconfig_never_loads_home_dot_kube_config() {
 
 #[test]
 fn the_loader_never_references_ambient_configuration() {
-    let source = include_str!("support/kube_cluster.rs");
-    let code: String = source
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let strip = |source: &str| -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let reader = strip(include_str!("support/kubeconfig.rs"));
+    let client = strip(include_str!("support/kube_cluster.rs"));
     for banned in [
         "Config::infer",
         "Config::incluster",
@@ -251,10 +338,11 @@ fn the_loader_never_references_ambient_configuration() {
         "Client::try_default",
         "Config::from_cluster_env",
     ] {
-        assert!(!code.contains(banned), "{banned}");
+        assert!(!reader.contains(banned), "{banned}");
+        assert!(!client.contains(banned), "{banned}");
     }
-    assert!(code.contains("Kubeconfig::read_from"));
-    assert!(code.contains("Config::from_custom_kubeconfig"));
+    assert!(reader.contains("Kubeconfig::read_from"));
+    assert!(client.contains("Config::from_custom_kubeconfig"));
 }
 
 // ---- the fake cluster ------------------------------------------------------------------
@@ -414,6 +502,7 @@ impl Was01Cluster for Fake {
         Ok(Observed {
             conditions: self.conditions.clone().unwrap_or_else(|| ready("True")),
             log: good_log(self.uid.get()),
+            startup: None,
         })
     }
 }
@@ -686,6 +775,7 @@ fn evidence_with(edit: impl FnOnce(&mut Evidence)) -> Result<(), String> {
         observation: Observation {
             conditions: ready("True"),
             log: good_log(uid),
+            startup: None,
             admissions: (0..5)
                 .map(|n| Admission {
                     identity: if n < 3 { "admin" } else { "installer" },
@@ -1139,4 +1229,157 @@ fn was01_restricted_cluster() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ---- evidence kept when the runner fails before the pod is Ready -------------------------
+
+fn crashed(code: i32) -> ContainerView {
+    ContainerView {
+        waiting_reason: Some("CrashLoopBackOff".into()),
+        last_exit: Some(Exit {
+            reason: "Error".into(),
+            code,
+        }),
+        ..ContainerView::default()
+    }
+}
+
+#[test]
+fn a_runner_that_fails_before_ready_keeps_its_recorded_message() {
+    let partial = [
+        json!({"check": "engine_config", "status": "passed", "reason": "ok", "error_class": null}),
+        json!({"check": "compile_valid", "status": "failed",
+            "reason": "cannot compile the component", "error_class": "compile"}),
+    ]
+    .map(|record| record.to_string())
+    .join("\n");
+    let mut collector = Collector::default();
+    // Not Ready, the container is already crash looping: the log is read all the same.
+    collector.pod(ready("False"), crashed(1));
+    assert!(collector.finished(9), "a failed container ends the wait");
+    collector.log(partial.clone());
+    // A later, emptier read of the restarted instance never discards it.
+    collector.log(String::new());
+    collector.log("{\"check\": \"engine_config\", \"status\": \"passed\"}".into());
+    let observed = collector.into_observed();
+    assert_eq!(observed.log, partial);
+
+    let error = evidence_with(|evidence| {
+        evidence.observation.conditions = observed.conditions.clone();
+        evidence.observation.log = observed.log.clone();
+        evidence.observation.startup = observed.startup.clone();
+    })
+    .unwrap_err();
+    assert!(
+        error.contains("compile_valid failed: cannot compile the component (compile)"),
+        "{error}"
+    );
+    assert!(error.contains("pod Ready condition is False"), "{error}");
+    assert!(error.contains("CrashLoopBackOff"), "{error}");
+    assert!(error.contains("exit code 1"), "{error}");
+}
+
+#[test]
+fn a_container_that_never_starts_is_reported_with_its_waiting_reason() {
+    let mut collector = Collector::default();
+    collector.pod(
+        vec![],
+        ContainerView {
+            waiting_reason: Some("ImagePullBackOff".into()),
+            ..ContainerView::default()
+        },
+    );
+    assert!(!collector.container().has_output());
+    assert!(collector.finished(9));
+    let observed = collector.into_observed();
+    let error = evidence_with(|evidence| {
+        evidence.observation.conditions = observed.conditions.clone();
+        evidence.observation.log = observed.log.clone();
+        evidence.observation.startup = observed.startup.clone();
+    })
+    .unwrap_err();
+    assert!(error.contains("ImagePullBackOff"), "{error}");
+    assert!(error.contains("engine_config: no record"), "{error}");
+}
+
+#[test]
+fn polling_continues_while_the_container_is_still_starting() {
+    let mut collector = Collector::default();
+    collector.pod(
+        ready("False"),
+        ContainerView {
+            waiting_reason: Some("ContainerCreating".into()),
+            ..ContainerView::default()
+        },
+    );
+    assert!(!collector.finished(9));
+    collector.pod(
+        ready("False"),
+        ContainerView {
+            running: true,
+            ..ContainerView::default()
+        },
+    );
+    collector.log(good_log(1));
+    // Complete, but the pod has not been Ready and the container still runs: keep waiting.
+    assert!(!collector.finished(9));
+    collector.pod(
+        ready("True"),
+        ContainerView {
+            running: true,
+            ..ContainerView::default()
+        },
+    );
+    assert!(collector.finished(9));
+}
+
+#[test]
+fn the_ready_snapshot_survives_the_runner_exiting() {
+    let mut collector = Collector::default();
+    collector.pod(
+        ready("True"),
+        ContainerView {
+            running: true,
+            ..ContainerView::default()
+        },
+    );
+    collector.pod(
+        ready("False"),
+        ContainerView {
+            terminated: Some(Exit {
+                reason: "Completed".into(),
+                code: 0,
+            }),
+            ..ContainerView::default()
+        },
+    );
+    collector.log(good_log(1));
+    let observed = collector.into_observed();
+    assert!(
+        observed
+            .conditions
+            .iter()
+            .any(|c| c.kind == "Ready" && c.status == "True")
+    );
+}
+
+#[test]
+fn the_runner_container_state_is_read_from_the_pod_status() {
+    let pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(json!({
+        "metadata": {"name": "p"},
+        "status": {
+            "conditions": [{"type": "Ready", "status": "False"}],
+            "containerStatuses": [
+                {"name": "sidecar", "image": "i", "imageID": "", "ready": false,
+                 "restartCount": 0, "state": {"running": {}}},
+                {"name": "runner", "image": "i", "imageID": "", "ready": false, "restartCount": 3,
+                 "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                 "lastState": {"terminated": {"exitCode": 2, "reason": "Error"}}}
+            ]
+        }
+    }))
+    .unwrap();
+    let (conditions, view) = pod_view(&pod);
+    assert_eq!(conditions.len(), 1);
+    assert_eq!(view, crashed(2));
 }

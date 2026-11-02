@@ -50,6 +50,7 @@ impl Identity<'_> {
 pub struct Observed {
     pub conditions: Vec<Condition>,
     pub log: String,
+    pub startup: Option<String>,
 }
 
 /// The cluster as the harness sees it. Namespace operations are the test-admin's.
@@ -172,6 +173,7 @@ pub fn run<C: Was01Cluster>(
     let observed = cluster.observe(&token, &namespace, &run.run)?;
     observation.conditions = observed.conditions;
     observation.log = observed.log;
+    observation.startup = observed.startup;
 
     // Phase 5, reported instead of only logged.
     guard.close()?;
@@ -254,6 +256,11 @@ pub fn qualify(evidence: &Evidence) -> Result<(), String> {
             Some(_) => failures.push(format!("installer may create {resource}")),
             None => failures.push(format!("no access review for {resource}")),
         }
+    }
+    if !failures.is_empty()
+        && let Some(startup) = &observation.startup
+    {
+        failures.push(format!("runner container {startup}"));
     }
     if failures.is_empty() {
         Ok(())

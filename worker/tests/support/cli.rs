@@ -55,15 +55,15 @@ impl<R: Runner> Cli<R> {
         }
     }
 
-    /// Every kubectl call names the listed kubeconfig files, so it never falls back to an
-    /// ambient `~/.kube/config` or the in-cluster configuration.
+    /// Every kubectl call names the one merged kubeconfig the kube client also uses, so it
+    /// never falls back to an ambient `~/.kube/config` or the in-cluster configuration.
     fn kubectl(
         &self,
         args: &[&str],
         input: Option<&Value>,
         timeout: Duration,
     ) -> Result<String, String> {
-        let flags = self.kubeconfigs.kubectl_flags();
+        let flags = self.kubeconfigs.kubectl_flags()?;
         let mut all: Vec<&str> = flags.iter().map(String::as_str).collect();
         all.extend_from_slice(args);
         self.runner.run("kubectl", &all, input, timeout)

@@ -22,15 +22,33 @@ use support::{
 
 const CONTAINERFILE: &str = include_str!("../Containerfile");
 
-/// A real, readable file stands in for the operator's kubeconfig; it is never read.
-fn kubeconfigs() -> Kubeconfigs {
-    static FILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let path = FILE.get_or_init(|| {
-        let path = std::env::temp_dir().join(format!("fs-test-kubeconfig-{}", std::process::id()));
-        std::fs::write(&path, "placeholder").unwrap();
-        path.to_str().unwrap().to_owned()
+/// A kubeconfig file with a placeholder cluster and no real credential.
+fn kubeconfig_file(name: &str, server: &str, token: &str) -> String {
+    static DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let dir = DIR.get_or_init(|| {
+        let dir =
+            std::env::temp_dir().join(format!("fs-test-kubeconfig-src-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     });
-    Kubeconfigs::parse(Some(path)).unwrap()
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "Config", "current-context": "ctx",
+            "clusters": [{"name": "c", "cluster": {"server": server}}],
+            "contexts": [{"name": "ctx", "context": {"cluster": "c", "user": "u"}}],
+            "users": [{"name": "u", "user": {"token": token}}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    path.to_str().unwrap().to_owned()
+}
+
+fn kubeconfigs() -> Kubeconfigs {
+    let path = kubeconfig_file("one", "https://one.invalid:6443", "placeholder");
+    Kubeconfigs::parse(Some(&path)).unwrap()
 }
 
 fn new_cli<R: Runner>(runner: R) -> Cli<R> {
@@ -606,7 +624,12 @@ fn kubectl_adapter_targets_only_guarded_objects_and_bounds_waits() {
     }
     let calls = cli.runner.calls.borrow();
     assert_eq!(calls.len(), 6);
-    let flag = format!("--kubeconfig={}", kubeconfigs().paths()[0].display());
+    let flag = calls[0]
+        .1
+        .iter()
+        .find(|arg| arg.starts_with("--kubeconfig="))
+        .unwrap()
+        .clone();
     assert!(calls.iter().all(|(_, args, _)| args.contains(&flag)));
     assert!(calls[0].1.contains(&"can-i".into()));
     let calls = &calls[1..];
@@ -1158,13 +1181,15 @@ fn invalid_kubeconfig_is_unverified_before_any_kubectl_call() {
 }
 
 #[test]
-fn every_kubectl_call_names_each_listed_kubeconfig() {
-    let existing = kubeconfigs().paths()[0].to_str().unwrap().to_owned();
+fn every_kubectl_call_carries_the_one_merged_kubeconfig() {
+    // Distinct files: kubectl takes one --kubeconfig, so it is handed the merge of both.
+    let first = kubeconfig_file("first", "https://first.invalid:6443", "first-token");
+    let second = kubeconfig_file("second", "https://second.invalid:6443", "second-token");
     let commands = Commands {
         rootless: true,
         ..Commands::default()
     };
-    let list = format!("{existing}:{existing}");
+    let list = format!("{first}:{second}");
     assert!(
         opt_in(
             &commands,
@@ -1179,15 +1204,39 @@ fn every_kubectl_call_names_each_listed_kubeconfig() {
     let calls = commands.calls.borrow();
     let kubectl: Vec<_> = calls.iter().filter(|call| call.0 == "kubectl").collect();
     assert!(kubectl.len() >= 5);
+    let mut flags = std::collections::BTreeSet::new();
     for (_, args, _) in kubectl {
-        assert_eq!(
-            args.iter()
-                .filter(|arg| **arg == format!("--kubeconfig={existing}"))
-                .count(),
-            2,
-            "{args:?}"
-        );
+        let given: Vec<_> = args
+            .iter()
+            .filter(|arg| arg.starts_with("--kubeconfig"))
+            .collect();
+        assert_eq!(given.len(), 1, "{args:?}");
+        assert!(!given[0].ends_with(&first) && !given[0].ends_with(&second));
+        flags.insert(given[0].clone());
     }
+    assert_eq!(flags.len(), 1, "every call uses the same file");
+}
+
+#[test]
+fn an_unparseable_kubeconfig_is_unverified_before_any_kubectl_call() {
+    let junk = std::env::temp_dir().join(format!("fs-test-kubeconfig-junk-{}", std::process::id()));
+    std::fs::write(&junk, "clusters: [not: valid").unwrap();
+    let commands = Commands {
+        rootless: true,
+        ..Commands::default()
+    };
+    let error = opt_in(
+        &commands,
+        Some("1"),
+        Some("registry.invalid/worker"),
+        junk.to_str(),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.starts_with("UNVERIFIED"), "{error}");
+    assert!(commands.calls.borrow().is_empty());
+    std::fs::remove_file(junk).unwrap();
 }
 
 #[test]

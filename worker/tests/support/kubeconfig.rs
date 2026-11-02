@@ -1,13 +1,84 @@
 //! The explicit cluster credential boundary: `KUBECONFIG` is split here, never by kube or
 //! kubectl. There is no fallback to `~/.kube/config` or the in-cluster configuration; a list
-//! that is empty, has an empty entry or names a file that cannot be read is UNVERIFIED before
-//! any API call, kubectl call or mutation. File contents are never read, printed or logged.
+//! that is empty, has an empty entry, names a file that cannot be read or holds an invalid
+//! kubeconfig is UNVERIFIED before any API call, kubectl call or mutation.
+//!
+//! Every listed file is read with `Kubeconfig::read_from` and merged once, first file wins.
+//! The kube client is built from that merge and kubectl is pointed at a private file that
+//! holds the very same merge, so both harnesses always select the same cluster and identity.
+//! File contents are never printed or logged.
 
-use std::fs::File;
+use kube::config::Kubeconfig;
+use std::fs::{DirBuilder, File, OpenOptions};
+use std::io::Write;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Kubeconfigs(Vec<PathBuf>);
+/// The merged configuration on disk for kubectl: a private directory and a 0600 file that
+/// are removed when the last `Kubeconfigs` clone is dropped.
+struct MergedFile {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl Drop for MergedFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+fn random_name() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let counter = NEXT.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let random = RandomState::new().hash_one((std::process::id(), counter, nanos));
+    format!("fs-test-kubeconfig-{random:016x}")
+}
+
+fn write_merged(config: &Kubeconfig) -> Result<MergedFile, String> {
+    const FAILED: &str = "UNVERIFIED: cannot prepare the merged kubeconfig for kubectl";
+    let dir = std::env::temp_dir().join(random_name());
+    DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|_| FAILED.to_owned())?;
+    let merged = MergedFile {
+        file: dir.join("config"),
+        dir,
+    };
+    let bytes = serde_json::to_vec(config).map_err(|_| FAILED.to_owned())?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&merged.file)
+        .map_err(|_| FAILED.to_owned())?;
+    file.write_all(&bytes).map_err(|_| FAILED.to_owned())?;
+    Ok(merged)
+}
+
+#[derive(Clone)]
+pub struct Kubeconfigs {
+    paths: Vec<PathBuf>,
+    merged: Arc<Kubeconfig>,
+    on_disk: Arc<Mutex<Option<MergedFile>>>,
+}
+
+impl std::fmt::Debug for Kubeconfigs {
+    /// Paths only: the merged contents carry credentials.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Kubeconfigs")
+            .field("paths", &self.paths)
+            .finish_non_exhaustive()
+    }
+}
 
 impl Kubeconfigs {
     pub fn parse(value: Option<&str>) -> Result<Self, String> {
@@ -15,35 +86,61 @@ impl Kubeconfigs {
             .filter(|value| !value.trim().is_empty())
             .ok_or("UNVERIFIED: KUBECONFIG must list the kubeconfig files to use")?;
         let mut paths = Vec::new();
+        let mut merged: Option<Kubeconfig> = None;
         for (index, entry) in value.split(':').enumerate() {
+            let number = index + 1;
             if entry.trim().is_empty() {
                 return Err(format!(
-                    "UNVERIFIED: KUBECONFIG entry {} is empty; ambient kubeconfig fallbacks are never used",
-                    index + 1
+                    "UNVERIFIED: KUBECONFIG entry {number} is empty; ambient kubeconfig fallbacks are never used"
                 ));
             }
             let path = Path::new(entry);
             if !path.is_file() || File::open(path).is_err() {
                 return Err(format!(
-                    "UNVERIFIED: KUBECONFIG entry {} is not a readable file",
-                    index + 1
+                    "UNVERIFIED: KUBECONFIG entry {number} is not a readable file"
                 ));
             }
+            let file = Kubeconfig::read_from(path).map_err(|_| {
+                format!("UNVERIFIED: KUBECONFIG entry {number} is not a valid kubeconfig")
+            })?;
+            merged = Some(match merged {
+                None => file,
+                Some(first) => first.merge(file).map_err(|_| {
+                    format!("UNVERIFIED: KUBECONFIG entry {number} cannot be merged")
+                })?,
+            });
             paths.push(path.to_path_buf());
         }
-        Ok(Self(paths))
+        Ok(Self {
+            paths,
+            merged: Arc::new(merged.ok_or("UNVERIFIED: KUBECONFIG lists no files")?),
+            on_disk: Arc::default(),
+        })
     }
 
     pub fn paths(&self) -> &[PathBuf] {
-        &self.0
+        &self.paths
     }
 
-    /// One `--kubeconfig` flag per listed file, so a kubectl call can never pick up a
-    /// kubeconfig of its own accord.
-    pub fn kubectl_flags(&self) -> Vec<String> {
-        self.0
-            .iter()
-            .map(|path| format!("--kubeconfig={}", path.display()))
-            .collect()
+    /// The listed files, merged with the first file winning, exactly as kubectl would.
+    pub fn merged(&self) -> Kubeconfig {
+        (*self.merged).clone()
+    }
+
+    /// kubectl takes a single `--kubeconfig`, and repeating the flag would select only the
+    /// last file. So kubectl is given the one file that holds the merge the kube client uses,
+    /// and it can never pick up a kubeconfig of its own accord.
+    pub fn kubectl_flags(&self) -> Result<Vec<String>, String> {
+        let mut on_disk = self
+            .on_disk
+            .lock()
+            .map_err(|_| "UNVERIFIED: cannot prepare the merged kubeconfig for kubectl")?;
+        if on_disk.is_none() {
+            *on_disk = Some(write_merged(&self.merged())?);
+        }
+        let file = on_disk
+            .as_ref()
+            .map_or_else(PathBuf::new, |m| m.file.clone());
+        Ok(vec![format!("--kubeconfig={}", file.display())])
     }
 }

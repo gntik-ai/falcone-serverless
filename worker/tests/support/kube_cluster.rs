@@ -1,10 +1,10 @@
 //! The real cluster behind `Was01Cluster`, built on kube with only the explicitly listed
-//! kubeconfig files: each is read with `Kubeconfig::read_from` and the merged result goes to
-//! `Config::from_custom_kubeconfig`. `Config::infer`, the default `from_kubeconfig`, the
+//! kubeconfig files: each is read with `Kubeconfig::read_from` (see `kubeconfig.rs`) and the
+//! merged result goes to `Config::from_custom_kubeconfig`. `Config::infer`, the default `from_kubeconfig`, the
 //! in-cluster configuration and `~/.kube/config` are never referenced. Credentials are
 //! neither printed nor logged; errors carry the API status message only.
 
-use super::observation::{Admission, Condition};
+use super::observation::{Admission, Collector, Condition, ContainerView, Exit};
 use super::was01::{Identity, Observed, Token, Was01Cluster};
 use super::{Kubeconfigs, Namespace, NamespaceApi, RUN_LABEL};
 use k8s_openapi::api::authentication::v1::{TokenRequest, TokenRequestSpec};
@@ -13,7 +13,7 @@ use k8s_openapi::api::authorization::v1::{
 };
 use k8s_openapi::api::core::v1::{Namespace as KubeNamespace, Pod, ServiceAccount};
 use kube::api::{DeleteParams, ListParams, LogParams, PostParams};
-use kube::config::{AuthInfo, KubeConfigOptions, Kubeconfig};
+use kube::config::{AuthInfo, KubeConfigOptions};
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::{Api, Client, Config};
 use serde_json::{Value, json};
@@ -24,29 +24,12 @@ use std::time::{Duration, Instant};
 const POLL: Duration = Duration::from_millis(200);
 const OBSERVE: Duration = Duration::from_secs(180);
 const RECORDS: usize = 9;
+const CONTAINER: &str = "runner";
 
-/// Loads exactly the listed files; the first problem is reported without file contents.
+/// Builds the client configuration from exactly the listed files, already read with
+/// `Kubeconfig::read_from` and merged by `Kubeconfigs::parse`.
 pub async fn load_config(kubeconfigs: &Kubeconfigs) -> Result<Config, String> {
-    let mut merged: Option<Kubeconfig> = None;
-    for (index, path) in kubeconfigs.paths().iter().enumerate() {
-        let file = Kubeconfig::read_from(path).map_err(|_| {
-            format!(
-                "UNVERIFIED: KUBECONFIG entry {} is not a valid kubeconfig",
-                index + 1
-            )
-        })?;
-        merged = Some(match merged {
-            None => file,
-            Some(first) => first.merge(file).map_err(|_| {
-                format!(
-                    "UNVERIFIED: KUBECONFIG entry {} cannot be merged",
-                    index + 1
-                )
-            })?,
-        });
-    }
-    let merged = merged.ok_or("UNVERIFIED: KUBECONFIG lists no files")?;
-    Config::from_custom_kubeconfig(merged, &KubeConfigOptions::default())
+    Config::from_custom_kubeconfig(kubeconfigs.merged(), &KubeConfigOptions::default())
         .await
         .map_err(|_| "UNVERIFIED: KUBECONFIG does not describe a usable cluster".to_string())
 }
@@ -281,50 +264,83 @@ impl Was01Cluster for KubeCluster {
         let pods: Api<Pod> = Api::namespaced(client, namespace.name());
         let selector = ListParams::default().labels(&format!("{RUN_LABEL}={run}"));
         let deadline = Instant::now() + OBSERVE;
-        let mut observed = Observed::default();
-        let mut ready = false;
+        let mut collector = Collector::default();
         loop {
             let listed = self
                 .block(pods.list(&selector))
                 .map_err(|error| failure(&error))?;
             if let Some(pod) = listed.items.first() {
-                let conditions: Vec<Condition> = pod
-                    .status
-                    .iter()
-                    .flat_map(|status| status.conditions.iter().flatten())
-                    .map(|condition| Condition {
-                        kind: condition.type_.clone(),
-                        status: condition.status.clone(),
-                    })
-                    .collect();
-                // The runner exits after its checks, so Ready is a window: keep the snapshot
-                // taken while the container was Ready.
-                if !ready {
-                    ready = conditions
-                        .iter()
-                        .any(|c| c.kind == "Ready" && c.status == "True");
-                    observed.conditions = conditions;
-                }
-                if ready && let Some(name) = pod.metadata.name.as_deref() {
+                let (conditions, view) = pod_view(pod);
+                let has_output = view.has_output();
+                collector.pod(conditions, view);
+                // Read the log whatever the readiness: a runner that fails while loading
+                // exits before the pod is ever Ready, and its message is the evidence.
+                if has_output && let Some(name) = pod.metadata.name.as_deref() {
                     for previous in [false, true] {
                         let params = LogParams {
-                            container: Some("runner".to_owned()),
+                            container: Some(CONTAINER.to_owned()),
                             previous,
                             ..LogParams::default()
                         };
-                        if let Ok(log) = self.block(pods.logs(name, &params))
-                            && log.lines().filter(|line| !line.trim().is_empty()).count() >= RECORDS
-                        {
-                            observed.log = log;
-                            return Ok(observed);
+                        if let Ok(log) = self.block(pods.logs(name, &params)) {
+                            collector.log(log);
                         }
                     }
                 }
+                if collector.finished(RECORDS) {
+                    return Ok(collector.into_observed());
+                }
             }
             if Instant::now() >= deadline {
-                return Ok(observed);
+                return Ok(collector.into_observed());
             }
             std::thread::sleep(POLL);
         }
     }
+}
+
+/// The pod's conditions and the runner container's state.
+pub fn pod_view(pod: &Pod) -> (Vec<Condition>, ContainerView) {
+    let status = pod.status.as_ref();
+    let conditions = status
+        .iter()
+        .flat_map(|status| status.conditions.iter().flatten())
+        .map(|condition| Condition {
+            kind: condition.type_.clone(),
+            status: condition.status.clone(),
+        })
+        .collect();
+    let exit = |terminated: &k8s_openapi::api::core::v1::ContainerStateTerminated| Exit {
+        reason: terminated
+            .reason
+            .clone()
+            .unwrap_or_else(|| "Terminated".to_owned()),
+        code: terminated.exit_code,
+    };
+    let mut view = ContainerView::default();
+    let runner = status.and_then(|status| {
+        status
+            .container_statuses
+            .iter()
+            .flatten()
+            .find(|c| c.name == CONTAINER)
+    });
+    if let Some(runner) = runner {
+        if let Some(state) = &runner.state {
+            view.running = state.running.is_some();
+            view.terminated = state.terminated.as_ref().map(exit);
+            view.waiting_reason = state.waiting.as_ref().map(|waiting| {
+                waiting
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Waiting".to_owned())
+            });
+        }
+        view.last_exit = runner
+            .last_state
+            .as_ref()
+            .and_then(|state| state.terminated.as_ref())
+            .map(exit);
+    }
+    (conditions, view)
 }
