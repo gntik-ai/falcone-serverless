@@ -30,6 +30,11 @@ The official images are published to Docker Hub by `.github/workflows/release-im
 - `docker.io/gntik/falcone-serverless-worker`
 - `docker.io/gntik/falcone-serverless-controller`
 
+The first publish creates the two Docker Hub repositories. Start it manually, with
+`gh workflow run release-images.yml -f version=0.1.0 -f dry_run=false -f create_repositories=true`.
+Only such a run may push to a repository that does not exist yet. Every publishing run then
+checks that each repository is public, and fails until it is made public on Docker Hub.
+
 To release:
 
 1. Push a strict `vX.Y.Z` tag (for example `git tag v0.1.0 && git push origin v0.1.0`), or publish a GitHub Release for such a tag.
