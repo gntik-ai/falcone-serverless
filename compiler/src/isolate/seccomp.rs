@@ -91,6 +91,10 @@ impl SeccompPlan {
             ("removexattr", 197, 14),
             ("lremovexattr", 198, 15),
             ("fremovexattr", 199, 16),
+            ("setxattrat", 463, 463),
+            ("getxattrat", 464, 464),
+            ("listxattrat", 465, 465),
+            ("removexattrat", 466, 466),
             ("utimensat", 280, 88),
             ("shmget", 29, 194),
             ("shmat", 30, 196),
@@ -288,6 +292,14 @@ mod tests {
                     .map(|r| r.number)
             };
             assert_eq!(number("fchmodat2"), Some(452));
+            for (name, nr) in [
+                ("setxattrat", 463),
+                ("getxattrat", 464),
+                ("listxattrat", 465),
+                ("removexattrat", 466),
+            ] {
+                assert_eq!(number(name), Some(nr), "{name}");
+            }
             if arch == TargetArch::x86_64 {
                 for (name, nr) in [
                     ("connect", 42),
