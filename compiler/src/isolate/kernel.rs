@@ -14,8 +14,8 @@ pub struct InheritedFd {
     pub close_on_exec: bool,
 }
 impl Descriptors {
-    /// CLOEXEC is enforced by the trusted trampoline re-exec. Unexpected inheritable
-    /// FDs fail closed: safe APIs cannot assume ownership of arbitrary raw numbers.
+    /// Validate the inventory after child cleanup. Only stdio may be inheritable;
+    /// the setup status writer must disappear on the toolchain exec.
     pub fn after_exec(self, inventory: &[InheritedFd]) -> Result<Vec<u32>> {
         let mut inherited: Vec<_> = inventory
             .iter()
@@ -103,6 +103,14 @@ impl CommandEnvironment for Command {
 pub trait KernelInterface {
     fn probe_landlock(&mut self, minimum: u32) -> Result<()>;
     fn path_present(&mut self, probe: CredentialProbe) -> Result<bool>;
+    /// Presence only, including dangling symlinks; never opens credential files.
+    fn forbidden_path_present(&mut self, path: &Path) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(_) => Err(Failure::Probe),
+        }
+    }
     fn create_workspace(&mut self, root: &Path) -> Result<PathBuf>;
     fn remove_workspace(&mut self, workspace: &Path) -> Result<()>;
     fn probe_confinement(&mut self, spec: &SpawnSpec) -> Result<()>;
@@ -126,6 +134,11 @@ pub fn check_runner_environment(
     kernel.probe_landlock(config.landlock_min_abi)?;
     for probe in CredentialProbe::ALL {
         if kernel.path_present(probe)? {
+            return Err(Failure::CredentialMount);
+        }
+    }
+    for path in &config.forbidden_paths {
+        if kernel.forbidden_path_present(path)? {
             return Err(Failure::CredentialMount);
         }
     }

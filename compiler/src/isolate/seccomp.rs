@@ -16,8 +16,8 @@ const SECCOMP_DATA_SYSCALL_OFFSET: u32 = 0;
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 /// Select one column of the Linux UAPI table for the build architecture.
-const fn syscall_number(x86_64: i64, asm_generic: i64) -> i64 {
-    if cfg!(target_arch = "x86_64") {
+fn syscall_number(arch: TargetArch, x86_64: i64, asm_generic: i64) -> i64 {
+    if arch == TargetArch::x86_64 {
         x86_64
     } else {
         asm_generic
@@ -47,18 +47,21 @@ impl SeccompPlan {
         let arch = std::env::consts::ARCH
             .try_into()
             .map_err(|_| Failure::Seccomp)?;
+        Self::for_arch(arch)
+    }
+    fn for_arch(arch: TargetArch) -> Result<Self> {
         let mut plan = Self {
             arch,
             rules: vec![
                 DenyRule {
                     syscall: "socket",
-                    number: syscall_number(41, 198),
+                    number: syscall_number(arch, 41, 198),
                     condition: Condition::Always,
                     errno: 1,
                 },
                 DenyRule {
                     syscall: "socketpair",
-                    number: syscall_number(53, 199),
+                    number: syscall_number(arch, 53, 199),
                     condition: Condition::ArgumentNotEqual { index: 0, value: 1 },
                     errno: 1,
                 },
@@ -67,6 +70,32 @@ impl SeccompPlan {
         // Linux UAPI syscall numbers. aarch64 and riscv64 use asm-generic/unistd.h;
         // x86_64 uses asm/unistd_64.h. No runtime architecture selection is accepted.
         let table = [
+            ("connect", 42, 203),
+            ("bind", 49, 200),
+            ("sendmsg", 46, 211),
+            ("sendmmsg", 307, 269),
+            ("fchmod", 91, 52),
+            ("fchmodat", 268, 53),
+            ("fchmodat2", 452, 452),
+            ("fchown", 93, 55),
+            ("fchownat", 260, 54),
+            ("setxattr", 188, 5),
+            ("lsetxattr", 189, 6),
+            ("fsetxattr", 190, 7),
+            ("getxattr", 191, 8),
+            ("lgetxattr", 192, 9),
+            ("fgetxattr", 193, 10),
+            ("listxattr", 194, 11),
+            ("llistxattr", 195, 12),
+            ("flistxattr", 196, 13),
+            ("removexattr", 197, 14),
+            ("lremovexattr", 198, 15),
+            ("fremovexattr", 199, 16),
+            ("setxattrat", 463, 463),
+            ("getxattrat", 464, 464),
+            ("listxattrat", 465, 465),
+            ("removexattrat", 466, 466),
+            ("utimensat", 280, 88),
             ("shmget", 29, 194),
             ("shmat", 30, 196),
             ("shmctl", 31, 195),
@@ -99,10 +128,39 @@ impl SeccompPlan {
         plan.rules
             .extend(table.into_iter().map(|(syscall, x86, generic)| DenyRule {
                 syscall,
-                number: syscall_number(x86, generic),
+                number: syscall_number(arch, x86, generic),
                 condition: Condition::Always,
                 errno: 1,
             }));
+        // These legacy calls do not exist on asm-generic architectures.
+        if arch == TargetArch::x86_64 {
+            for (syscall, number) in [
+                ("chmod", 90),
+                ("chown", 92),
+                ("lchown", 94),
+                ("futimesat", 261),
+                ("utime", 132),
+                ("utimes", 235),
+            ] {
+                plan.rules.push(DenyRule {
+                    syscall,
+                    number,
+                    condition: Condition::Always,
+                    errno: 1,
+                });
+            }
+        }
+        for (syscall, number, index) in [
+            ("sendto", syscall_number(arch, 44, 206), 4),
+            ("prlimit64", syscall_number(arch, 302, 261), 0),
+        ] {
+            plan.rules.push(DenyRule {
+                syscall,
+                number,
+                condition: Condition::ArgumentNotEqual { index, value: 0 },
+                errno: 1,
+            });
+        }
         plan.rules.push(DenyRule {
             syscall: "clone3",
             number: 435,
@@ -111,7 +169,7 @@ impl SeccompPlan {
         });
         plan.rules.push(DenyRule {
             syscall: "clone",
-            number: syscall_number(56, 220),
+            number: syscall_number(arch, 56, 220),
             condition: Condition::ArgumentHasBits {
                 index: 0,
                 mask: 0x7e02_0080,
@@ -131,7 +189,11 @@ impl SeccompPlan {
                     Condition::ArgumentNotEqual { index, value } => vec![
                         SeccompCondition::new(
                             index,
-                            SeccompCmpArgLen::Dword,
+                            if rule.syscall == "sendto" {
+                                SeccompCmpArgLen::Qword
+                            } else {
+                                SeccompCmpArgLen::Dword
+                            },
                             SeccompCmpOp::Ne,
                             value,
                         )
@@ -182,7 +244,7 @@ impl SeccompPlan {
                         op.k = SECCOMP_RET_ERRNO_EPERM;
                     }
                 }
-                if cfg!(target_arch = "x86_64") {
+                if self.arch == TargetArch::x86_64 {
                     // x32 shares AUDIT_ARCH_X86_64 but has a different syscall table.
                     // Reject the entire alternate ABI, including x32-only syscall numbers.
                     let mut prefix = vec![
@@ -212,5 +274,68 @@ impl SeccompPlan {
             }
         }
         Ok(filters)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_uapi_numbers_cover_x86_and_asm_generic_without_legacy_collisions() {
+        for arch in [TargetArch::x86_64, TargetArch::aarch64, TargetArch::riscv64] {
+            let plan = SeccompPlan::for_arch(arch).unwrap();
+            let number = |name| {
+                plan.rules
+                    .iter()
+                    .find(|r| r.syscall == name)
+                    .map(|r| r.number)
+            };
+            assert_eq!(number("fchmodat2"), Some(452));
+            for (name, nr) in [
+                ("setxattrat", 463),
+                ("getxattrat", 464),
+                ("listxattrat", 465),
+                ("removexattrat", 466),
+            ] {
+                assert_eq!(number(name), Some(nr), "{name}");
+            }
+            if arch == TargetArch::x86_64 {
+                for (name, nr) in [
+                    ("connect", 42),
+                    ("bind", 49),
+                    ("sendto", 44),
+                    ("sendmsg", 46),
+                    ("sendmmsg", 307),
+                    ("prlimit64", 302),
+                    ("chmod", 90),
+                    ("chown", 92),
+                    ("lchown", 94),
+                    ("futimesat", 261),
+                ] {
+                    assert_eq!(number(name), Some(nr), "{name}");
+                }
+            } else {
+                for name in ["chmod", "chown", "lchown", "futimesat", "utime", "utimes"] {
+                    assert_eq!(number(name), None, "{name}");
+                }
+                for (name, nr) in [
+                    ("connect", 203),
+                    ("bind", 200),
+                    ("sendto", 206),
+                    ("sendmsg", 211),
+                    ("sendmmsg", 269),
+                    ("prlimit64", 261),
+                    ("fchmod", 52),
+                    ("fchmodat", 53),
+                    ("fchown", 55),
+                    ("fchownat", 54),
+                    ("utimensat", 88),
+                ] {
+                    assert_eq!(number(name), Some(nr), "{name}");
+                }
+            }
+            assert!(!plan.compile().unwrap().is_empty());
+        }
     }
 }

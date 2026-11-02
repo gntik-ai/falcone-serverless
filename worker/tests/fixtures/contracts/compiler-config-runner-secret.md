@@ -1,7 +1,7 @@
 # Compiler runtime configuration
 
 Contract: ctr-compiler-runtime-config
-Version: 2
+Version: 3
 
 This contract provides `ctr-compiler-runtime-config` for the compiler service,
 trusted build runner and chart. It defines configuration names and boundaries;
@@ -60,6 +60,7 @@ compiler replicas. No pod-per-build Job or extra controller permission is requir
 
 | Key | Meaning |
 | --- | --- |
+| `forbidden_paths` | Trusted deployment metadata listing signing-key, identity and configuration paths to probe for presence, in addition to the five fixed locations. Never mount these into the runner. |
 | `workspace_root` | Dedicated writable workspace volume; fresh isolated directory per build, no cross-tenant state. |
 | `landlock_min_abi` | Minimum Landlock ABI required for the restrictions; at least ABI 6 (kernel 6.12 or later), which provides abstract Unix socket scoping. A lower value, or insufficient Landlock or seccomp, makes readiness fail closed. |
 | `build_cpu_seconds` | Aggregate CPU-time ceiling for the whole build process tree. |

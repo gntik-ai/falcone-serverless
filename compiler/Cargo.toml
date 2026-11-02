@@ -11,10 +11,12 @@ repository.workspace = true
 workspace = true
 
 # Safe wrappers for the build-runner launcher (#68): Landlock rulesets, seccomp filters,
-# prctl, resource limits and filesystem probes. `unsafe_code` stays forbidden in this crate;
+# prctl, resource limits and filesystem probes. Unsafe code is denied except in the
+# audited descriptor-hygiene module (ADR 0012);
 # the worker sandbox is offline and only reads crates already in Cargo.lock, so they are
 # pinned here at reviewed versions released at least two weeks ago.
 [dependencies]
+libc = "=0.2.191"
 landlock = "=0.4.7"
 seccompiler = "=0.5.0"
-rustix = { version = "=1.1.5", features = ["process", "thread", "fs"] }
+rustix = { version = "=1.1.5", features = ["process", "thread", "fs", "pipe"] }

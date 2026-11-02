@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Failure {
     Configuration,
+    Confinement,
     Landlock,
     Seccomp,
     CredentialMount,
@@ -103,6 +104,7 @@ pub struct RunnerConfig {
     pub catalogue_dir: PathBuf,
     pub workspace_root: PathBuf,
     pub control_socket: String,
+    pub forbidden_paths: Vec<PathBuf>,
     pub landlock_min_abi: u32,
     pub limits: Limits,
 }
@@ -118,13 +120,14 @@ impl RunnerConfig {
             catalogue_dir: catalogue.into(),
             workspace_root: workspace.into(),
             control_socket: socket.into(),
+            forbidden_paths: Vec::new(),
             landlock_min_abi: 6,
             limits: Limits::default(),
         }
     }
     /// Positional, credential-free deployment inputs. No environment/config bypass keys.
     pub fn arguments(&self) -> Vec<OsString> {
-        vec![
+        let mut arguments = vec![
             self.toolchain_dir.clone().into_os_string(),
             self.catalogue_dir.clone().into_os_string(),
             self.workspace_root.clone().into_os_string(),
@@ -134,10 +137,21 @@ impl RunnerConfig {
             self.limits.cpu_seconds.to_string().into(),
             self.limits.open_files.to_string().into(),
             self.limits.file_size.to_string().into(),
-        ]
+        ];
+        if !self.forbidden_paths.is_empty() {
+            let mut joined = OsString::new();
+            for (i, path) in self.forbidden_paths.iter().enumerate() {
+                if i != 0 {
+                    joined.push(":");
+                }
+                joined.push(path);
+            }
+            arguments.push(joined);
+        }
+        arguments
     }
     pub fn from_arguments(args: &[OsString]) -> Result<Self> {
-        if args.len() != 9 {
+        if args.len() != 9 && args.len() != 10 {
             return Err(Failure::Configuration);
         }
         let number = |index: usize| -> Result<u64> {
@@ -153,6 +167,16 @@ impl RunnerConfig {
             workspace_root: args[2].clone().into(),
             control_socket: args[3].to_str().ok_or(Failure::Configuration)?.into(),
             landlock_min_abi: number(4)?.try_into().map_err(|_| Failure::Configuration)?,
+            forbidden_paths: if let Some(paths) = args.get(9) {
+                paths
+                    .to_str()
+                    .ok_or(Failure::Configuration)?
+                    .split(':')
+                    .map(PathBuf::from)
+                    .collect()
+            } else {
+                Vec::new()
+            },
             limits: Limits {
                 address_space: number(5)?,
                 cpu_seconds: number(6)?,
@@ -196,6 +220,28 @@ impl RunnerConfig {
                 || roots.iter().enumerate().any(|(j, other)| {
                     i != j && (root.starts_with(other) || other.starts_with(root))
                 })
+            {
+                return Err(Failure::Configuration);
+            }
+        }
+        for forbidden in &self.forbidden_paths {
+            if !normalized(forbidden)
+                || forbidden
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .iter()
+                    .any(|b| *b == b':' || *b == 0)
+                || roots
+                    .iter()
+                    .copied()
+                    .map(PathBuf::as_path)
+                    .chain([Path::new("/dev/null"), Path::new("/proc/self")])
+                    .chain(
+                        Profile::ALL
+                            .into_iter()
+                            .flat_map(|p| p.extra_paths().iter().map(|p| Path::new(p.path))),
+                    )
+                    .any(|allowed| forbidden.starts_with(allowed) || allowed.starts_with(forbidden))
             {
                 return Err(Failure::Configuration);
             }

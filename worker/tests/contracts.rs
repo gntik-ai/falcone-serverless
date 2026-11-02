@@ -30,7 +30,7 @@ const OUTCOMES: &[&str] = &["limit_exceeded", "base_mismatch"];
 const RULES: &[&str] = &[
     "SB-R1", "SB-R2", "SB-R3", "SB-R4", "SB-R5", "SB-R6", "SB-R7", "SB-R8", "SB-R9", "SB-R10",
 ];
-const CONFIG_HEADER: &[&str] = &["Contract: ctr-compiler-runtime-config", "Version: 2"];
+const CONFIG_HEADER: &[&str] = &["Contract: ctr-compiler-runtime-config", "Version: 3"];
 const SERVICE_KEYS: &[&str] = &[
     "listen_port",
     "metrics_port",
@@ -44,6 +44,7 @@ const SERVICE_KEYS: &[&str] = &[
     "jwks_url",
 ];
 const RUNNER_KEYS: &[&str] = &[
+    "forbidden_paths",
     "workspace_root",
     "landlock_min_abi",
     "build_cpu_seconds",

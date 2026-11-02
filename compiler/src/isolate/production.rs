@@ -6,19 +6,21 @@ use landlock::{
 use rustix::process::{Resource, Rlimit};
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder};
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Only this implementation is constructed by the launcher binary.
 pub struct ProductionKernel {
     executable: PathBuf,
     children: BTreeMap<u64, Child>,
     next_child: u64,
+    status_fd: Option<u32>,
 }
 impl ProductionKernel {
     pub fn new(executable: PathBuf) -> Self {
@@ -26,12 +28,10 @@ impl ProductionKernel {
             executable,
             children: BTreeMap::new(),
             next_child: 0,
+            status_fd: None,
         }
     }
-    fn trampoline(&mut self, spec: &SpawnSpec, probe: bool) -> Result<Command> {
-        // std creates its own FDs with CLOEXEC. Refuse unexpected inherited descriptors
-        // rather than attempting unsafe ownership of arbitrary raw descriptor numbers.
-        self.check_descriptors()?;
+    fn trampoline(&mut self, spec: &SpawnSpec, probe: bool, status: &OwnedFd) -> Result<Command> {
         for root in [
             &spec.config.toolchain_dir,
             &spec.config.catalogue_dir,
@@ -46,6 +46,15 @@ impl ProductionKernel {
         spec.configure_environment(&mut command);
         command
             .arg(if probe { "--probe" } else { "--child" })
+            .arg(status.as_raw_fd().to_string())
+            .arg(
+                fd_hygiene::snapshot()
+                    .map_err(|_| Failure::Confinement)?
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            )
             .args(spec.config.arguments())
             .arg(&spec.workspace)
             .arg(spec.profile.name())
@@ -53,7 +62,140 @@ impl ProductionKernel {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        fd_hygiene::pass_status(&mut command, status);
         Ok(command)
+    }
+
+    fn start(&mut self, spec: &SpawnSpec, probe: bool) -> Result<Child> {
+        // File descriptors are CLOEXEC in the parent. Only the writer is passed
+        // through the initial trusted exec, never the toolchain exec.
+        let (reader, writer) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+            .map_err(|_| Failure::Spawn)?;
+        let mut command = self.trampoline(spec, probe, &writer)?;
+        let mut child = command.spawn().map_err(|_| Failure::Spawn)?;
+        drop(command);
+        drop(writer);
+        drop(child.stdin.take());
+        let outcome = await_setup(&reader, &mut child, probe);
+        if let Err(error) = outcome {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        Ok(child)
+    }
+
+    /// Entrypoint for the trusted re-exec only. Descriptor cleanup precedes all
+    /// probes and confinement checks; no toolchain can bypass this path.
+    pub fn run_child(&mut self, args: &[std::ffi::OsString]) -> Result<()> {
+        if args.len() != 14 && args.len() != 15 {
+            return Err(Failure::Configuration);
+        }
+        let fd = args[1]
+            .to_str()
+            .and_then(|s| s.parse::<i32>().ok())
+            .ok_or(Failure::Configuration)?;
+        let fallback = args[2]
+            .to_str()
+            .ok_or(Failure::Configuration)?
+            .split(',')
+            .map(|s| s.parse::<i32>().map_err(|_| Failure::Configuration))
+            .collect::<Result<Vec<_>>>()?;
+        let status =
+            fd_hygiene::adopt_and_clean(fd, &fallback).map_err(|_| Failure::Confinement)?;
+        self.status_fd = Some(status.as_raw_fd() as u32);
+        let config_end = args.len() - 2;
+        let setup: Result<SpawnSpec> = (|| {
+            let config = RunnerConfig::from_arguments(&args[3..config_end])?;
+            let workspace = PathBuf::from(&args[config_end]);
+            let profile = Profile::parse(
+                args[config_end + 1]
+                    .to_str()
+                    .ok_or(Failure::Configuration)?,
+            )?;
+            let spec = SpawnSpec::for_build(&config, &workspace, profile)?;
+            check_runner_environment(self, &config)?;
+            apply_confinement(self, &spec)?;
+            Ok(spec)
+        })();
+        let mut pipe = std::fs::File::from(status);
+        let spec = match setup {
+            Ok(spec) => spec,
+            Err(error) => {
+                let _ = pipe.write_all(if error == Failure::Descriptors {
+                    b"D"
+                } else {
+                    b"C"
+                });
+                return Err(if error == Failure::Descriptors {
+                    error
+                } else {
+                    Failure::Confinement
+                });
+            }
+        };
+        pipe.write_all(b"R").map_err(|_| Failure::Confinement)?;
+        if args[0] == "--probe" {
+            return Ok(());
+        }
+        let result = self.exec(&spec);
+        let _ = pipe.write_all(b"S");
+        result
+    }
+}
+
+const SETUP_WAIT: Duration = Duration::from_secs(2);
+fn await_setup(reader: &OwnedFd, child: &mut Child, probe: bool) -> Result<()> {
+    rustix::fs::fcntl_setfl(reader, rustix::fs::OFlags::NONBLOCK).map_err(|_| Failure::Spawn)?;
+    let deadline = Instant::now() + SETUP_WAIT;
+    let mut ready = false;
+    loop {
+        let failure = if ready {
+            Failure::Spawn
+        } else {
+            Failure::Confinement
+        };
+        let mut buffer = [0; 16];
+        match rustix::io::read(reader, &mut buffer) {
+            Ok(0) if ready => {
+                if probe {
+                    while Instant::now() < deadline {
+                        if let Some(status) = child.try_wait().map_err(|_| Failure::Confinement)? {
+                            return if status.success() {
+                                Ok(())
+                            } else {
+                                Err(Failure::Confinement)
+                            };
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    return Err(Failure::Confinement);
+                }
+                return Ok(());
+            }
+            Ok(0) => return Err(failure),
+            Ok(count) => {
+                for byte in &buffer[..count] {
+                    match byte {
+                        b'R' if !ready => ready = true,
+                        b'C' => return Err(Failure::Confinement),
+                        b'D' if !ready => return Err(Failure::Descriptors),
+                        b'S' if ready => return Err(Failure::Spawn),
+                        _ => return Err(failure),
+                    }
+                }
+            }
+            Err(rustix::io::Errno::AGAIN | rustix::io::Errno::INTR) => {}
+            Err(_) => return Err(failure),
+        }
+        if Instant::now() >= deadline {
+            return Err(if ready {
+                Failure::Spawn
+            } else {
+                Failure::Confinement
+            });
+        }
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 fn required_ruleset() -> Result<RulesetCreated> {
@@ -114,15 +256,7 @@ impl KernelInterface for ProductionKernel {
     }
     fn probe_confinement(&mut self, spec: &SpawnSpec) -> Result<()> {
         // No toolchain runs here. This trusted helper applies the *same* plan and exits.
-        let status = self
-            .trampoline(spec, true)?
-            .status()
-            .map_err(|_| Failure::Probe)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(Failure::Probe)
-        }
+        self.start(spec, true).map(|_| ())
     }
     fn no_new_privs(&mut self) -> Result<()> {
         rustix::thread::set_no_new_privs(true).map_err(|_| Failure::Privileges)
@@ -149,33 +283,39 @@ impl KernelInterface for ProductionKernel {
         // Snapshot numbers, then close the directory iterator before checking fdinfo.
         // No /proc fd is passed into the toolchain. fdinfo reads metadata, never contents.
         let fds = fs::read_dir("/proc/self/fd")
-            .map_err(|_| Failure::Descriptors)?
+            .map_err(|_| Failure::Confinement)?
             .map(|entry| entry.map(|e| e.file_name()))
             .collect::<std::io::Result<Vec<_>>>()
-            .map_err(|_| Failure::Descriptors)?;
+            .map_err(|_| Failure::Confinement)?;
         let mut inventory = Vec::new();
         for fd in fds {
             let number: u32 = fd
                 .to_str()
-                .ok_or(Failure::Descriptors)?
+                .ok_or(Failure::Confinement)?
                 .parse()
-                .map_err(|_| Failure::Descriptors)?;
+                .map_err(|_| Failure::Confinement)?;
             let text = match fs::read_to_string(Path::new("/proc/self/fdinfo").join(fd)) {
                 Ok(text) => text,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(_) => return Err(Failure::Descriptors),
+                Err(_) => return Err(Failure::Confinement),
             };
             let flags = text
                 .lines()
                 .find_map(|line| line.strip_prefix("flags:\t"))
                 .and_then(|flags| u32::from_str_radix(flags.trim(), 8).ok())
-                .ok_or(Failure::Descriptors)?;
+                .ok_or(Failure::Confinement)?;
+            let close_on_exec = flags & 0o2000000 != 0;
+            if number > 2 && (self.status_fd != Some(number) || !close_on_exec) {
+                return Err(Failure::Descriptors);
+            }
             inventory.push(InheritedFd {
                 number,
-                close_on_exec: flags & 0o2000000 != 0,
+                close_on_exec,
             });
         }
-        Descriptors::OwnStdioPipes.after_exec(&inventory)?;
+        Descriptors::OwnStdioPipes
+            .after_exec(&inventory)
+            .map_err(|_| Failure::Confinement)?;
         Ok(())
     }
     fn restrict_landlock(&mut self, plan: &LandlockPlan) -> Result<()> {
@@ -231,11 +371,7 @@ impl KernelInterface for ProductionKernel {
         Err(Failure::Spawn)
     }
     fn spawn(&mut self, spec: &SpawnSpec) -> Result<u64> {
-        let mut child = self
-            .trampoline(spec, false)?
-            .spawn()
-            .map_err(|_| Failure::Spawn)?;
-        drop(child.stdin.take());
+        let mut child = self.start(spec, false)?;
         // Drain/discard bounded chunks during poll. Never log workspace/toolchain output.
         let flags = rustix::fs::OFlags::NONBLOCK;
         let pipe_setup = (|| {

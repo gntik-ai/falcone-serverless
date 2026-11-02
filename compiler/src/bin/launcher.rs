@@ -1,9 +1,8 @@
 //! Build-runner entrypoint. No mocks or runtime check-disabling options are linked here.
 //! Deployment arguments: toolchain_dir catalogue_dir workspace_root control_socket
-//! landlock_min_abi address_space_bytes cpu_seconds open_files file_size_bytes.
+//! landlock_min_abi address_space_bytes cpu_seconds open_files file_size_bytes [forbidden_paths].
 use falcone_serverless_compiler::isolate::*;
 use std::ffi::OsString;
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 fn run() -> Result<()> {
@@ -14,19 +13,7 @@ fn run() -> Result<()> {
         .first()
         .is_some_and(|arg| arg == "--child" || arg == "--probe")
     {
-        if args.len() != 12 {
-            return Err(Failure::Configuration);
-        }
-        let config = RunnerConfig::from_arguments(&args[1..10])?;
-        let workspace = PathBuf::from(&args[10]);
-        let profile = Profile::parse(args[11].to_str().ok_or(Failure::Configuration)?)?;
-        let spec = SpawnSpec::for_build(&config, &workspace, profile)?;
-        check_runner_environment(&mut kernel, &config)?;
-        if args[0] == "--probe" {
-            apply_confinement(&mut kernel, &spec)
-        } else {
-            confine_and_exec(&mut kernel, &spec)
-        }
+        kernel.run_child(&args)
     } else {
         let config = RunnerConfig::from_arguments(&args)?;
         let launcher = Launcher::new(config, kernel);

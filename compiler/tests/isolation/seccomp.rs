@@ -119,3 +119,118 @@ fn alternate_abis_cannot_bypass_the_filter_and_denial_never_kills() {
         }
     }
 }
+
+#[test]
+fn compiled_filter_blocks_pathname_ipc_parent_limits_and_metadata_changes() {
+    let programs = SeccompPlan::for_host().unwrap().compile().unwrap();
+    let generic = !cfg!(target_arch = "x86_64");
+    let denied: &[u32] = if generic {
+        &[
+            200, 203, 211, 269, 52, 53, 452, 54, 55, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 88,
+            463, 464, 465, 466,
+        ]
+    } else {
+        &[
+            42, 49, 46, 307, 90, 91, 268, 452, 92, 93, 94, 260, 188, 189, 190, 191, 192, 193, 194,
+            195, 196, 197, 198, 199, 280, 261, 463, 464, 465, 466,
+        ]
+    };
+    for &nr in denied {
+        assert_eq!(result(&programs, nr, [0; 6]), 0x50001, "syscall {nr}");
+    }
+    let sendto = if generic { 206 } else { 44 };
+    assert_eq!(result(&programs, sendto, [3, 0, 0, 0, 0, 0]), 0x7fff0000);
+    for address in [1, 0x100000000, u64::MAX] {
+        assert_eq!(result(&programs, sendto, [3, 0, 0, 0, address, 1]), 0x50001);
+    }
+    let prlimit = if generic { 261 } else { 302 };
+    assert_eq!(result(&programs, prlimit, [0; 6]), 0x7fff0000);
+    for pid in [1, 1234, u32::MAX as u64] {
+        assert_eq!(result(&programs, prlimit, [pid, 7, 0, 0, 0, 0]), 0x50001);
+    }
+}
+
+#[test]
+fn installed_filter_protects_parent_limits_and_workspace_metadata() {
+    use super::support::TempRoot;
+    use std::os::unix::fs::MetadataExt;
+    let root = TempRoot::new();
+    std::fs::create_dir(root.0.join("workspace")).unwrap();
+    let before = std::fs::metadata(&root.0).unwrap();
+    let path = root.0.clone();
+    let parent = std::process::id().to_string();
+    let status = std::thread::spawn(move || {
+        for program in SeccompPlan::for_host().unwrap().compile().unwrap() {
+            seccompiler::apply_filter(&program).unwrap();
+        }
+        std::process::Command::new("/usr/bin/python3")
+            .arg(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/isolation/metadata.py"
+            ))
+            .arg(path)
+            .arg(parent)
+            .status()
+            .unwrap()
+    })
+    .join()
+    .unwrap();
+    assert!(status.success());
+    let after = std::fs::metadata(&root.0).unwrap();
+    assert_eq!(
+        (
+            after.mode(),
+            after.uid(),
+            after.gid(),
+            after.mtime(),
+            after.mtime_nsec()
+        ),
+        (
+            before.mode(),
+            before.uid(),
+            before.gid(),
+            before.mtime(),
+            before.mtime_nsec()
+        )
+    );
+}
+
+#[test]
+fn installed_filter_denies_pathname_sockets_and_preserves_unnamed_pairs() {
+    use super::support::TempRoot;
+    use std::os::unix::net::UnixDatagram;
+    let root = TempRoot::new();
+    let destination = root.0.join("socket");
+    let _listener = UnixDatagram::bind(&destination).unwrap();
+    let unconnected = UnixDatagram::unbound().unwrap();
+    let (left, right) = UnixDatagram::pair().unwrap();
+    std::thread::spawn(move || {
+        for program in SeccompPlan::for_host().unwrap().compile().unwrap() {
+            seccompiler::apply_filter(&program).unwrap();
+        }
+        assert_eq!(
+            unconnected
+                .connect(&destination)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(1)
+        );
+        assert_eq!(
+            unconnected
+                .send_to(b"denied", &destination)
+                .unwrap_err()
+                .raw_os_error(),
+            Some(1)
+        );
+        assert_eq!(left.send(b"pair").unwrap(), 4);
+        let mut bytes = [0; 4];
+        assert_eq!(right.recv(&mut bytes).unwrap(), 4);
+        assert_eq!(&bytes, b"pair");
+        assert_eq!(rustix::io::write(&left, b"write").unwrap(), 5);
+        let mut bytes = [0; 5];
+        assert_eq!(right.recv(&mut bytes).unwrap(), 5);
+        assert_eq!(&bytes, b"write");
+    })
+    .join()
+    .unwrap();
+}
