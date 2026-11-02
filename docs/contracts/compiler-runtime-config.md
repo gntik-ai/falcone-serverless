@@ -1,7 +1,7 @@
 # Compiler runtime configuration
 
 Contract: ctr-compiler-runtime-config
-Version: 2
+Version: 3
 
 This contract provides `ctr-compiler-runtime-config` for the compiler service,
 trusted build runner and chart. It defines configuration names and boundaries;
@@ -9,10 +9,18 @@ it implements no parser, launcher or chart wiring. Values are deployment inputs,
 not embedded credentials. Paths below are configuration keys, with no key material,
 secret-store path or Secret value. `ctr-source-build-api` defines build behavior.
 
-Version 2 replaces the version 1 unnamed Unix socketpair control transport, which
+Version 3 adds `forbidden_paths` and requires deployments to supply the paths of
+all service-only signing, identity and configuration mounts. The launcher accepts
+one optional final positional argument containing a colon-separated list of
+absolute paths. Each path must contain neither a colon nor NUL and must not
+overlap any Landlock allow-listed directory or file (in either direction).
+Omitting the argument preserves the fixed-location-only behavior for existing
+callers; chart wiring is a separate follow-up and must not ship before this change.
+
+Version 2 replaced the version 1 unnamed Unix socketpair control transport, which
 cannot cross containers, with an abstract Unix domain socket. It changes the meaning
 of `control_socket` and the minimum value of `landlock_min_abi`, so it is a major
-version; every other key and rule is unchanged from version 1.
+version. Version 3 retains that transport and minimum ABI.
 
 ## Service keys
 
@@ -58,6 +66,7 @@ compiler replicas. No pod-per-build Job or extra controller permission is requir
 
 | Key | Meaning |
 | --- | --- |
+| `forbidden_paths` | Trusted deployment metadata listing signing-key, identity and configuration paths to probe for presence, in addition to the five fixed locations. Never mount these into the runner. |
 | `workspace_root` | Dedicated writable workspace volume; fresh isolated directory per build, no cross-tenant state. |
 | `landlock_min_abi` | Minimum Landlock ABI required for the restrictions; at least ABI 6 (kernel 6.12 or later), which provides abstract Unix socket scoping. A lower value, or insufficient Landlock or seccomp, makes readiness fail closed. |
 | `build_cpu_seconds` | Aggregate CPU-time ceiling for the whole build process tree. |
@@ -83,6 +92,16 @@ reap all descendants before returning a result or collecting files. Staging and
 collection follow the descriptor-relative, no-follow, beneath-workspace
 single-link regular-file rules of the source build contract, only while the
 build process tree is empty.
+
+Configured forbidden paths and the five fixed locations are checked at startup
+and before every build with `symlink_metadata` only, including dangling symlinks;
+files are never opened or read. Errors and logs contain no path contents.
+The trusted child closes inherited descriptors above stderr before checking
+confinement, preserving only its close-on-exec status pipe. The toolchain receives
+only descriptors 0–2. A bounded setup handshake distinguishes confinement failure
+(which drops readiness) from exec failure; successful exec closes the status pipe
+out of band. There is no unconfined fallback. See
+[ADR 0012](../adr/0012-descriptor-hygiene-unsafe-boundary.md).
 
 Both containers retain restricted pod posture: arbitrary non-root UID,
 read-only root filesystem except dedicated workspace/cache volumes, no privilege

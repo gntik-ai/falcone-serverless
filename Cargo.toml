@@ -19,7 +19,7 @@ wasmparser = "=0.258.3"
 sha2 = "0.10.9"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

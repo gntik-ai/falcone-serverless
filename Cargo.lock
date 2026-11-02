@@ -544,6 +544,7 @@ name = "falcone-serverless-compiler"
 version = "0.1.0"
 dependencies = [
  "landlock",
+ "libc",
  "rustix",
  "seccompiler",
 ]
