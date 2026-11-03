@@ -1659,12 +1659,21 @@ fn handle_opened_after_the_settle_time_is_held_unsignalled_and_reported() {
     });
     let start = Instant::now();
     let error = child.cleanup().unwrap_err();
-    assert!(error.to_string().contains("could not be confirmed"), "{error}");
-    assert!(error.to_string().contains(&descendant.to_string()), "{error}");
+    assert!(
+        error.to_string().contains("could not be confirmed"),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains(&descendant.to_string()),
+        "{error}"
+    );
     assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
     fake.with(|w| {
         assert!(!w.killed(descendant), "an unconfirmed handle was signalled");
-        assert!(!w.holds(descendant), "the unconfirmed handle was not closed");
+        assert!(
+            !w.holds(descendant),
+            "the unconfirmed handle was not closed"
+        );
     });
 }
 
@@ -1685,7 +1694,10 @@ fn confirmation_crossing_the_deadline_holds_the_handle_and_fails_closed() {
         descendant
     });
     let error = child.cleanup().unwrap_err();
-    assert!(error.to_string().contains("could not be confirmed"), "{error}");
+    assert!(
+        error.to_string().contains("could not be confirmed"),
+        "{error}"
+    );
     fake.with(|w| assert!(!w.killed(descendant), "an unconfirmed handle was signalled"));
 }
 
@@ -1718,7 +1730,10 @@ fn confirmation_work_is_bounded_cumulatively() {
         spent < contract::KILL_SETTLE + Duration::from_secs(1),
         "{spent:?}"
     );
-    assert!(error.to_string().contains("could not be confirmed"), "{error}");
+    assert!(
+        error.to_string().contains("could not be confirmed"),
+        "{error}"
+    );
     fake.with(|w| assert!(!w.killed(descendant), "an unconfirmed handle was signalled"));
 }
 

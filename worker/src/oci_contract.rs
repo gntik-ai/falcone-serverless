@@ -1819,10 +1819,7 @@ impl Candidate {
             let Ok(found) = self.discover(settle, true) else {
                 return Err(self.unsettled());
             };
-            if found == Some(0)
-                && !reaped
-                && self.handles.is_empty()
-                && self.unconfirmed.is_empty()
+            if found == Some(0) && !reaped && self.handles.is_empty() && self.unconfirmed.is_empty()
             {
                 return Ok(());
             }
