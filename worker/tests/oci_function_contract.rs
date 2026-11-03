@@ -1719,7 +1719,10 @@ fn confirmation_work_is_bounded_cumulatively_and_still_kills_the_descendant() {
     let _ = child.cleanup();
     let spent = start.elapsed();
     // Reading every list would take over 2 s per pass; the settle bound stops it.
-    assert!(spent < contract::KILL_SETTLE + Duration::from_secs(1), "{spent:?}");
+    assert!(
+        spent < contract::KILL_SETTLE + Duration::from_secs(1),
+        "{spent:?}"
+    );
     fake.with(|w| assert!(w.killed(descendant), "an opened handle was discarded"));
 }
 
@@ -1736,15 +1739,27 @@ fn uncertain_ownership_holds_the_handle_unsignalled_until_cleanup_kills_it() {
         descendant
     });
     let diagnostics = child.binding(PORT).unwrap();
-    let message = diagnostics.get("OCI-V1-BINDING").cloned().unwrap_or_default();
+    let message = diagnostics
+        .get("OCI-V1-BINDING")
+        .cloned()
+        .unwrap_or_default();
     assert!(message.contains("inspection unstable"), "{message}");
     fake.with(|w| {
-        assert!(w.holds(descendant), "an opened handle was released for want of proof");
-        assert!(!w.killed(descendant), "an unconfirmed handle was signalled while inspecting");
+        assert!(
+            w.holds(descendant),
+            "an opened handle was released for want of proof"
+        );
+        assert!(
+            !w.killed(descendant),
+            "an unconfirmed handle was signalled while inspecting"
+        );
     });
     child.cleanup().unwrap();
     fake.with(|w| {
-        assert!(w.killed(descendant), "cleanup skipped an unconfirmed handle");
+        assert!(
+            w.killed(descendant),
+            "cleanup skipped an unconfirmed handle"
+        );
         assert!(w.procs.keys().all(|pid| *pid < 100), "{:?}", w.procs.keys());
     });
 }
