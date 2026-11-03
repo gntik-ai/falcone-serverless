@@ -9,8 +9,9 @@
 //! between the sample and its final consistency re-read, and a candidate it cannot kill
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
 //! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
-//! Signals go only through pidfds opened while the process was provably ours, never to a
-//! numeric PID or process group. Scratch removal runs once, inside that deadline; when the
+//! Signals go only through pidfds, never to a numeric PID or process group, and a pidfd is
+//! kept only after the process is seen to still be a child of its tree parent (or of the
+//! tester) once the pidfd is open, so a reused PID is released unsignalled and rescanned. Scratch removal runs once, inside that deadline; when the
 //! deadline passes first, the scratch directory is left behind rather than removed on a new
 //! budget by a destructor.
 //!
@@ -453,6 +454,8 @@ pub const TERM_GRACE: Duration = Duration::from_secs(10);
 pub const KILL_SETTLE: Duration = Duration::from_secs(1);
 /// Full samples of the process tree before the binding check gives up as unstable.
 pub const MAX_SCANS: usize = 5;
+/// Time to confirm a freshly opened handle once the deadline has already passed.
+const CONFIRM_GRACE: Duration = Duration::from_millis(100);
 
 fn deadline_error() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "conformance deadline exceeded")
@@ -932,6 +935,8 @@ pub trait ProcessTable {
     /// Starts the command and retains a handle for it before returning.
     fn spawn(&self, command: &mut std::process::Command) -> io::Result<(i32, u64)>;
     fn open(&self, pid: i32) -> io::Result<u64>;
+    /// Drops a handle without signalling it (a handle that turned out not to be ours).
+    fn release(&self, handle: u64);
     fn signal(&self, handle: u64, signal: Signal) -> io::Result<()>;
     /// True once the process is gone (reaped by us, or dead and left to its parent);
     /// the handle is released then.
@@ -980,6 +985,9 @@ impl ProcessTable for RealTable {
     fn open(&self, pid: i32) -> io::Result<u64> {
         self.retain(pid)
     }
+    fn release(&self, handle: u64) {
+        self.handles.borrow_mut().remove(&handle);
+    }
     fn signal(&self, handle: u64, signal: Signal) -> io::Result<()> {
         let handles = self.handles.borrow();
         let (_, fd) = handles
@@ -1016,32 +1024,29 @@ impl ProcessTable for RealTable {
     }
 }
 
-/// Starts the command and retains its handle. When the handle cannot be had the child is
-/// SIGKILLed and reaped, waiting at most [`KILL_SETTLE`]; this precedes `Candidate`
-/// ownership, so nothing else will clean it up.
+/// Starts the command and retains its handle, retrying a transient refusal (descriptor or
+/// memory exhaustion) for at most [`KILL_SETTLE`]. The child is never signalled without a
+/// handle: `Child::kill` may fall back to the numeric pid, and a numeric signal is never
+/// sent. When no handle can be had the error names the pid of the child left running and
+/// the caller (which still owns the process tree) must deal with it.
 pub fn spawn_retained(
     command: &mut std::process::Command,
-    retain: impl FnOnce(i32) -> io::Result<u64>,
+    mut retain: impl FnMut(i32) -> io::Result<u64>,
 ) -> io::Result<(i32, u64)> {
-    let mut child = command.spawn()?;
+    let child = command.spawn()?;
     let pid = child.id() as i32;
     // The unreaped child keeps its pid reserved, so a handle opened now names this process.
-    match retain(pid) {
-        Ok(handle) => Ok((pid, handle)),
-        Err(error) => {
-            let _ = child.kill();
-            let settle = Instant::now() + KILL_SETTLE;
-            while !matches!(child.try_wait(), Ok(Some(_))) {
-                if Instant::now() >= settle {
-                    return Err(io::Error::other(format!(
-                        "{error}; candidate was not reaped within the kill settle time"
-                    )));
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            Err(error)
+    let settle = Instant::now() + KILL_SETTLE;
+    let error = loop {
+        match retain(pid) {
+            Ok(handle) => return Ok((pid, handle)),
+            Err(error) if Instant::now() >= settle => break error,
+            Err(_) => thread::sleep(Duration::from_millis(5)),
         }
-    }
+    };
+    Err(io::Error::other(format!(
+        "{error}; candidate pid {pid} has no process handle and was not signalled"
+    )))
 }
 
 /// Why a read of the process table cannot be trusted.
@@ -1136,6 +1141,8 @@ struct Seen {
     shape: Shape,
     /// Socket inode to the tree processes holding it.
     owners: BTreeMap<u64, BTreeSet<i32>>,
+    /// Who listed each process as its child; the tester for the roots.
+    parents: BTreeMap<i32, i32>,
 }
 impl Seen {
     fn pids(&self) -> BTreeSet<i32> {
@@ -1153,7 +1160,12 @@ fn walk(table: &dyn ProcessTable, deadline: Instant, sockets: bool) -> Result<Se
     for tid in parse_ids(must(deadline, &own, table.list(&own))?)? {
         let path = format!("{own}/{tid}/children");
         match after(deadline, table.read(&path))? {
-            Ok(text) => seen.shape.roots.extend(parse_pids(&text)?),
+            Ok(text) => {
+                for pid in parse_pids(&text)? {
+                    seen.shape.roots.insert(pid);
+                    seen.parents.insert(pid, me);
+                }
+            }
             // A tester thread exited and its children moved to a sibling task; the final
             // re-read notices if that changed what we saw.
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1181,6 +1193,9 @@ fn walk(table: &dyn ProcessTable, deadline: Instant, sockets: bool) -> Result<Se
             let mut children = parse_pids(&must(deadline, &path, table.read(&path))?)?;
             children.sort_unstable();
             children.dedup();
+            for child in &children {
+                seen.parents.entry(*child).or_insert(pid);
+            }
             pending.extend(&children);
             // A dead task has released its descriptors; its live siblings are read below.
             if sockets && !dead(state) {
@@ -1512,12 +1527,55 @@ impl Candidate {
     pub fn pid(&self) -> rustix::process::Pid {
         rustix::process::Pid::from_raw(self.root).expect("candidate pid")
     }
-    pub fn binding(&self, port: u16) -> io::Result<Diagnostics> {
-        inspect_binding(&*self.table, port, self.deadline)
+    /// Retains a handle for every process present, then inspects. A tree whose members
+    /// cannot be retained and confirmed in [`MAX_SCANS`] attempts is unstable: it fails.
+    pub fn binding(&mut self, port: u16) -> io::Result<Diagnostics> {
+        for _ in 0..MAX_SCANS {
+            match self.discover(self.deadline, false) {
+                Err(Scan::Deadline) => return Err(deadline_error()),
+                Ok(Some(_)) => return inspect_binding(&*self.table, port, self.deadline),
+                _ => thread::sleep(Duration::from_millis(5)),
+            }
+        }
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.insert(
+            "OCI-V1-BINDING",
+            format!("inspection unstable after {MAX_SCANS} scans: a process could not be retained"),
+        );
+        Ok(diagnostics)
     }
 
-    /// Retains a handle for every tree process not yet held. `Ok(None)` means the scan was
-    /// incomplete or a process vanished before it could be opened: not evidence of absence.
+    /// True when `pid` is listed as a child of `parent` or of the tester, read now. A child
+    /// stays listed (even as a zombie) until its parent reaps it, so a pid that is listed
+    /// after its handle was opened cannot have been reused by an unrelated process.
+    fn still_a_child(&self, pid: i32, parent: i32, deadline: Instant) -> Result<bool, Scan> {
+        for owner in [parent, self.table.me()] {
+            let dir = format!("/proc/{owner}/task");
+            let tids = match after(deadline, self.table.list(&dir))? {
+                Ok(names) => parse_ids(names)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(Scan::Unstable(format!("{dir}: {error}"))),
+            };
+            for tid in tids {
+                let path = format!("{dir}/{tid}/children");
+                match after(deadline, self.table.read(&path))? {
+                    Ok(text) => {
+                        if parse_pids(&text)?.contains(&pid) {
+                            return Ok(true);
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(Scan::Unstable(format!("{path}: {error}"))),
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Retains a handle for every tree process not yet held. A handle counts only once the
+    /// process is confirmed to still be in the tree after the handle was opened; one that
+    /// cannot be confirmed is released unsignalled. `Ok(None)` means the scan was incomplete,
+    /// a process vanished or a handle could not be had or confirmed: not evidence of absence.
     fn discover(&mut self, deadline: Instant, kill: bool) -> Result<Option<usize>, Scan> {
         let seen = match walk(&*self.table, deadline, false) {
             Ok(seen) => seen,
@@ -1530,14 +1588,23 @@ impl Candidate {
             if self.handles.contains_key(pid) {
                 continue;
             }
-            // A handle that was opened is retained (and killed when asked) before the
-            // deadline is looked at: expiry never discards it.
-            let opened = self.table.open(*pid);
-            match opened {
+            // A handle that was opened and confirmed is retained (and killed when asked)
+            // before the deadline is looked at: expiry never discards it.
+            match self.table.open(*pid) {
                 Ok(handle) => {
-                    self.handles.insert(*pid, handle);
-                    if kill {
-                        let _ = self.table.signal(handle, Signal::KILL);
+                    let parent = seen.parents.get(pid).copied().unwrap_or(self.table.me());
+                    // An unconfirmed handle is released, never signalled, so the answer is
+                    // read even when the deadline passed while the handle was opened.
+                    let until = deadline.max(Instant::now() + CONFIRM_GRACE);
+                    let ours = matches!(self.still_a_child(*pid, parent, until), Ok(true));
+                    if ours {
+                        self.handles.insert(*pid, handle);
+                        if kill {
+                            let _ = self.table.signal(handle, Signal::KILL);
+                        }
+                    } else {
+                        self.table.release(handle);
+                        complete = false;
                     }
                 }
                 Err(_) => complete = false,

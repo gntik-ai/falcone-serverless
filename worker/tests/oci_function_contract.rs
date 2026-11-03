@@ -1044,6 +1044,9 @@ mod synthetic {
                 Ok(w.next_handle - 1)
             })
         }
+        fn release(&self, handle: u64) {
+            self.0.borrow_mut().handles.remove(&handle);
+        }
         fn signal(&self, handle: u64, signal: Signal) -> io::Result<()> {
             self.operate(format!("signal {handle}"), |w| {
                 let pid = w.handles[&handle];
@@ -1423,6 +1426,9 @@ fn terminate_that_reaps_the_child_leaves_drop_with_nothing_to_signal() {
         fn open(&self, pid: i32) -> std::io::Result<u64> {
             self.0.open(pid)
         }
+        fn release(&self, h: u64) {
+            self.0.release(h)
+        }
         fn signal(&self, h: u64, s: rustix::process::Signal) -> std::io::Result<()> {
             self.1.borrow_mut().push(s);
             self.0.signal(h, s)
@@ -1615,8 +1621,19 @@ fn handle_opened_as_the_cleanup_settle_time_runs_out_is_still_killed() {
     );
 }
 
+/// Ends a process the test itself spawned, through a pidfd of its own.
+fn end_and_reap(pid: i32) {
+    use rustix::process::{
+        Pid, PidfdFlags, Signal, WaitOptions, pidfd_open, pidfd_send_signal, waitpid,
+    };
+    let pid = Pid::from_raw(pid).expect("pid");
+    let fd = pidfd_open(pid, PidfdFlags::empty()).expect("pidfd");
+    pidfd_send_signal(&fd, Signal::KILL).expect("kill");
+    waitpid(Some(pid), WaitOptions::empty()).expect("reap");
+}
+
 #[test]
-fn failing_to_retain_the_spawned_child_kills_and_reaps_it_within_the_settle_time() {
+fn failing_to_retain_the_spawned_child_never_signals_it_by_number() {
     let _serial = serial();
     let mut command = Command::new("/bin/sleep");
     command.arg("60");
@@ -1628,12 +1645,93 @@ fn failing_to_retain_the_spawned_child_kills_and_reaps_it_within_the_settle_time
     })
     .unwrap_err();
     assert!(error.to_string().contains("pidfd_open refused"), "{error}");
+    assert!(error.to_string().contains("not signalled"), "{error}");
     assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
-    let pid = rustix::process::Pid::from_raw(spawned.get()).expect("spawned");
+    let pid = spawned.get();
+    // Child::kill() would have fallen back to a numeric kill; a signalled child is not asleep.
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
     assert!(
-        rustix::process::test_kill_process(pid).is_err(),
-        "child was left running or unreaped"
+        status.lines().any(|l| l.starts_with("State:\tS")),
+        "child was signalled: {status}"
     );
+    end_and_reap(pid);
+}
+
+#[test]
+fn a_transient_refusal_to_retain_the_spawned_child_is_retried_and_the_handle_returned() {
+    let _serial = serial();
+    let mut command = Command::new("/bin/sleep");
+    command.arg("60");
+    let mut refusals = 2;
+    let (pid, handle) = contract::spawn_retained(&mut command, |_| {
+        if refusals > 0 {
+            refusals -= 1;
+            Err(std::io::Error::other("EMFILE"))
+        } else {
+            Ok(7)
+        }
+    })
+    .unwrap();
+    assert_eq!(handle, 7);
+    end_and_reap(pid);
+}
+
+#[test]
+fn descendant_whose_pid_is_reused_before_its_handle_is_opened_is_never_signalled() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let outsider = fake.with(|w| {
+        let descendant = w.fork(100);
+        // Listed by the walk; before the handle is opened it exits, its parent reaps it and
+        // an unrelated process (not ours) is started under the same pid.
+        w.on(
+            &format!("read /proc/{descendant}/task/{descendant}/children"),
+            false,
+            move |w| {
+                w.procs.remove(&descendant);
+                w.add(1, &[descendant]);
+            },
+        );
+        descendant
+    });
+    child.cleanup().unwrap();
+    fake.with(|w| {
+        assert!(!w.killed(outsider), "an unrelated process was signalled");
+        assert!(
+            w.procs.contains_key(&outsider),
+            "unrelated process was reaped"
+        );
+        assert!(
+            w.signals.iter().all(|(pid, _)| *pid == 100),
+            "{:?}",
+            w.signals
+        );
+    });
+}
+
+#[test]
+fn binding_inspection_retains_handles_and_never_adopts_a_reused_pid() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let outsider = fake.with(|w| {
+        w.listen(100, "127.0.0.1", PORT);
+        let descendant = w.fork(100);
+        w.on(
+            &format!("read /proc/{descendant}/task/{descendant}/children"),
+            false,
+            move |w| {
+                w.procs.remove(&descendant);
+                w.add(1, &[descendant]);
+            },
+        );
+        descendant
+    });
+    let diagnostics = child.binding(PORT).unwrap();
+    assert!(diagnostics.is_empty(), "{:?}", *diagnostics);
+    child.cleanup().unwrap();
+    fake.with(|w| assert!(!w.killed(outsider), "an unrelated process was signalled"));
 }
 
 fn post_deadline(port: u16, deadline: &str) -> u16 {
