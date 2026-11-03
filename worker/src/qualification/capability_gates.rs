@@ -64,6 +64,7 @@ pub struct Fixtures {
     pub workflows: &'static str,
     pub http: &'static str,
     pub sinks: &'static str,
+    pub logging: &'static str,
 }
 
 #[derive(Debug)]
@@ -92,17 +93,26 @@ fn equal<T: PartialEq + std::fmt::Debug>(actual: T, expected: T, what: &str) -> 
 // ---- mocks ------------------------------------------------------------------------------
 
 #[derive(Default)]
-pub struct MockLogs(Mutex<Vec<String>>);
+pub struct MockLogs {
+    messages: Mutex<Vec<String>>,
+    fields: Mutex<Vec<(String, String)>>,
+}
 
 impl MockLogs {
     pub fn messages(&self) -> Vec<String> {
-        self.0.lock().unwrap().clone()
+        self.messages.lock().unwrap().clone()
+    }
+
+    /// Every field the sink received, exactly as the host passed it on.
+    pub fn fields(&self) -> Vec<(String, String)> {
+        self.fields.lock().unwrap().clone()
     }
 }
 
 impl LogSink for MockLogs {
-    fn log(&self, _level: &str, message: &str, _fields: &[(String, String)]) {
-        self.0.lock().unwrap().push(message.to_owned());
+    fn log(&self, _level: &str, message: &str, fields: &[(String, String)]) {
+        self.messages.lock().unwrap().push(message.to_owned());
+        self.fields.lock().unwrap().extend_from_slice(fields);
     }
 }
 
@@ -1016,6 +1026,7 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
     cancelled.release.store(true, Ordering::SeqCst);
     wait_for(&cancelled.stopped, "the released binding thread to finish")?;
     stalled_sinks_hit_the_deadline_and_cancellation(fx)?;
+    oversized_log_requests(fx)?;
     oversized_http_response(fx)
 }
 
@@ -1094,6 +1105,66 @@ fn stalled_sinks_hit_the_deadline_and_cancellation(fx: &Fixtures) -> Verdict {
     ensure(elapsed <= delay + DEADLINE_TOLERANCE, || {
         format!("sink cancellation overrun: {elapsed:?}")
     })
+}
+
+/// A log request is bounded by its whole serialized size, field records and metadata included:
+/// 65,537 empty fields are 1,048,592 bytes on the wire and never reach the sink, while the same
+/// request just inside the ceiling does. Sensitive field names are redacted before the sink.
+fn oversized_log_requests(fx: &Fixtures) -> Verdict {
+    let logging = |logs: &Arc<MockLogs>, name: &str, value: &str, count: usize| {
+        let caps = Capabilities {
+            logs: logs.clone(),
+            ..Capabilities::default()
+        };
+        let wat = fill(
+            fx.logging,
+            &[
+                ("NAME", wat_string(name)),
+                ("NAME_LEN", name.len().to_string()),
+                ("VALUE", wat_string(value)),
+                ("VALUE_LEN", value.len().to_string()),
+                ("COUNT", count.to_string()),
+            ],
+        );
+        run(&gate(grants(vec![])?, caps, HostLimits::default())?, &wat)
+    };
+    let over = Arc::new(MockLogs::default());
+    equal(
+        logging(&over, "", "", MAX / 16 + 1)?,
+        host_error(0x100, HostError::LimitExceeded),
+        "empty field records over the ceiling",
+    )?;
+    equal(over.messages().len(), 0, "sink calls for oversized fields")?;
+    let within = Arc::new(MockLogs::default());
+    equal(
+        logging(&within, "", "", MAX / 16 - 2)?,
+        0,
+        "empty field records within the ceiling",
+    )?;
+    equal(within.messages().len(), 1, "sink calls within the ceiling")?;
+    for name in [
+        "client.secret",
+        "CLIENT_SECRET",
+        "client-secret",
+        "clientSecret",
+        "password",
+        "api_key",
+    ] {
+        let logs = Arc::new(MockLogs::default());
+        equal(logging(&logs, name, "hunter2", 1)?, 0, "redacted log")?;
+        equal(
+            logs.fields(),
+            vec![(name.to_owned(), "<REDACTED>".to_owned())],
+            "sensitive field value",
+        )?;
+    }
+    let logs = Arc::new(MockLogs::default());
+    equal(logging(&logs, "attempt", "three", 1)?, 0, "plain log")?;
+    equal(
+        logs.fields(),
+        vec![("attempt".to_owned(), "three".to_owned())],
+        "plain field value",
+    )
 }
 
 fn oversized_http_response(fx: &Fixtures) -> Verdict {

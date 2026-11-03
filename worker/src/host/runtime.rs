@@ -13,8 +13,11 @@ use wasmtime as engine;
 
 use engine::component::{
     Component, ComponentType, Instance, Lift, Linker, Lower, Resource, ResourceTable, ResourceType,
+    WasmList,
 };
-use engine::{Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
+use engine::{
+    AsContextMut, Config, Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder,
+};
 
 use super::HostError;
 use super::bindings::{
@@ -313,9 +316,10 @@ impl HostState {
         })
     }
 
+    /// `fields` were lifted under `lift_fields`, so their aggregate is already inside the ceiling.
     fn log(&mut self, level: Level, message: String, fields: Vec<Field>) -> Result<(), HostError> {
-        let field_bytes: usize = fields.iter().map(|f| f.name.len() + f.value.len()).sum();
-        self.limits.check_request(&[message.len(), field_bytes])?;
+        self.limits
+            .check_request(&[message.len(), LOG_FRAME_BYTES, log_field_bytes(&fields)?])?;
         let fields: Vec<(String, String)> = fields
             .into_iter()
             .map(|f| {
@@ -364,6 +368,53 @@ impl HostState {
     }
 }
 
+/// Canonical-ABI bytes of the call outside the message text and the field strings: severity,
+/// the message pointer and length, and the field list pointer and length.
+const LOG_FRAME_BYTES: usize = 20;
+/// Canonical-ABI bytes of one `field` record: two string pointer and length pairs.
+const FIELD_RECORD_BYTES: usize = 16;
+
+/// Serialized size of every field: its record plus both strings. Overflow is over the limit.
+fn log_field_bytes(fields: &[Field]) -> Result<usize, HostError> {
+    fields
+        .iter()
+        .try_fold(0usize, |total, f| {
+            total
+                .checked_add(FIELD_RECORD_BYTES)?
+                .checked_add(f.name.len())?
+                .checked_add(f.value.len())
+        })
+        .ok_or(HostError::LimitExceeded)
+}
+
+/// The list is read lazily: its length is known from the call frame, so a request whose records
+/// alone exceed the ceiling is refused before any element is copied, and lifting stops at the
+/// first element that takes the aggregate over it.
+fn lift_fields(
+    mut cx: StoreContextMut<HostState>,
+    message_bytes: usize,
+    fields: &WasmList<Field>,
+) -> Result<Vec<Field>, HostError> {
+    let limits = cx.data().limits;
+    let records = fields
+        .len()
+        .checked_mul(FIELD_RECORD_BYTES)
+        .ok_or(HostError::LimitExceeded)?;
+    limits.check_request(&[message_bytes, LOG_FRAME_BYTES, records])?;
+    let mut lifted = Vec::new();
+    let mut strings = 0usize;
+    for field in fields.iter(&mut cx).map_err(|_| HostError::Denied)? {
+        let field = field.map_err(|_| HostError::Denied)?;
+        strings = strings
+            .checked_add(field.name.len())
+            .and_then(|total| total.checked_add(field.value.len()))
+            .ok_or(HostError::LimitExceeded)?;
+        limits.check_request(&[message_bytes, LOG_FRAME_BYTES, records, strings])?;
+        lifted.push(field);
+    }
+    Ok(lifted)
+}
+
 /// Same spelling rule as the manifest's property denylist: case, `_`, `-` and `.` ignored.
 fn sensitive(name: &str) -> bool {
     let key: String = name
@@ -376,6 +427,7 @@ fn sensitive(name: &str) -> bool {
         "plaintext",
         "secret",
         "secretvalue",
+        "clientsecret",
         "password",
         "passwd",
         "token",
@@ -422,7 +474,11 @@ fn link_logging(linker: &mut Linker<HostState>) -> engine::Result<()> {
     instance.func_wrap(
         "log",
         |mut cx: StoreContextMut<HostState>,
-         (level, message, fields): (Level, String, Vec<Field>)| {
+         (level, message, fields): (Level, String, WasmList<Field>)| {
+            let fields = match lift_fields(cx.as_context_mut(), message.len(), &fields) {
+                Ok(fields) => fields,
+                Err(error) => return wire(Err(error)),
+            };
             wire(cx.data_mut().log(level, message, fields))
         },
     )
