@@ -1,6 +1,8 @@
 //! The WAS-01 cluster harness: the modules `was01_cluster.rs` uses. It shares the image,
 //! kubeconfig and namespace modules with the worker-image harness in `mod.rs`.
 
+#[path = "cluster.rs"]
+pub mod cluster;
 #[path = "image.rs"]
 mod image;
 #[path = "kube_cluster.rs"]

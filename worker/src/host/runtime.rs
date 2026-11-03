@@ -28,7 +28,7 @@ use super::egress::{Connector, HttpRequest, Resolver, TcpConnector, fetch};
 use super::grant::{self, GrantSet, ImportVerdict};
 use super::limits::{
     HANDLE_FRAME_BYTES, HTTP_REQUEST_FRAME_BYTES, HostLimits, RECORD_FRAME_BYTES, U64_FRAME_BYTES,
-    pair_bytes, string_bytes,
+    pair_bytes, result_bytes, string_bytes,
 };
 
 /// Guest linear memory is bounded for the host side of the ABI; profile budgets are RUN-01's.
@@ -236,7 +236,7 @@ impl HostState {
         self.grants.authorize_storage_key(&key)?;
         let binding = self.caps.storage.clone().ok_or(HostError::Denied)?;
         let data = self.bounded(move |c| binding.read(&key, c).map_err(|e| e.into_host(c)))?;
-        self.limits.check_response(string_bytes(data.len()))?;
+        self.limits.check_response(result_bytes(data.len()))?;
         Ok(data)
     }
 

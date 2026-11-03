@@ -13,20 +13,17 @@
 mod support;
 
 use falcone_serverless_worker::{Role, check};
-use k8s_openapi::api::authorization::v1::{
-    ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec,
-};
-use k8s_openapi::api::core::v1::{Namespace as KubeNamespace, Pod};
-use kube::api::{DeleteParams, ListParams, LogParams, PostParams};
-use kube::config::KubeConfigOptions;
-use kube::{Api, Client, Config};
+use k8s_openapi::api::core::v1::Pod;
+use kube::Api;
+use kube::api::{LogParams, PostParams};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::time::{Duration, Instant};
+use support::cluster::Cluster;
 use support::{
-    Kubeconfigs, Namespace, NamespaceApi, NamespaceMode, NamespacePlan, RUN_LABEL, final_uid,
-    pinned_image, test_namespace,
+    Kubeconfigs, Namespace, NamespaceMode, NamespacePlan, RUN_LABEL, final_uid, pinned_image,
+    test_namespace,
 };
 
 const CONTAINERFILE: &str = include_str!("../qualification/Containerfile");
@@ -171,11 +168,6 @@ fn verify_records(log: &str) -> Result<(), String> {
 
 // ---- the cluster ------------------------------------------------------------------------
 
-struct Cluster {
-    runtime: tokio::runtime::Runtime,
-    client: Client,
-}
-
 fn failure(error: &kube::Error) -> String {
     match error {
         kube::Error::Api(status) => format!("{}: {}", status.reason, status.message),
@@ -183,146 +175,38 @@ fn failure(error: &kube::Error) -> String {
     }
 }
 
-impl Cluster {
-    /// Built from exactly the listed kubeconfig files; nothing ambient is consulted.
-    fn connect(kubeconfigs: &Kubeconfigs) -> Result<Self, String> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| "UNVERIFIED: cannot start the async runtime".to_string())?;
-        let config = runtime
-            .block_on(Config::from_custom_kubeconfig(
-                kubeconfigs.merged(),
-                &KubeConfigOptions::default(),
-            ))
-            .map_err(|_| "UNVERIFIED: KUBECONFIG does not describe a usable cluster".to_string())?;
-        let client = {
-            let _guard = runtime.enter();
-            Client::try_from(config)
-                .map_err(|_| "UNVERIFIED: cannot build the client".to_string())?
-        };
-        Ok(Self { runtime, client })
-    }
-
-    fn pods(&self, namespace: &Namespace) -> Api<Pod> {
-        Api::namespaced(self.client.clone(), namespace.name())
-    }
-
-    fn namespaces(&self) -> Api<KubeNamespace> {
-        Api::all(self.client.clone())
-    }
-
-    fn namespace_gone_or_terminating(&self, namespace: &Namespace) -> Result<bool, String> {
-        let found = self
-            .runtime
-            .block_on(self.namespaces().get_opt(namespace.name()))
+/// Runs the pod to a terminal phase and returns the admitted pod and its log.
+fn run_pod(cluster: &Cluster, namespace: &Namespace, pod: &Value) -> Result<(Pod, String), String> {
+    let object: Pod = serde_json::from_value(pod.clone()).map_err(|_| "pod manifest is invalid")?;
+    let name = object.metadata.name.clone().ok_or("pod has no name")?;
+    let pods: Api<Pod> = Api::namespaced(cluster.admin().clone(), namespace.name());
+    cluster
+        .block(pods.create(&PostParams::default(), &object))
+        .map_err(|error| format!("pod refused: {}", failure(&error)))?;
+    let deadline = Instant::now() + POD_TIMEOUT;
+    let admitted = loop {
+        let current = cluster
+            .block(pods.get(&name))
             .map_err(|error| failure(&error))?;
-        Ok(found.is_none_or(|found| {
-            found.metadata.deletion_timestamp.is_some()
-                || found.status.and_then(|status| status.phase).as_deref() == Some("Terminating")
-        }))
-    }
-
-    /// Runs the pod to a terminal phase and returns the admitted pod and its log.
-    fn run_pod(&self, namespace: &Namespace, pod: &Value) -> Result<(Pod, String), String> {
-        let object: Pod =
-            serde_json::from_value(pod.clone()).map_err(|_| "pod manifest is invalid")?;
-        let name = object.metadata.name.clone().ok_or("pod has no name")?;
-        let pods = self.pods(namespace);
-        self.runtime
-            .block_on(pods.create(&PostParams::default(), &object))
-            .map_err(|error| format!("pod refused: {}", failure(&error)))?;
-        let deadline = Instant::now() + POD_TIMEOUT;
-        let admitted = loop {
-            let current = self
-                .runtime
-                .block_on(pods.get(&name))
-                .map_err(|error| failure(&error))?;
-            let phase = current
-                .status
-                .as_ref()
-                .and_then(|s| s.phase.clone())
-                .unwrap_or_default();
-            if matches!(phase.as_str(), "Succeeded" | "Failed") {
-                break current;
-            }
-            if Instant::now() >= deadline {
-                return Err(format!(
-                    "pod did not finish within {POD_TIMEOUT:?} (phase {phase})"
-                ));
-            }
-            std::thread::sleep(POLL);
-        };
-        let log = self
-            .runtime
-            .block_on(pods.logs(&name, &LogParams::default()))
-            .map_err(|error| format!("cannot read the pod log: {}", failure(&error)))?;
-        Ok((admitted, log))
-    }
-}
-
-impl NamespaceApi for Cluster {
-    fn can_create_namespaces(&self) -> Result<bool, String> {
-        let review = SelfSubjectAccessReview {
-            spec: SelfSubjectAccessReviewSpec {
-                resource_attributes: Some(ResourceAttributes {
-                    resource: Some("namespaces".to_owned()),
-                    verb: Some("create".to_owned()),
-                    ..ResourceAttributes::default()
-                }),
-                ..SelfSubjectAccessReviewSpec::default()
-            },
-            ..SelfSubjectAccessReview::default()
-        };
-        let api = Api::<SelfSubjectAccessReview>::all(self.client.clone());
-        let answer = self
-            .runtime
-            .block_on(api.create(&PostParams::default(), &review))
-            .map_err(|error| failure(&error))?;
-        Ok(answer.status.is_some_and(|status| status.allowed))
-    }
-
-    fn create_namespace(&self, namespace: &Namespace) -> Result<(), String> {
-        let object: KubeNamespace = serde_json::from_value(namespace.manifest())
-            .map_err(|_| "namespace manifest is invalid".to_string())?;
-        self.runtime
-            .block_on(self.namespaces().create(&PostParams::default(), &object))
-            .map(drop)
-            .map_err(|error| failure(&error))
-    }
-
-    fn namespace_labels(
-        &self,
-        namespace: &Namespace,
-    ) -> Result<Option<BTreeMap<String, String>>, String> {
-        let found = self
-            .runtime
-            .block_on(self.namespaces().get_opt(namespace.name()))
-            .map_err(|error| failure(&error))?;
-        Ok(found.map(|found| found.metadata.labels.unwrap_or_default()))
-    }
-
-    fn delete_namespace(&self, namespace: &Namespace) -> Result<(), String> {
-        match self.runtime.block_on(
-            self.namespaces()
-                .delete(namespace.name(), &DeleteParams::default()),
-        ) {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(status)) if status.code == 404 => Ok(()),
-            Err(error) => Err(failure(&error)),
+        let phase = current
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.clone())
+            .unwrap_or_default();
+        if matches!(phase.as_str(), "Succeeded" | "Failed") {
+            break current;
         }
-    }
-
-    fn delete_run_objects(&self, namespace: &Namespace, run: &str) -> Result<(), String> {
-        let selector = ListParams::default().labels(&format!("{RUN_LABEL}={run}"));
-        self.runtime
-            .block_on(
-                self.pods(namespace)
-                    .delete_collection(&DeleteParams::default(), &selector),
-            )
-            .map(drop)
-            .map_err(|error| failure(&error))
-    }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "pod did not finish within {POD_TIMEOUT:?} (phase {phase})"
+            ));
+        }
+        std::thread::sleep(POLL);
+    };
+    let log = cluster
+        .block(pods.logs(&name, &LogParams::default()))
+        .map_err(|error| format!("cannot read the pod log: {}", failure(&error)))?;
+    Ok((admitted, log))
 }
 
 fn pod_manifest(name: &str, namespace: &Namespace, run: &str, spec: &Value) -> Value {
@@ -358,7 +242,7 @@ fn verify_admitted(admitted: &Pod, uid: u64) -> Result<(), String> {
 }
 
 fn live(kubeconfigs: &Kubeconfigs, image: &str, mode: &NamespaceMode) -> Result<(), String> {
-    let cluster = Cluster::connect(kubeconfigs)?;
+    let (cluster, _) = Cluster::connect(kubeconfigs)?;
     let uid = arbitrary_uid();
     let spec = pod_spec(image, uid)?;
     // Created here, deleted on every exit path, including a panic (the guard's Drop).
@@ -367,8 +251,11 @@ fn live(kubeconfigs: &Kubeconfigs, image: &str, mode: &NamespaceMode) -> Result<
     let run = guard.run().to_owned();
     let outcome = (|| {
         let name = format!("was02-{run}");
-        let (admitted, log) =
-            cluster.run_pod(&namespace, &pod_manifest(&name, &namespace, &run, &spec))?;
+        let (admitted, log) = run_pod(
+            &cluster,
+            &namespace,
+            &pod_manifest(&name, &namespace, &run, &spec),
+        )?;
         verify_admitted(&admitted, uid)?;
         let phase = admitted
             .status

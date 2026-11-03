@@ -18,12 +18,20 @@ pub const U64_FRAME_BYTES: usize = 8;
 pub const RECORD_FRAME_BYTES: usize = 16;
 /// `http.request`: url, method, header list and body, each a pointer and length.
 pub const HTTP_REQUEST_FRAME_BYTES: usize = 4 * STRING_FRAME_BYTES;
-/// `http.response`: the status, the header list and the body list.
-pub const HTTP_RESPONSE_FRAME_BYTES: usize = 4 + 2 * STRING_FRAME_BYTES;
+/// A `result<_, host-error>` is a discriminator padded to the 4-byte alignment of its payload.
+pub const RESULT_FRAME_BYTES: usize = 4;
+/// `http.response` inside its result: the discriminator, the status padded to 4 bytes, the
+/// header list and the body list.
+pub const HTTP_RESPONSE_FRAME_BYTES: usize = RESULT_FRAME_BYTES + 4 + 2 * STRING_FRAME_BYTES;
 
 /// Serialized bytes of a string or byte list holding `len` content bytes.
 pub const fn string_bytes(len: usize) -> usize {
     len.saturating_add(STRING_FRAME_BYTES)
+}
+
+/// Serialized bytes of a `result<list<u8>, host-error>` returning `len` content bytes.
+pub const fn result_bytes(len: usize) -> usize {
+    string_bytes(len).saturating_add(RESULT_FRAME_BYTES)
 }
 
 /// Serialized bytes of one `name`/`value` record: the record plus both strings' contents.

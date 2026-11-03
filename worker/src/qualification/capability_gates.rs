@@ -976,11 +976,12 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
         1,
         "writes after oversized payload",
     )?;
-    // Oversized binding responses are rejected. The returned list is a pointer and length
-    // pair (8 bytes) on top of its contents, so 1 MiB - 8 bytes of data is the largest.
+    // Oversized binding responses are rejected. The returned `result<list<u8>, host-error>` is a
+    // 4 byte discriminator and a pointer and length pair (8 bytes) on top of its contents, so
+    // 1 MiB - 12 bytes of data is the largest.
     for (len, expected) in [
-        (MAX - 8, (MAX - 8) as u32),
-        (MAX - 7, host_error(0x200, HostError::LimitExceeded)),
+        (MAX - 12, (MAX - 12) as u32),
+        (MAX - 11, host_error(0x200, HostError::LimitExceeded)),
         (MAX + 1, host_error(0x200, HostError::LimitExceeded)),
     ] {
         let big = Arc::new(MockStorage {
@@ -1195,13 +1196,14 @@ fn oversized_log_requests(fx: &Fixtures) -> Verdict {
     )
 }
 
-/// The response is the status, the header and body list pairs (20 bytes), one 16 byte record per
-/// header and the contents. The server's `Content-Length: <7 digits>` and `Connection: close`
-/// are 16 + 14 + 7 and 16 + 10 + 5 bytes, so the largest body is 1 MiB - 20 - 37 - 31 bytes.
+/// The response is the result discriminator, the status and the header and body list pairs
+/// (24 bytes), one 16 byte record per header and the contents. The server's
+/// `Content-Length: <7 digits>` and `Connection: close` are 16 + 14 + 7 and 16 + 10 + 5 bytes,
+/// so the largest body is 1 MiB - 24 - 37 - 31 bytes.
 fn oversized_http_response(fx: &Fixtures) -> Verdict {
     for (len, expected) in [
-        (MAX - 88, (200 << 16) | 65448),
-        (MAX - 87, host_error(0x100, HostError::LimitExceeded)),
+        (MAX - 92, (200 << 16) | 65444),
+        (MAX - 91, host_error(0x100, HostError::LimitExceeded)),
         (MAX + 1, host_error(0x100, HostError::LimitExceeded)),
     ] {
         let server = serve(move |_| http_response("200 OK", "", &vec![b'x'; len]))?;

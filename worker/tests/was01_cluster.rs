@@ -427,7 +427,8 @@ fn the_loader_never_references_ambient_configuration() {
             .join("\n")
     };
     let reader = strip(include_str!("support/kubeconfig.rs"));
-    let client = strip(include_str!("support/kube_cluster.rs"));
+    let client = strip(include_str!("support/cluster.rs"));
+    let wrapper = strip(include_str!("support/kube_cluster.rs"));
     for banned in [
         "Config::infer",
         "Config::incluster",
@@ -438,6 +439,7 @@ fn the_loader_never_references_ambient_configuration() {
     ] {
         assert!(!reader.contains(banned), "{banned}");
         assert!(!client.contains(banned), "{banned}");
+        assert!(!wrapper.contains(banned), "{banned}");
     }
     assert!(reader.contains("Kubeconfig::read_from"));
     assert!(client.contains("Config::from_custom_kubeconfig"));

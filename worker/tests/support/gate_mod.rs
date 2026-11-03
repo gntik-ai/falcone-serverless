@@ -1,6 +1,9 @@
 //! The pieces of the shared cluster harness that the WAS-02 capability-gate test reuses: the
-//! image pin check, the explicit kubeconfig boundary and the fs-test namespace guard.
+//! cluster core (client construction and namespace operations), the image pin check, the
+//! explicit kubeconfig boundary and the fs-test namespace guard.
 
+#[path = "cluster.rs"]
+pub mod cluster;
 #[path = "image.rs"]
 mod image;
 #[path = "kubeconfig.rs"]
