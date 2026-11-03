@@ -1,4 +1,40 @@
 //! Standalone OCI v1 conformance boundary; not connected to the execution worker.
+//!
+//! # What this tester is
+//!
+//! A conformance check, not a security boundary. It must catch buggy or misconfigured
+//! candidates reliably and it fails closed on everything it observes: a listener other
+//! than `127.0.0.1:$PORT` that is not proven to belong to a process outside the candidate
+//! tree, an unreadable or malformed `/proc` value, a tree or socket table that changes
+//! between the sample and its final consistency re-read, and a candidate it cannot kill
+//! and reap. One absolute deadline covers every phase of a process-mode check; the only
+//! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
+//! Signals go only through pidfds, never to a numeric PID or process group: the candidate is
+//! held at a gate until its pidfd is open (see [`spawn_retained`]), so no candidate code
+//! runs, and no signal is needed, when a handle cannot be had. A pidfd is kept only after
+//! the process is seen to still be a child of its tree parent (or of the tester) once the
+//! pidfd is open, so a reused PID is released unsignalled and rescanned. Scratch removal
+//! runs once, inside that deadline; when the deadline passes first, the scratch directory is
+//! left behind rather than removed on a new budget by a destructor.
+//!
+//! # Residual risk (not detected here)
+//!
+//! * A candidate that deliberately evades sampling: processes in its tree that signal,
+//!   resume or hand sockets to each other so that the tester never sees the forbidden
+//!   listener open, or that behave while tested and misbehave later.
+//! * A process outside the candidate tree that cooperates with it: it can SIGSTOP/SIGCONT
+//!   or trace the candidate or pass it file descriptors, or open the forbidden listener
+//!   itself. Processes outside the tree are platform components and are trusted.
+//!
+//! Runtime enforcement is the boundary against both: the restricted pod, the seccomp
+//! RuntimeDefault profile and the NetworkPolicy.
+//!
+//! # Process ownership
+//!
+//! The tester makes itself the child subreaper and treats every child of the process as
+//! part of the candidate tree. Run one check per process; the CLI does, and tests that
+//! spawn processes in their own process must serialise.
+use rustix::process::Signal;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
@@ -88,19 +124,19 @@ pub const FIXTURES: &[Fixture] = &[
 ];
 /// Only registered rules can reach the tester's diagnostic output.
 #[derive(Debug, Default)]
-pub struct Diagnostics(BTreeMap<&'static str, &'static str>);
+pub struct Diagnostics(BTreeMap<&'static str, String>);
 
 impl Diagnostics {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(&mut self, rule: &'static str, message: &'static str) {
+    pub fn insert(&mut self, rule: &'static str, message: impl Into<String>) {
         assert!(
             RULE_IDS.contains(&rule),
             "unknown OCI contract rule: {rule}"
         );
-        self.0.insert(rule, message);
+        self.0.insert(rule, message.into());
     }
 
     fn extend(&mut self, other: Self) {
@@ -117,7 +153,7 @@ impl Diagnostics {
 
 // Expose map inspection without allowing unchecked mutation.
 impl std::ops::Deref for Diagnostics {
-    type Target = BTreeMap<&'static str, &'static str>;
+    type Target = BTreeMap<&'static str, String>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -193,8 +229,30 @@ pub fn check_envelope(value: &Value) -> Diagnostics {
     diagnostics
 }
 pub fn request(params: Value) -> Value {
-    json!({"params":params,"context":{"handle":"opaque-attempt", "invocationId":"invocation-1", "deadline":"2026-10-31T12:00:00Z"}})
+    request_with_deadline(params, "2026-10-31T12:00:00Z")
 }
+pub fn request_with_deadline(params: Value, deadline: &str) -> Value {
+    json!({"params":params,"context":{"handle":"opaque-attempt", "invocationId":"invocation-1", "deadline":deadline}})
+}
+
+/// Deadlines the contract allows: a candidate must accept every one of them.
+pub const VALID_DEADLINES: &[&str] = &[
+    "2026-10-31T12:00:00Z",
+    "2026-10-31T12:00:00.5Z",
+    "2026-10-31T12:00:00.123456789Z",
+    "2000-02-29T00:00:00Z",
+    "2026-12-31T23:59:60Z",
+];
+/// Deadlines the contract forbids: a candidate must reject every one with HTTP 400.
+pub const MALFORMED_DEADLINES: &[&str] = &[
+    "2026-10-31T12:00:00+01:00",
+    "2026-10-31T12:00:00",
+    "2026-10-31T12:00:00.Z",
+    "2026-10-31T12:00:00.12345678901Z",
+    "2026-13-31T12:00:00Z",
+    "2026-02-30T00:00:00Z",
+    "1900-02-29T00:00:00Z",
+];
 
 // A deliberately bounded evaluator for the structural subset of the three embedded
 // schemas. Wire byte budgets have separate rule IDs, not JSON Schema semantics.
@@ -237,7 +295,7 @@ fn shape(value: &Value, schema: &Value, root: &Value, strings: bool) -> bool {
     }
 }
 
-fn utc_deadline(text: &str) -> bool {
+pub fn utc_deadline(text: &str) -> bool {
     let bytes = text.as_bytes();
     if bytes.len() < 20
         || !bytes.is_ascii()
@@ -358,9 +416,18 @@ pub fn read_response(reader: &mut impl std::io::Read) -> std::io::Result<Respons
 }
 
 use std::{
-    ffi::OsString,
+    cell::{Cell, RefCell},
+    collections::BTreeSet,
+    ffi::{OsStr, OsString},
+    fs,
     io::{self, Read, Write},
-    net::{Ipv4Addr, SocketAddr, TcpStream},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream},
+    os::{
+        fd::{AsFd, OwnedFd},
+        unix::fs::{DirBuilderExt, MetadataExt},
+    },
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
@@ -382,7 +449,24 @@ pub const RULE_IDS: &[&str] = &[
 ];
 const IO_BUDGET: Duration = Duration::from_secs(2);
 const STARTUP_BUDGET: Duration = Duration::from_secs(3);
+/// The single absolute budget of one process-mode check.
+pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
+/// The only wait that may end after the deadline: reaping what SIGKILL was sent to.
+pub const KILL_SETTLE: Duration = Duration::from_secs(1);
+/// Full samples of the process tree before the binding check gives up as unstable.
+pub const MAX_SCANS: usize = 5;
+
+fn deadline_error() -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, "conformance deadline exceeded")
+}
+fn ensure(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        Err(deadline_error())
+    } else {
+        Ok(())
+    }
+}
 
 struct DeadlineStream {
     stream: TcpStream,
@@ -438,23 +522,6 @@ fn exchange(
     read_response(&mut stream)
 }
 
-fn probe(
-    port: u16,
-    method: &str,
-    path: &str,
-    body: &[u8],
-    content_type: &str,
-) -> io::Result<Response> {
-    exchange(
-        port,
-        method,
-        path,
-        body,
-        content_type,
-        Instant::now() + IO_BUDGET,
-    )
-}
-
 fn inspect_response(response: Response, diagnostics: &mut Diagnostics) {
     if response.status != 200 {
         diagnostics.insert("OCI-V1-INVOKE", "POST /invoke did not return HTTP 200");
@@ -479,8 +546,22 @@ fn inspect_response(response: Response, diagnostics: &mut Diagnostics) {
 }
 
 pub fn check_http(port: u16) -> Diagnostics {
+    check_http_until(port, Instant::now() + CHECK_BUDGET)
+}
+
+pub fn check_http_until(port: u16, deadline: Instant) -> Diagnostics {
+    let probe = |method: &str, path: &str, body: &[u8], content_type: &str| {
+        exchange(
+            port,
+            method,
+            path,
+            body,
+            content_type,
+            deadline.min(Instant::now() + IO_BUDGET),
+        )
+    };
     let mut diagnostics = Diagnostics::new();
-    let startup = Instant::now() + STARTUP_BUDGET;
+    let startup = (Instant::now() + STARTUP_BUDGET).min(deadline);
     loop {
         let response = exchange(
             port,
@@ -503,19 +584,39 @@ pub fn check_http(port: u16) -> Diagnostics {
         thread::sleep(Duration::from_millis(20));
     }
     let payload = serde_json::to_vec(&request(json!({"message":"hello"}))).unwrap();
-    match probe(port, "POST", "/invoke", &payload, "application/json") {
+    match probe("POST", "/invoke", &payload, "application/json") {
         Ok(response) => inspect_response(response, &mut diagnostics),
         Err(_) => {
             diagnostics.insert("OCI-V1-INVOKE", "POST /invoke failed or timed out");
         }
     }
     for (method, path) in [("GET", "/invoke"), ("POST", "/__conformance_missing__")] {
-        if !probe(port, method, path, &payload, "application/json")
+        if !probe(method, path, &payload, "application/json")
             .is_ok_and(|r| matches!(r.status, 404 | 405))
         {
             diagnostics.insert(
                 "OCI-V1-INVOKE",
                 "wrong method/path was not rejected with 404/405",
+            );
+        }
+    }
+    for text in VALID_DEADLINES {
+        let body = request_with_deadline(json!({"message":"hello"}), text);
+        let body = serde_json::to_vec(&body).unwrap();
+        if !probe("POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 200) {
+            diagnostics.insert(
+                "OCI-V1-REQUEST",
+                format!("valid deadline {text} was not accepted with 200"),
+            );
+        }
+    }
+    for text in MALFORMED_DEADLINES {
+        let body = request_with_deadline(json!({}), text);
+        let body = serde_json::to_vec(&body).unwrap();
+        if !probe("POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 400) {
+            diagnostics.insert(
+                "OCI-V1-REQUEST",
+                format!("malformed deadline {text} was not rejected with 400"),
             );
         }
     }
@@ -552,8 +653,7 @@ pub fn check_http(port: u16) -> Diagnostics {
     missing.as_object_mut().unwrap().remove("params");
     invalid.push(serde_json::to_vec(&missing).unwrap());
     for body in invalid {
-        if !probe(port, "POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 400)
-        {
+        if !probe("POST", "/invoke", &body, "application/json").is_ok_and(|r| r.status == 400) {
             diagnostics.insert(
                 "OCI-V1-REQUEST",
                 "invalid request/context was not rejected with 400",
@@ -561,7 +661,7 @@ pub fn check_http(port: u16) -> Diagnostics {
             break;
         }
     }
-    if !probe(port, "POST", "/invoke", &payload, "text/plain").is_ok_and(|r| r.status == 400) {
+    if !probe("POST", "/invoke", &payload, "text/plain").is_ok_and(|r| r.status == 400) {
         diagnostics.insert(
             "OCI-V1-REQUEST",
             "non-JSON Content-Type was not rejected with 400",
@@ -573,7 +673,7 @@ pub fn check_http(port: u16) -> Diagnostics {
         .unwrap() as usize;
     for (size, accepted) in [(budget - 2, true), (budget - 1, false)] {
         let body = serde_json::to_vec(&request(json!("x".repeat(size)))).unwrap();
-        match probe(port, "POST", "/invoke", &body, "application/json") {
+        match probe("POST", "/invoke", &body, "application/json") {
             Ok(response) if accepted && response.status == 200 => {
                 inspect_response(response, &mut diagnostics)
             }
@@ -621,25 +721,64 @@ pub fn run(args: &[OsString]) -> i32 {
     }
 }
 
-pub fn check_process(
+pub fn check_process(port: u16, executable: &OsStr, args: &[OsString]) -> io::Result<Diagnostics> {
+    check_process_until(port, executable, args, Instant::now() + CHECK_BUDGET)
+}
+
+/// Every phase stops at `deadline`; a check that ends after it is the deadline error,
+/// never a verdict. The candidate is always killed and reaped first (see [`KILL_SETTLE`]).
+pub fn check_process_until(
     port: u16,
-    executable: &std::ffi::OsStr,
+    executable: &OsStr,
     args: &[OsString],
+    deadline: Instant,
 ) -> io::Result<Diagnostics> {
-    let probe = FilesystemProbe::new()?;
-    let mut child = Candidate::spawn(port, executable, args, &probe)?;
-    let mut diagnostics = check_http(port);
+    check_process_with(
+        Box::new(RealTable::default()),
+        port,
+        executable,
+        args,
+        deadline,
+    )
+}
+
+/// [`check_process_until`] over any process table. An infrastructure error that arrives
+/// once the deadline has passed is the deadline error.
+pub fn check_process_with(
+    table: Box<dyn ProcessTable>,
+    port: u16,
+    executable: &OsStr,
+    args: &[OsString],
+    deadline: Instant,
+) -> io::Result<Diagnostics> {
+    match process_phases(table, port, executable, args, deadline) {
+        Err(_) if Instant::now() >= deadline => Err(deadline_error()),
+        result => result,
+    }
+}
+
+fn process_phases(
+    table: Box<dyn ProcessTable>,
+    port: u16,
+    executable: &OsStr,
+    args: &[OsString],
+    deadline: Instant,
+) -> io::Result<Diagnostics> {
+    // Declared first, dropped last: the candidate is killed before the scratch tree goes.
+    let mut probe = FilesystemProbe::new_until(deadline)?;
+    let mut child = Candidate::spawn_until(table, port, executable, args, &probe, deadline)?;
+    let mut diagnostics = check_http_until(port, deadline);
+    ensure(deadline)?;
+    if diagnostics.contains_key("OCI-V1-HEALTHZ")
+        && let Some(status) = child.start_failure()
+    {
+        return Err(io::Error::other(format!(
+            "candidate could not be executed (exit status {status})"
+        )));
+    }
     // Health failures must not cascade into fictitious binding failures.
     if !diagnostics.contains_key("OCI-V1-HEALTHZ") {
-        match (
-            fs::read_to_string("/proc/net/tcp"),
-            fs::read_to_string("/proc/net/tcp6"),
-        ) {
-            (Ok(tcp), Ok(tcp6)) => diagnostics.extend(check_binding_snapshot(&tcp, &tcp6, port)),
-            _ => {
-                diagnostics.insert("OCI-V1-BINDING", "cannot inspect Linux listening sockets");
-            }
-        }
+        diagnostics.extend(child.binding(port)?);
     }
     if !child.terminate()? {
         diagnostics.insert(
@@ -648,19 +787,15 @@ pub fn check_process(
         );
     }
     // Kill/reap before looking at the sentinel: no race with a surviving writer.
-    drop(child);
+    child.cleanup()?;
     if !probe.unchanged().unwrap_or(false) {
         diagnostics.insert("OCI-V1-FILESYSTEM", "candidate changed cwd/HOME sentinel");
     }
+    // Scratch removal belongs to the verdict: running out of time here is the deadline error.
+    probe.remove_tree(deadline)?;
+    ensure(deadline)?;
     Ok(diagnostics)
 }
-
-use std::{
-    fs,
-    os::unix::fs::{DirBuilderExt, MetadataExt},
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
 
 #[derive(PartialEq, Eq)]
 struct Stamp {
@@ -692,9 +827,17 @@ fn stamp(path: &Path) -> io::Result<Stamp> {
 pub struct FilesystemProbe {
     root: PathBuf,
     baseline: Option<(Stamp, Stamp)>,
+    /// Scratch removal has been attempted; it is never started again.
+    removed: bool,
+    /// The check's deadline, which also bounds the removal run by Drop.
+    deadline: Instant,
 }
 impl FilesystemProbe {
     pub fn new() -> io::Result<Self> {
+        Self::new_until(Instant::now() + CHECK_BUDGET)
+    }
+    /// `deadline` bounds every removal of the scratch tree, Drop's included.
+    pub fn new_until(deadline: Instant) -> io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let mut root = None;
         for _ in 0..32 {
@@ -715,6 +858,8 @@ impl FilesystemProbe {
         let mut probe = Self {
             root: root.ok_or_else(|| io::Error::other("cannot allocate private temp directory"))?,
             baseline: None,
+            removed: false,
+            deadline,
         };
         fs::create_dir(probe.sentinel())?;
         fs::create_dir(probe.scratch())?;
@@ -747,117 +892,980 @@ impl FilesystemProbe {
         }
         Ok(fs::read(sentinel.join("unchanged"))? == b"unchanged\n")
     }
+    /// Removes the scratch tree, checking `deadline` before every entry. Other failures are
+    /// not a verdict (the entry stays behind); the deadline is. Runs out of time at most
+    /// once: whatever was left behind is not retried by Drop.
+    pub fn remove_tree(&mut self, deadline: Instant) -> io::Result<()> {
+        self.removed = true;
+        sweep(&self.root, deadline)
+    }
+}
+
+fn sweep(path: &Path, deadline: Instant) -> io::Result<()> {
+    ensure(deadline)?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    sweep(&entry.path(), deadline)?;
+                }
+            }
+            let _ = fs::remove_dir(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
+    Ok(())
 }
 
 impl Drop for FilesystemProbe {
+    /// Removal that did not already run, on the check's deadline and no new budget.
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        if !self.removed {
+            let _ = self.remove_tree(self.deadline);
+        }
     }
 }
 
-pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
-    let mut seen = false;
-    let mut invalid = false;
-    for (table, ipv6) in [(tcp, false), (tcp6, true)] {
-        for line in table.lines().skip(1) {
-            let fields: Vec<_> = line.split_whitespace().collect();
-            if fields.get(3) != Some(&"0A") {
-                continue;
-            }
-            let Some((address, value)) = fields.get(1).and_then(|s| s.split_once(':')) else {
-                continue;
-            };
-            if u16::from_str_radix(value, 16) != Ok(port) {
-                continue;
-            }
-            seen = true;
-            invalid |= ipv6 || address != "0100007F";
+/// How the tester sees and acts on processes; the seam for synthetic `/proc` tests.
+/// Paths are `/proc/...` paths. Handles are opaque tokens for processes the table holds
+/// a pidfd for.
+pub trait ProcessTable {
+    /// Pid of the tester, the child subreaper that adopts orphaned descendants.
+    fn me(&self) -> i32;
+    fn read(&self, path: &str) -> io::Result<String>;
+    fn list(&self, path: &str) -> io::Result<Vec<String>>;
+    fn link(&self, path: &str) -> io::Result<String>;
+    /// Starts the command and retains a handle for it before the candidate runs. `command`
+    /// names the program, arguments, environment and working directory; how the process is
+    /// isolated and held is the table's business. Handle acquisition stops at `deadline`.
+    fn spawn(&self, command: &std::process::Command, deadline: Instant) -> io::Result<(i32, u64)>;
+    fn open(&self, pid: i32) -> io::Result<u64>;
+    /// Drops a handle without signalling it (a handle that turned out not to be ours).
+    fn release(&self, handle: u64);
+    fn signal(&self, handle: u64, signal: Signal) -> io::Result<()>;
+    /// True once the process is gone (reaped by us, or dead and left to its parent);
+    /// the handle is released then.
+    fn reap(&self, handle: u64) -> io::Result<bool>;
+    /// Exit status of a child of ours that has ended, read without reaping it; `None` while
+    /// it runs, when it was killed by a signal, or when it is not our child.
+    fn exit_status(&self, handle: u64) -> io::Result<Option<i32>>;
+}
+
+#[derive(Default)]
+pub struct RealTable {
+    handles: RefCell<BTreeMap<u64, (i32, OwnedFd)>>,
+    next: Cell<u64>,
+}
+impl RealTable {
+    fn retain(&self, pid: i32) -> io::Result<u64> {
+        use rustix::process::{Pid, PidfdFlags, pidfd_open};
+        let pid = Pid::from_raw(pid).ok_or_else(|| io::Error::other("invalid pid"))?;
+        let fd = pidfd_open(pid, PidfdFlags::empty())?;
+        let handle = self.next.get();
+        self.next.set(handle + 1);
+        self.handles
+            .borrow_mut()
+            .insert(handle, (pid.as_raw_nonzero().get(), fd));
+        Ok(handle)
+    }
+}
+impl ProcessTable for RealTable {
+    fn me(&self) -> i32 {
+        std::process::id() as i32
+    }
+    fn read(&self, path: &str) -> io::Result<String> {
+        fs::read_to_string(path)
+    }
+    fn list(&self, path: &str) -> io::Result<Vec<String>> {
+        fs::read_dir(path)?
+            .map(|entry| entry.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect()
+    }
+    fn link(&self, path: &str) -> io::Result<String> {
+        fs::read_link(path).map(|target| target.to_string_lossy().into_owned())
+    }
+    fn spawn(&self, command: &std::process::Command, deadline: Instant) -> io::Result<(i32, u64)> {
+        use rustix::process::{Pid, set_child_subreaper};
+        // Adopt orphaned descendants so cleanup can find and reap them.
+        set_child_subreaper(Some(Pid::from_raw(1).unwrap()))?;
+        spawn_retained(command, |pid| self.retain(pid), deadline)
+    }
+    fn open(&self, pid: i32) -> io::Result<u64> {
+        self.retain(pid)
+    }
+    fn release(&self, handle: u64) {
+        self.handles.borrow_mut().remove(&handle);
+    }
+    fn signal(&self, handle: u64, signal: Signal) -> io::Result<()> {
+        let handles = self.handles.borrow();
+        let (_, fd) = handles
+            .get(&handle)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown handle"))?;
+        rustix::process::pidfd_send_signal(fd, signal).map_err(Into::into)
+    }
+    fn reap(&self, handle: u64) -> io::Result<bool> {
+        use rustix::{
+            io::Errno,
+            process::{WaitId, WaitIdOptions, waitid},
+        };
+        let mut handles = self.handles.borrow_mut();
+        let Some((pid, fd)) = handles.get(&handle) else {
+            return Ok(true);
+        };
+        let gone = match waitid(
+            WaitId::PidFd(fd.as_fd()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG,
+        ) {
+            Ok(status) => status.is_some(),
+            Err(Errno::INTR) => false,
+            // Not our child: its parent reaps it. Dead (or already reaped) is enough for us.
+            Err(Errno::CHILD) => match fs::read_to_string(format!("/proc/{pid}/status")) {
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+                Ok(status) => parse_state(&status).is_ok_and(dead),
+            },
+            Err(error) => return Err(error.into()),
+        };
+        if gone {
+            handles.remove(&handle);
+        }
+        Ok(gone)
+    }
+    fn exit_status(&self, handle: u64) -> io::Result<Option<i32>> {
+        use rustix::process::{WaitId, WaitIdOptions, waitid};
+        let handles = self.handles.borrow();
+        let Some((_, fd)) = handles.get(&handle) else {
+            return Ok(None);
+        };
+        match waitid(
+            WaitId::PidFd(fd.as_fd()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        ) {
+            Ok(status) => Ok(status.and_then(|status| status.exit_status())),
+            Err(rustix::io::Errno::CHILD | rustix::io::Errno::INTR) => Ok(None),
+            Err(error) => Err(error.into()),
         }
     }
-    let mut diagnostics = Diagnostics::new();
-    if !seen || invalid {
-        diagnostics.insert(
-            "OCI-V1-BINDING",
-            "candidate is not listening exclusively on 127.0.0.1:$PORT",
+}
+
+/// Releases a gated candidate: it reads one line from its stdin and only then runs the
+/// program (with an empty environment but the given assignments, stdin at /dev/null). End of
+/// input, which is what a tester that has no handle (or has died) leaves, ends the gate
+/// without ever running the program.
+const GATE: &str = r#"IFS= read -r _ || exit 125; exec /usr/bin/env -i "$@" </dev/null"#;
+
+/// An error that may pass if the handle is asked for again: a descriptor or memory shortage.
+fn transient(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    error
+        .raw_os_error()
+        .map(Errno::from_raw_os_error)
+        .is_some_and(|errno| {
+            [
+                Errno::MFILE,
+                Errno::NFILE,
+                Errno::NOMEM,
+                Errno::AGAIN,
+                Errno::INTR,
+            ]
+            .contains(&errno)
+        })
+}
+
+/// Starts the program in its own process group, held at a gate (see [`GATE`]) until
+/// `retain` has produced a handle for its pid; only then does the candidate run. A
+/// transient refusal is retried until `deadline` (the handle is asked for at least once).
+/// When no handle can be had the gate is closed: the program has not run, nothing was
+/// forked and nothing needs a signal; the gate process exits by itself and is reaped
+/// within [`KILL_SETTLE`].
+pub fn spawn_retained(
+    command: &std::process::Command,
+    mut retain: impl FnMut(i32) -> io::Result<u64>,
+    deadline: Instant,
+) -> io::Result<(i32, u64)> {
+    use std::{io::Write, os::unix::ffi::OsStringExt, os::unix::fs::PermissionsExt};
+    let program = Path::new(command.get_program());
+    let metadata = fs::metadata(program)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    let mut gate = std::process::Command::new("/bin/sh");
+    gate.arg("-c").arg(GATE).arg("candidate");
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            let mut assignment = name.to_os_string().into_vec();
+            assignment.push(b'=');
+            assignment.extend(value.to_os_string().into_vec());
+            gate.arg(std::ffi::OsString::from_vec(assignment));
+        }
+    }
+    gate.arg(program).args(command.get_args());
+    if let Some(dir) = command.get_current_dir() {
+        gate.current_dir(dir);
+    }
+    use std::os::unix::process::CommandExt;
+    gate.env_clear()
+        .process_group(0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = gate.spawn()?;
+    let pid = child.id() as i32;
+    let mut stdin = child.stdin.take();
+    // The unreaped child keeps its pid reserved, so a handle opened now names this process.
+    let error = loop {
+        match retain(pid) {
+            Ok(handle) => {
+                if let Some(stdin) = stdin.as_mut() {
+                    // A gate that is already gone has nothing to release.
+                    let _ = stdin.write_all(b"go\n");
+                }
+                return Ok((pid, handle));
+            }
+            Err(error) if transient(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => break error,
+        }
+    };
+    drop(stdin);
+    let reaped_by = Instant::now() + KILL_SETTLE;
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break "closed and reaped",
+            Ok(None) if Instant::now() < reaped_by => thread::sleep(Duration::from_millis(5)),
+            _ => break "closed but not yet reaped",
+        }
+    };
+    Err(io::Error::other(format!(
+        "{error}; the candidate was never started: its gate (pid {pid}) was {outcome}"
+    )))
+}
+
+/// Why a read of the process table cannot be trusted.
+enum Scan {
+    Deadline,
+    Unstable(String),
+}
+
+/// What a confirmation read established about an opened descendant handle.
+enum Ownership {
+    /// Listed as a child after its handle was opened: the handle is that process.
+    Confirmed,
+    /// Every children list read in full without it: the handle is not a tree process.
+    Foreign,
+    /// Not established (unreadable or malformed entry, or out of time). Never released for
+    /// want of proof, never signalled: held and confirmed again on each pass.
+    Uncertain,
+}
+
+/// Checks the deadline after a read, success or not.
+fn after<T>(deadline: Instant, result: io::Result<T>) -> Result<io::Result<T>, Scan> {
+    if Instant::now() >= deadline {
+        Err(Scan::Deadline)
+    } else {
+        Ok(result)
+    }
+}
+/// A read that must succeed: any error invalidates the scan.
+fn must<T>(deadline: Instant, path: &str, result: io::Result<T>) -> Result<T, Scan> {
+    after(deadline, result)?.map_err(|error| Scan::Unstable(format!("{path}: {error}")))
+}
+
+fn dead(state: char) -> bool {
+    matches!(state, 'Z' | 'X' | 'x')
+}
+fn parse_state(status: &str) -> Result<char, &'static str> {
+    let value = status
+        .lines()
+        .find_map(|line| line.strip_prefix("State:"))
+        .ok_or("missing task state")?
+        .trim_start();
+    let mut chars = value.chars();
+    let letter = chars.next().ok_or("missing task state")?;
+    if !"RSDTtZXxKWPI".contains(letter) || chars.next().is_some_and(|c| !c.is_whitespace()) {
+        return Err("malformed task state");
+    }
+    Ok(letter)
+}
+/// Running and sleeping flip constantly; only stopped and dead are changes of substance.
+fn state_class(state: char) -> u8 {
+    match state {
+        'T' | 't' => 1,
+        _ if dead(state) => 2,
+        _ => 0,
+    }
+}
+fn parse_pids(text: &str) -> Result<Vec<i32>, Scan> {
+    text.split_whitespace()
+        .map(|word| {
+            word.parse::<i32>()
+                .ok()
+                .filter(|pid| *pid > 0)
+                .ok_or_else(|| Scan::Unstable("malformed pid list".into()))
+        })
+        .collect()
+}
+fn parse_ids(names: Vec<String>) -> Result<Vec<i32>, Scan> {
+    names
+        .iter()
+        .map(|name| {
+            name.parse::<i32>()
+                .ok()
+                .filter(|id| *id > 0)
+                .ok_or_else(|| Scan::Unstable(format!("malformed /proc entry {name:?}")))
+        })
+        .collect()
+}
+enum Link {
+    Socket(u64),
+    Other,
+    Malformed,
+}
+fn classify_link(target: &str) -> Link {
+    match target.strip_prefix("socket:[") {
+        None => Link::Other,
+        Some(rest) => match rest.strip_suffix(']').and_then(|n| n.parse().ok()) {
+            Some(inode) => Link::Socket(inode),
+            None => Link::Malformed,
+        },
+    }
+}
+
+/// What the final re-read compares.
+#[derive(Default, PartialEq, Eq)]
+struct Shape {
+    /// Children of the tester's own tasks: the roots of the candidate tree.
+    roots: BTreeSet<i32>,
+    /// Every task of every process in the tree: state class and children.
+    tasks: BTreeMap<(i32, i32), (u8, Vec<i32>)>,
+}
+#[derive(Default)]
+struct Seen {
+    shape: Shape,
+    /// Socket inode to the tree processes holding it.
+    owners: BTreeMap<u64, BTreeSet<i32>>,
+    /// Who listed each process as its child; the tester for the roots.
+    parents: BTreeMap<i32, i32>,
+}
+impl Seen {
+    fn pids(&self) -> BTreeSet<i32> {
+        self.shape.tasks.keys().map(|(pid, _)| *pid).collect()
+    }
+}
+
+/// Samples every live task of every process reachable from the tester's children. Any
+/// unreadable, malformed or vanished entry invalidates the whole sample, and a process
+/// counts as visited only once all its tasks were read.
+fn walk(table: &dyn ProcessTable, deadline: Instant, sockets: bool) -> Result<Seen, Scan> {
+    let mut seen = Seen::default();
+    let me = table.me();
+    let own = format!("/proc/{me}/task");
+    for tid in parse_ids(must(deadline, &own, table.list(&own))?)? {
+        let path = format!("{own}/{tid}/children");
+        match after(deadline, table.read(&path))? {
+            Ok(text) => {
+                for pid in parse_pids(&text)? {
+                    seen.shape.roots.insert(pid);
+                    seen.parents.insert(pid, me);
+                }
+            }
+            // A tester thread exited and its children moved to a sibling task; the final
+            // re-read notices if that changed what we saw.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Scan::Unstable(format!("{path}: {error}"))),
+        }
+    }
+    let mut pending: Vec<i32> = seen.shape.roots.iter().copied().collect();
+    let mut done = BTreeSet::new();
+    while let Some(pid) = pending.pop() {
+        if done.contains(&pid) {
+            continue;
+        }
+        let dir = format!("/proc/{pid}/task");
+        let tids = parse_ids(must(deadline, &dir, table.list(&dir))?)?;
+        if tids.is_empty() {
+            return Err(Scan::Unstable(format!("{dir}: no tasks")));
+        }
+        for tid in tids {
+            let base = format!("{dir}/{tid}");
+            let path = format!("{base}/status");
+            let status = must(deadline, &path, table.read(&path))?;
+            let state = parse_state(&status)
+                .map_err(|reason| Scan::Unstable(format!("{path}: {reason}")))?;
+            let path = format!("{base}/children");
+            let mut children = parse_pids(&must(deadline, &path, table.read(&path))?)?;
+            children.sort_unstable();
+            children.dedup();
+            for child in &children {
+                seen.parents.entry(*child).or_insert(pid);
+            }
+            pending.extend(&children);
+            // A dead task has released its descriptors; its live siblings are read below.
+            if sockets && !dead(state) {
+                let fds = format!("{base}/fd");
+                for fd in must(deadline, &fds, table.list(&fds))? {
+                    let path = format!("{fds}/{fd}");
+                    match classify_link(&must(deadline, &path, table.link(&path))?) {
+                        Link::Socket(inode) => {
+                            seen.owners.entry(inode).or_default().insert(pid);
+                        }
+                        Link::Other => {}
+                        Link::Malformed => {
+                            return Err(Scan::Unstable(format!("{path}: malformed socket link")));
+                        }
+                    }
+                }
+            }
+            seen.shape
+                .tasks
+                .insert((pid, tid), (state_class(state), children));
+        }
+        done.insert(pid);
+    }
+    Ok(seen)
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+struct Listener {
+    address: SocketAddr,
+    /// Zero when the table did not say.
+    inode: u64,
+}
+
+fn parse_address(hex: &str, ipv6: bool) -> Option<IpAddr> {
+    if !hex.bytes().all(|b| b.is_ascii_hexdigit()) || hex.len() != if ipv6 { 32 } else { 8 } {
+        return None;
+    }
+    // The kernel prints each 32-bit word of the address in host byte order.
+    let mut bytes = Vec::new();
+    for word in hex.as_bytes().chunks(8) {
+        let word = u32::from_str_radix(std::str::from_utf8(word).ok()?, 16).ok()?;
+        bytes.extend(word.to_ne_bytes());
+    }
+    if ipv6 {
+        Some(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).ok()?).into())
+    } else {
+        Some(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).ok()?).into())
+    }
+}
+
+/// Listening rows of one `/proc/net/tcp{,6}` table. Every row is validated, not only
+/// listeners: a malformed value anywhere invalidates the read.
+fn parse_table(text: &str, ipv6: bool) -> Result<Vec<Listener>, &'static str> {
+    let mut listeners = Vec::new();
+    for line in text.lines().skip(1).filter(|l| !l.trim().is_empty()) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        if fields.len() < 4 {
+            return Err("short socket row");
+        }
+        let (address, port) = fields[1]
+            .split_once(':')
+            .ok_or("malformed socket address")?;
+        let address = parse_address(address, ipv6).ok_or("malformed socket address")?;
+        let port = (port.len() == 4 && port.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u16::from_str_radix(port, 16).ok())
+            .flatten()
+            .ok_or("malformed socket port")?;
+        let state = (fields[3].len() == 2 && fields[3].bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| u8::from_str_radix(fields[3], 16).ok())
+            .flatten()
+            .filter(|state| (0x01..=0x0c).contains(state))
+            .ok_or("malformed socket state")?;
+        let inode = match fields.get(9) {
+            Some(inode) => inode.parse().map_err(|_| "malformed socket inode")?,
+            None => 0,
+        };
+        if state == 0x0a {
+            listeners.push(Listener {
+                address: SocketAddr::new(address, port),
+                inode,
+            });
+        }
+    }
+    Ok(listeners)
+}
+
+fn read_tables(table: &dyn ProcessTable, deadline: Instant) -> Result<Vec<Listener>, Scan> {
+    let mut all = Vec::new();
+    for (path, ipv6) in [("/proc/net/tcp", false), ("/proc/net/tcp6", true)] {
+        let text = must(deadline, path, table.read(path))?;
+        all.extend(
+            parse_table(&text, ipv6)
+                .map_err(|reason| Scan::Unstable(format!("{path}: {reason}")))?,
         );
+    }
+    all.sort();
+    Ok(all)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Owner {
+    Tree,
+    Outside,
+    Unknown,
+}
+
+/// Only 127.0.0.1:$PORT held by the tree passes. A listener positively held by a process
+/// outside the tree is not the candidate's; one with no known owner fails.
+fn binding_verdict(listeners: &[(Listener, Owner)], port: u16) -> Diagnostics {
+    let mut loopback = false;
+    let (mut extra, mut unknown) = (Vec::new(), Vec::new());
+    for (listener, owner) in listeners {
+        let allowed = listener.address == SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        match owner {
+            Owner::Outside => {}
+            Owner::Tree if allowed => loopback = true,
+            Owner::Tree => extra.push(listener.address.to_string()),
+            Owner::Unknown => unknown.push(listener.address.to_string()),
+        }
+    }
+    let mut parts = Vec::new();
+    if !extra.is_empty() {
+        parts.push(format!(
+            "candidate also listens on {} (only 127.0.0.1:$PORT is allowed)",
+            extra.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        parts.push(format!(
+            "cannot attribute listener {} to any process",
+            unknown.join(", ")
+        ));
+    }
+    if !loopback {
+        parts.push("candidate is not listening on 127.0.0.1:$PORT".to_owned());
+    }
+    let mut diagnostics = Diagnostics::new();
+    if !parts.is_empty() {
+        diagnostics.insert("OCI-V1-BINDING", parts.join("; "));
     }
     diagnostics
 }
 
+/// Table-only form of the binding rule: every listener is taken as the candidate's.
+pub fn check_binding_snapshot(tcp: &str, tcp6: &str, port: u16) -> Diagnostics {
+    let parsed = parse_table(tcp, false).and_then(|mut all| {
+        all.extend(parse_table(tcp6, true)?);
+        Ok(all)
+    });
+    match parsed {
+        Ok(listeners) => {
+            let listeners: Vec<_> = listeners.into_iter().map(|l| (l, Owner::Tree)).collect();
+            binding_verdict(&listeners, port)
+        }
+        Err(reason) => {
+            let mut diagnostics = Diagnostics::new();
+            diagnostics.insert(
+                "OCI-V1-BINDING",
+                format!("cannot inspect Linux listening sockets: {reason}"),
+            );
+            diagnostics
+        }
+    }
+}
+
+/// Socket inodes of `wanted` held by processes outside the tree that we can read.
+fn outside_inodes(
+    table: &dyn ProcessTable,
+    tree: &BTreeSet<i32>,
+    wanted: &BTreeSet<u64>,
+    deadline: Instant,
+) -> Result<BTreeSet<u64>, Scan> {
+    let mut found = BTreeSet::new();
+    let Ok(procs) = after(deadline, table.list("/proc"))? else {
+        return Ok(found);
+    };
+    for pid in procs.iter().filter_map(|name| name.parse::<i32>().ok()) {
+        if tree.contains(&pid) {
+            continue;
+        }
+        let dir = format!("/proc/{pid}/fd");
+        let Ok(fds) = after(deadline, table.list(&dir))? else {
+            continue;
+        };
+        for fd in fds {
+            let path = format!("{dir}/{fd}");
+            if let Ok(target) = after(deadline, table.link(&path))?
+                && let Link::Socket(inode) = classify_link(&target)
+                && wanted.contains(&inode)
+            {
+                found.insert(inode);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// One sample plus a final consistency re-read of the socket tables and of the tree.
+fn sample(table: &dyn ProcessTable, port: u16, deadline: Instant) -> Result<Diagnostics, Scan> {
+    let first = read_tables(table, deadline)?;
+    let seen = walk(table, deadline, true)?;
+    let second = read_tables(table, deadline)?;
+    let again = walk(table, deadline, false)?;
+    if first != second {
+        return Err(Scan::Unstable(
+            "socket tables changed while the tree was sampled".into(),
+        ));
+    }
+    if seen.shape != again.shape {
+        return Err(Scan::Unstable(
+            "process tree changed while it was sampled".into(),
+        ));
+    }
+    let wanted: BTreeSet<u64> = first
+        .iter()
+        .filter(|l| l.inode != 0 && !seen.owners.contains_key(&l.inode))
+        .map(|l| l.inode)
+        .collect();
+    let outside = if wanted.is_empty() {
+        BTreeSet::new()
+    } else {
+        outside_inodes(table, &seen.pids(), &wanted, deadline)?
+    };
+    let listeners: Vec<_> = first
+        .into_iter()
+        .map(|listener| {
+            let owner = if seen.owners.contains_key(&listener.inode) {
+                Owner::Tree
+            } else if outside.contains(&listener.inode) {
+                Owner::Outside
+            } else {
+                Owner::Unknown
+            };
+            (listener, owner)
+        })
+        .collect();
+    ensure(deadline).map_err(|_| Scan::Deadline)?;
+    Ok(binding_verdict(&listeners, port))
+}
+
+/// OCI-V1-BINDING over the whole candidate tree. Rescans on any anomaly, at most
+/// [`MAX_SCANS`] times, then fails as unstable; never passes on incomplete evidence.
+pub fn inspect_binding(
+    table: &dyn ProcessTable,
+    port: u16,
+    deadline: Instant,
+) -> io::Result<Diagnostics> {
+    let mut reason = String::new();
+    for _ in 0..MAX_SCANS {
+        match sample(table, port, deadline) {
+            Ok(diagnostics) => return Ok(diagnostics),
+            Err(Scan::Deadline) => return Err(deadline_error()),
+            Err(Scan::Unstable(why)) => reason = why,
+        }
+    }
+    let mut diagnostics = Diagnostics::new();
+    diagnostics.insert(
+        "OCI-V1-BINDING",
+        format!("inspection unstable after {MAX_SCANS} scans: {reason}"),
+    );
+    Ok(diagnostics)
+}
+
+/// The candidate and everything it starts. Every process of the tree is retained by
+/// handle (a pidfd) as it is discovered and signalled only through that handle.
 pub struct Candidate {
-    child: std::process::Child,
-    group: rustix::process::Pid,
+    table: Box<dyn ProcessTable>,
+    root: i32,
+    handles: BTreeMap<i32, u64>,
+    /// Opened handles whose ownership is not yet established, with the parent they were
+    /// seen under. Held (never released for want of proof) and confirmed again on each
+    /// pass; signalled only once confirmed, since the pid may have been reused between the
+    /// walk that saw it and the open.
+    unconfirmed: BTreeMap<i32, (u64, i32)>,
+    deadline: Instant,
+    cleaned: bool,
 }
 impl Candidate {
     pub fn spawn(
         port: u16,
-        executable: &std::ffi::OsStr,
+        executable: &OsStr,
         args: &[OsString],
         probe: &FilesystemProbe,
     ) -> io::Result<Self> {
-        use rustix::process::{Pid, set_child_subreaper};
-        use std::os::unix::process::CommandExt;
+        Self::spawn_until(
+            Box::new(RealTable::default()),
+            port,
+            executable,
+            args,
+            probe,
+            Instant::now() + CHECK_BUDGET,
+        )
+    }
+    pub fn spawn_until(
+        table: Box<dyn ProcessTable>,
+        port: u16,
+        executable: &OsStr,
+        args: &[OsString],
+        probe: &FilesystemProbe,
+        deadline: Instant,
+    ) -> io::Result<Self> {
         if !Path::new(executable).is_absolute() {
             return Err(io::Error::other(
                 "candidate executable must be an absolute path",
             ));
         }
-        // Adopt orphaned descendants so cleanup can reap this process group too.
-        set_child_subreaper(Some(Pid::from_raw(1).unwrap()))?;
-        let child = std::process::Command::new(executable)
+        let mut command = std::process::Command::new(executable);
+        command
             .args(args)
             .env_clear()
             .env("PORT", port.to_string())
             .env("HOME", probe.sentinel())
             .env("TMPDIR", probe.scratch())
-            .current_dir(probe.sentinel())
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()?;
-        let group = Pid::from_child(&child);
-        Ok(Self { child, group })
+            .current_dir(probe.sentinel());
+        // The root handle is retained before the candidate runs; from here on Drop owns the kill.
+        let (root, handle) = table.spawn(&command, deadline)?;
+        let mut candidate = Self {
+            table,
+            root,
+            handles: BTreeMap::from([(root, handle)]),
+            unconfirmed: BTreeMap::new(),
+            deadline,
+            cleaned: false,
+        };
+        match candidate.discover(deadline, false) {
+            Err(Scan::Deadline) => Err(deadline_error()),
+            _ => Ok(candidate),
+        }
     }
     pub fn pid(&self) -> rustix::process::Pid {
-        self.group
+        rustix::process::Pid::from_raw(self.root).expect("candidate pid")
     }
-    pub fn terminate(&mut self) -> io::Result<bool> {
-        use rustix::process::{Signal, kill_process};
-        if self.child.try_wait()?.is_some() {
-            return Ok(true);
+    /// Retains a handle for every process present, then inspects. A tree whose members
+    /// cannot be retained and confirmed in [`MAX_SCANS`] attempts is unstable: it fails.
+    pub fn binding(&mut self, port: u16) -> io::Result<Diagnostics> {
+        for _ in 0..MAX_SCANS {
+            match self.discover(self.deadline, false) {
+                Err(Scan::Deadline) => return Err(deadline_error()),
+                Ok(Some(_)) => return inspect_binding(&*self.table, port, self.deadline),
+                _ => thread::sleep(Duration::from_millis(5)),
+            }
         }
-        if let Err(error) = kill_process(self.group, Signal::TERM)
-            && error != rustix::io::Errno::SRCH
-        {
-            return Err(error.into());
+        let mut diagnostics = Diagnostics::new();
+        diagnostics.insert(
+            "OCI-V1-BINDING",
+            format!("inspection unstable after {MAX_SCANS} scans: a process could not be retained"),
+        );
+        Ok(diagnostics)
+    }
+
+    /// Whether `pid` is listed as a child of `parent` or of the tester, read now. A child
+    /// stays listed (even as a zombie) until its parent reaps it, so a pid that is listed
+    /// after its handle was opened cannot have been reused by an unrelated process. `Foreign`
+    /// needs every task's children list read in full without finding it; an unreadable or
+    /// malformed entry, or `until` passing (looked at before each read), leaves ownership
+    /// `Uncertain`, which is not proof of anything.
+    fn ownership(&self, pid: i32, parent: i32, until: Instant) -> Ownership {
+        for owner in [parent, self.table.me()] {
+            if Instant::now() >= until {
+                return Ownership::Uncertain;
+            }
+            let dir = format!("/proc/{owner}/task");
+            let tids = match self.table.list(&dir).map(parse_ids) {
+                Ok(Ok(tids)) => tids,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                _ => return Ownership::Uncertain,
+            };
+            for tid in tids {
+                if Instant::now() >= until {
+                    return Ownership::Uncertain;
+                }
+                let path = format!("{dir}/{tid}/children");
+                match self.table.read(&path) {
+                    Ok(text) => match parse_pids(&text) {
+                        Ok(children) if children.contains(&pid) => return Ownership::Confirmed,
+                        Ok(_) => {}
+                        Err(_) => return Ownership::Uncertain,
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(_) => return Ownership::Uncertain,
+                }
+            }
         }
-        let deadline = Instant::now() + TERM_GRACE;
-        loop {
-            if self.child.try_wait()?.is_some() {
-                return Ok(true);
+        Ownership::Foreign
+    }
+
+    /// Keeps a confirmed handle: retained for good, and killed when asked.
+    fn retain(&mut self, pid: i32, handle: u64, kill: bool) {
+        self.handles.insert(pid, handle);
+        if kill {
+            let _ = self.table.signal(handle, Signal::KILL);
+        }
+    }
+
+    /// Retains a handle for every tree process not yet held. A handle counts only once the
+    /// process is confirmed to still be in the tree after the handle was opened: the pid may
+    /// have exited, been reaped and been reused between the walk and the open. One proven
+    /// foreign is released unsignalled. One whose ownership is uncertain is held in
+    /// `unconfirmed`, never released for want of proof and never signalled, and confirmed
+    /// again first on the next pass. Confirmation reads stop at `deadline`, looked at before
+    /// each read and after each process. `Ok(None)` means the scan was incomplete, a process
+    /// vanished or a handle could not be had or confirmed: not evidence of absence.
+    fn discover(&mut self, deadline: Instant, kill: bool) -> Result<Option<usize>, Scan> {
+        let mut complete = true;
+        for (pid, (handle, parent)) in std::mem::take(&mut self.unconfirmed) {
+            match self.ownership(pid, parent, deadline) {
+                Ownership::Confirmed => self.retain(pid, handle, kill),
+                Ownership::Foreign => self.table.release(handle),
+                Ownership::Uncertain => {
+                    self.unconfirmed.insert(pid, (handle, parent));
+                    complete = false;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Scan::Deadline);
+        }
+        let seen = match walk(&*self.table, deadline, false) {
+            Ok(seen) => seen,
+            Err(Scan::Unstable(_)) => return Ok(None),
+            Err(Scan::Deadline) => return Err(Scan::Deadline),
+        };
+        let pids = seen.pids();
+        for pid in &pids {
+            if self.handles.contains_key(pid) || self.unconfirmed.contains_key(pid) {
+                continue;
+            }
+            match self.table.open(*pid) {
+                Ok(handle) => {
+                    let parent = seen.parents.get(pid).copied().unwrap_or(self.table.me());
+                    match self.ownership(*pid, parent, deadline) {
+                        Ownership::Confirmed => self.retain(*pid, handle, kill),
+                        Ownership::Foreign => {
+                            self.table.release(handle);
+                            complete = false;
+                        }
+                        Ownership::Uncertain => {
+                            self.unconfirmed.insert(*pid, (handle, parent));
+                            complete = false;
+                        }
+                    }
+                }
+                Err(_) => complete = false,
             }
             if Instant::now() >= deadline {
+                return Err(Scan::Deadline);
+            }
+        }
+        Ok(complete.then_some(pids.len()))
+    }
+
+    /// SIGTERM to the candidate; true when it exits within the grace. Descendants are not
+    /// signalled: [`Candidate::cleanup`] ends whatever is left.
+    pub fn terminate(&mut self) -> io::Result<bool> {
+        let Some(&handle) = self.handles.get(&self.root) else {
+            return Ok(true);
+        };
+        if self.table.reap(handle)? {
+            self.handles.remove(&self.root);
+            return Ok(true);
+        }
+        match self.table.signal(handle, Signal::TERM) {
+            Err(error) if error.raw_os_error() != Some(rustix::io::Errno::SRCH.raw_os_error()) => {
+                return Err(error);
+            }
+            _ => {}
+        }
+        let grace = Instant::now() + TERM_GRACE;
+        loop {
+            if self.table.reap(handle)? {
+                self.handles.remove(&self.root);
+                return Ok(true);
+            }
+            ensure(self.deadline)?;
+            if Instant::now() >= grace {
                 return Ok(false);
             }
             thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// One non-blocking reap attempt per retained handle; true when any was reaped. The
+    /// attempts stop at `until`, which is looked at before each handle.
+    fn reap_known(&mut self, until: Instant) -> bool {
+        let mut reaped = false;
+        for (pid, handle) in self.handles.clone() {
+            if Instant::now() >= until {
+                break;
+            }
+            if self.table.reap(handle).unwrap_or(false) {
+                self.handles.remove(&pid);
+                reaped = true;
+            }
+        }
+        reaped
+    }
+
+    /// SIGKILL to every confirmed handle, then reap until a fresh scan of the tester's
+    /// descendants, taken after the last reap, is empty and no handle is left unconfirmed.
+    /// The kill is never skipped; the whole wait for it, every reap and confirmation read
+    /// included, is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not.
+    /// Retained handles are reaped before every scan, so processes already dead are
+    /// collected even when the scan then runs out of time. Runs at most once: Drop does not
+    /// start a second wait.
+    pub fn cleanup(&mut self) -> io::Result<()> {
+        self.cleaned = true;
+        let mut settle = None;
+        loop {
+            for handle in self.handles.values() {
+                let _ = self.table.signal(*handle, Signal::KILL);
+            }
+            let settle = *settle.get_or_insert_with(|| Instant::now() + KILL_SETTLE);
+            let reaped = self.reap_known(settle);
+            let Ok(found) = self.discover(settle, true) else {
+                return Err(self.unsettled());
+            };
+            if found == Some(0) && !reaped && self.handles.is_empty() && self.unconfirmed.is_empty()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= settle {
+                return Err(self.unsettled());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Cleanup ran out of settle time: everything confirmed has been sent SIGKILL, and no
+    /// further reap budget starts after [`KILL_SETTLE`]. Handles whose ownership was never
+    /// established are closed unsignalled and named, so the check fails closed instead of
+    /// risking a signal to a process that reused the pid.
+    fn unsettled(&mut self) -> io::Error {
+        let unconfirmed: Vec<i32> = self.unconfirmed.keys().copied().collect();
+        for (_, (handle, _)) in std::mem::take(&mut self.unconfirmed) {
+            self.table.release(handle);
+        }
+        if unconfirmed.is_empty() {
+            io::Error::other("candidate cleanup did not finish within the kill settle time")
+        } else {
+            io::Error::other(format!(
+                "candidate cleanup did not finish within the kill settle time; \
+                 ownership of {unconfirmed:?} could not be confirmed, left unsignalled"
+            ))
+        }
+    }
+
+    /// When the candidate never got to run, the exit status of the process that tried to
+    /// start it: 126 or 127, the shell convention for a program that cannot be executed
+    /// (a directory, a missing interpreter or loader). A candidate that ends that way on its
+    /// own is reported the same way, as one that failed to start.
+    pub fn start_failure(&self) -> Option<i32> {
+        let handle = self.handles.get(&self.root)?;
+        match self.table.exit_status(*handle) {
+            Ok(Some(status @ (126 | 127))) => Some(status),
+            _ => None,
         }
     }
 }
 
 impl Drop for Candidate {
     fn drop(&mut self) {
-        use rustix::process::{Signal, WaitOptions, kill_process_group, waitpgid};
-        let _ = kill_process_group(self.group, Signal::KILL);
-        let _ = self.child.wait();
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            match waitpgid(self.group, WaitOptions::NOHANG) {
-                Ok(Some(_)) => continue,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                Err(rustix::io::Errno::INTR) => continue,
-                _ => break,
-            }
+        if !self.cleaned {
+            let _ = self.cleanup();
         }
     }
 }

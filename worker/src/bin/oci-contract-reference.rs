@@ -10,10 +10,13 @@ use std::{
     time::Duration,
 };
 
+#[path = "../oci_contract.rs"]
+pub mod contract;
+
 const LIMIT: usize = 6_000_000;
 const LOG_LIMIT: usize = 256_000;
 
-fn valid_request(value: &Value) -> bool {
+fn valid_request(value: &Value, mode: &str) -> bool {
     let Some(object) = value.as_object() else {
         return false;
     };
@@ -34,7 +37,14 @@ fn valid_request(value: &Value) -> bool {
         && context
             .get("deadline")
             .and_then(Value::as_str)
-            .is_some_and(|s| s == "2026-10-31T12:00:00Z")
+            // "literal-deadline" is the defective candidate that knows one timestamp only.
+            .is_some_and(|s| {
+                if mode == "literal-deadline" {
+                    s == "2026-10-31T12:00:00Z"
+                } else {
+                    contract::utc_deadline(s)
+                }
+            })
 }
 
 fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {
@@ -79,7 +89,7 @@ fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {
         let request: Option<Value> = serde_json::from_slice(&bytes[end..]).ok();
         if mode != "OCI-V1-REQUEST"
             && (!header.contains("content-type: application/json\r\n")
-                || !request.as_ref().is_some_and(valid_request))
+                || !request.as_ref().is_some_and(|v| valid_request(v, mode)))
         {
             status = 400;
         } else if mode != "OCI-V1-PARAMS-LIMIT"
@@ -135,11 +145,19 @@ fn serve(mut stream: TcpStream, mode: &str) -> std::io::Result<()> {
 
 fn main() {
     let mode = env::args().nth(1).unwrap_or_else(|| "compliant".into());
-    if mode == "ignore-sigterm" && env::args().nth(2).as_deref() != Some("inherited") {
+    let ignores_sigterm = matches!(mode.as_str(), "ignore-sigterm" | "setpgid-ignore-sigterm");
+    if ignores_sigterm && env::args().nth(2).as_deref() != Some("inherited") {
+        if mode == "setpgid-ignore-sigterm" {
+            // Leave the group the tester created for us and join the tester's own, so the
+            // group the tester knows about is empty and cannot be used to reach us.
+            use rustix::process::{getpgid, getppid, setpgid};
+            let parent = getppid().expect("parent");
+            setpgid(None, Some(getpgid(Some(parent)).expect("parent group"))).expect("setpgid");
+        }
         let error = Command::new("/bin/sh")
             .args(["-c", "trap '' TERM; exec \"$@\"", "reference"])
             .arg(env::current_exe().unwrap())
-            .args(["ignore-sigterm", "inherited"])
+            .args([mode.as_str(), "inherited"])
             .exec();
         panic!("exec: {error}");
     }
@@ -153,6 +171,8 @@ fn main() {
         port,
     ))
     .unwrap();
+    // The forbidden second listener of the dual-listener defect stays open and unserved.
+    let _extra = (mode == "dual-listener").then(|| TcpListener::bind(("0.0.0.0", 0)).unwrap());
     match mode.as_str() {
         "OCI-V1-FILESYSTEM" | "write-cwd" => fs::write("created", b"violation").unwrap(),
         "write-home" => fs::write(
