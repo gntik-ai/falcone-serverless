@@ -4,7 +4,10 @@
 use falcone_serverless_worker::host::HostError;
 use falcone_serverless_worker::host::grant::{GrantSet, ImportVerdict};
 use falcone_serverless_worker::host::http::{Destination, RedirectError, redirect_target};
-use falcone_serverless_worker::host::limits::{HOST_CALL_TIMEOUT, HostLimits};
+use falcone_serverless_worker::host::limits::{
+    HOST_CALL_TIMEOUT, HTTP_REQUEST_FRAME_BYTES, HTTP_RESPONSE_FRAME_BYTES, HostLimits, pair_bytes,
+    string_bytes,
+};
 use falcone_serverless_worker::host::net::{AddressClass, Reach, classify, reach};
 use serde_json::{Value, json};
 use std::net::IpAddr;
@@ -459,4 +462,25 @@ fn request_size_arithmetic_has_exact_edges_and_never_wraps() {
     assert_eq!(tight.check_request(&[2, 3]), Err(HostError::LimitExceeded));
     assert_eq!(tight.check_response(8), Ok(()));
     assert_eq!(tight.check_response(9), Err(HostError::LimitExceeded));
+}
+
+#[test]
+fn serialized_sizes_count_frames_and_records_on_top_of_contents() {
+    // A string or list is a pointer and a length; a name/value record is two such pairs.
+    assert_eq!(string_bytes(0), 8);
+    assert_eq!(string_bytes(10), 18);
+    assert_eq!(pair_bytes(0, 0), 16);
+    assert_eq!(pair_bytes(1, 2), 19);
+    // url, method, headers and body pairs; status, headers and body of a response.
+    assert_eq!(HTTP_REQUEST_FRAME_BYTES, 32);
+    assert_eq!(HTTP_RESPONSE_FRAME_BYTES, 20);
+    assert_eq!(string_bytes(usize::MAX), usize::MAX);
+    assert_eq!(pair_bytes(usize::MAX, 1), usize::MAX);
+    // 65537 records alone are over the 1 MiB ceiling, whatever their contents.
+    let limits = HostLimits::default();
+    assert_eq!(
+        limits.check_request(&[65_537 * pair_bytes(0, 0)]),
+        Err(HostError::LimitExceeded)
+    );
+    assert_eq!(limits.check_request(&[65_536 * pair_bytes(0, 0)]), Ok(()));
 }

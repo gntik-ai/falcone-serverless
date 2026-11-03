@@ -14,7 +14,7 @@ use super::HostError;
 use super::bindings::CallControl;
 use super::grant::GrantSet;
 use super::http::{Destination, redirect_target};
-use super::limits::HostLimits;
+use super::limits::{HTTP_REQUEST_FRAME_BYTES, HTTP_RESPONSE_FRAME_BYTES, HostLimits, pair_bytes};
 use super::net::{Reach, classify, reach};
 
 const MAX_REDIRECTS: usize = 5;
@@ -99,14 +99,17 @@ pub fn fetch(
     request: HttpRequest,
     control: &CallControl,
 ) -> Result<HttpResponse, HostError> {
+    // Everything the guest serialized into the call counts: the frame, each header record and
+    // the contents.
     let header_bytes = request
         .headers
         .iter()
         .try_fold(0usize, |total, (name, value)| {
-            total.checked_add(name.len())?.checked_add(value.len())
+            total.checked_add(pair_bytes(name.len(), value.len()))
         })
         .unwrap_or(usize::MAX);
     limits.check_request(&[
+        HTTP_REQUEST_FRAME_BYTES,
         request.url.len(),
         request.method.len(),
         header_bytes,
@@ -349,14 +352,18 @@ fn read_response(
         .filter(|code| (100..=599).contains(code))
         .ok_or(HostError::Denied)?;
     let mut headers = Vec::new();
-    let mut header_bytes = 0usize;
+    // The response frame and every header record count towards the host-to-guest ceiling, and
+    // are checked as the head is parsed, so a flood of tiny headers stops early.
+    let mut header_bytes = HTTP_RESPONSE_FRAME_BYTES;
     for line in lines {
         let (name, value) = line.split_once(':').ok_or(HostError::Denied)?;
         if name.is_empty() || name.contains([' ', '\t']) {
             return Err(HostError::Denied);
         }
-        header_bytes = header_bytes.saturating_add(name.len() + value.len());
-        headers.push((name.to_owned(), value.trim().to_owned()));
+        let value = value.trim();
+        header_bytes = header_bytes.saturating_add(pair_bytes(name.len(), value.len()));
+        limits.check_response(header_bytes)?;
+        headers.push((name.to_owned(), value.to_owned()));
     }
     limits.check_response(header_bytes)?;
     let body_start = head_end + 4;

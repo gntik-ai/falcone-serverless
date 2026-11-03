@@ -31,6 +31,7 @@ fn fixtures() -> Fixtures {
         http: include_str!("../qualification/gate_fixtures/http.wat"),
         sinks: include_str!("../qualification/gate_fixtures/sinks.wat"),
         logging: include_str!("../qualification/gate_fixtures/logging.wat"),
+        http_headers: include_str!("../qualification/gate_fixtures/http-headers.wat"),
     }
 }
 

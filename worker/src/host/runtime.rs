@@ -26,7 +26,10 @@ use super::bindings::{
 use super::call::run_bounded;
 use super::egress::{Connector, HttpRequest, Resolver, TcpConnector, fetch};
 use super::grant::{self, GrantSet, ImportVerdict};
-use super::limits::HostLimits;
+use super::limits::{
+    HANDLE_FRAME_BYTES, HTTP_REQUEST_FRAME_BYTES, HostLimits, RECORD_FRAME_BYTES, U64_FRAME_BYTES,
+    pair_bytes, string_bytes,
+};
 
 /// Guest linear memory is bounded for the host side of the ABI; profile budgets are RUN-01's.
 const GUEST_MEMORY_BYTES: usize = 64 * 1024 * 1024;
@@ -213,7 +216,7 @@ impl HostState {
     }
 
     fn open_object(&mut self, key: String) -> Result<Resource<Object>, HostError> {
-        self.limits.check_request(&[key.len()])?;
+        self.limits.check_request(&[string_bytes(key.len())])?;
         self.grants.authorize_storage_key(&key)?;
         self.table
             .push(Object(key))
@@ -221,7 +224,7 @@ impl HostState {
     }
 
     fn open_checkpoint(&mut self, key: String) -> Result<Resource<Checkpoint>, HostError> {
-        self.limits.check_request(&[key.len()])?;
+        self.limits.check_request(&[string_bytes(key.len())])?;
         self.grants.authorize_storage_key(&key)?;
         self.table
             .push(Checkpoint(key))
@@ -233,19 +236,21 @@ impl HostState {
         self.grants.authorize_storage_key(&key)?;
         let binding = self.caps.storage.clone().ok_or(HostError::Denied)?;
         let data = self.bounded(move |c| binding.read(&key, c).map_err(|e| e.into_host(c)))?;
-        self.limits.check_response(data.len())?;
+        self.limits.check_response(string_bytes(data.len()))?;
         Ok(data)
     }
 
     fn storage_write(&mut self, key: String, data: Vec<u8>) -> Result<(), HostError> {
-        self.limits.check_request(&[data.len()])?;
+        self.limits
+            .check_request(&[HANDLE_FRAME_BYTES, string_bytes(data.len())])?;
         self.grants.authorize_storage_key(&key)?;
         let binding = self.caps.storage.clone().ok_or(HostError::Denied)?;
         self.bounded(move |c| binding.write(&key, &data, c).map_err(|e| e.into_host(c)))
     }
 
     fn publish(&mut self, topic: String, payload: Vec<u8>) -> Result<(), HostError> {
-        self.limits.check_request(&[topic.len(), payload.len()])?;
+        self.limits
+            .check_request(&[string_bytes(topic.len()), string_bytes(payload.len())])?;
         self.grants.authorize_event_topic(&topic)?;
         let binding = self.caps.events.clone().ok_or(HostError::Denied)?;
         self.bounded(move |c| {
@@ -260,7 +265,8 @@ impl HostState {
         target: String,
         input: Vec<u8>,
     ) -> Result<Resource<Execution>, HostError> {
-        self.limits.check_request(&[target.len(), input.len()])?;
+        self.limits
+            .check_request(&[string_bytes(target.len()), string_bytes(input.len())])?;
         self.grants.authorize_workflow_target(&target)?;
         let binding = self.caps.workflows.clone().ok_or(HostError::Denied)?;
         let name = target.clone();
@@ -278,7 +284,11 @@ impl HostState {
         name: String,
         payload: Vec<u8>,
     ) -> Result<(), HostError> {
-        self.limits.check_request(&[name.len(), payload.len()])?;
+        self.limits.check_request(&[
+            HANDLE_FRAME_BYTES,
+            string_bytes(name.len()),
+            string_bytes(payload.len()),
+        ])?;
         let execution = self.table.get(handle).map_err(|_| HostError::Denied)?;
         let (target, id) = (execution.target.clone(), execution.id.clone());
         self.grants.authorize_workflow_target(&target)?;
@@ -316,7 +326,7 @@ impl HostState {
         })
     }
 
-    /// `fields` were lifted under `lift_fields`, so their aggregate is already inside the ceiling.
+    /// `fields` were lifted under `lift_pairs`, so their aggregate is already inside the ceiling.
     fn log(&mut self, level: Level, message: String, fields: Vec<Field>) -> Result<(), HostError> {
         self.limits
             .check_request(&[message.len(), LOG_FRAME_BYTES, log_field_bytes(&fields)?])?;
@@ -345,7 +355,8 @@ impl HostState {
         total: u64,
         message: String,
     ) -> Result<(), HostError> {
-        self.limits.check_request(&[message.len()])?;
+        self.limits
+            .check_request(&[2 * U64_FRAME_BYTES, string_bytes(message.len())])?;
         let progress = Arc::clone(&self.caps.progress);
         self.bounded(move |_| {
             progress.report(completed, total, &message);
@@ -371,46 +382,45 @@ impl HostState {
 /// Canonical-ABI bytes of the call outside the message text and the field strings: severity,
 /// the message pointer and length, and the field list pointer and length.
 const LOG_FRAME_BYTES: usize = 20;
-/// Canonical-ABI bytes of one `field` record: two string pointer and length pairs.
-const FIELD_RECORD_BYTES: usize = 16;
 
 /// Serialized size of every field: its record plus both strings. Overflow is over the limit.
 fn log_field_bytes(fields: &[Field]) -> Result<usize, HostError> {
     fields
         .iter()
         .try_fold(0usize, |total, f| {
-            total
-                .checked_add(FIELD_RECORD_BYTES)?
-                .checked_add(f.name.len())?
-                .checked_add(f.value.len())
+            total.checked_add(pair_bytes(f.name.len(), f.value.len()))
         })
         .ok_or(HostError::LimitExceeded)
 }
 
-/// The list is read lazily: its length is known from the call frame, so a request whose records
-/// alone exceed the ceiling is refused before any element is copied, and lifting stops at the
-/// first element that takes the aggregate over it.
-fn lift_fields(
+/// Lifts a list of `name`/`value` records lazily. The list length is known from the call frame,
+/// so a request whose records alone exceed the ceiling (with `fixed` bytes of the rest of the
+/// call) is refused before any element is copied, and lifting stops at the first element that
+/// takes the aggregate over it. Elements may alias one large guest string, so nothing is
+/// allocated for the remainder once the ceiling is crossed.
+fn lift_pairs<T: Lift + 'static>(
     mut cx: StoreContextMut<HostState>,
-    message_bytes: usize,
-    fields: &WasmList<Field>,
-) -> Result<Vec<Field>, HostError> {
+    fixed: usize,
+    list: &WasmList<T>,
+    lengths: fn(&T) -> (usize, usize),
+) -> Result<Vec<T>, HostError> {
     let limits = cx.data().limits;
-    let records = fields
+    let records = list
         .len()
-        .checked_mul(FIELD_RECORD_BYTES)
+        .checked_mul(RECORD_FRAME_BYTES)
         .ok_or(HostError::LimitExceeded)?;
-    limits.check_request(&[message_bytes, LOG_FRAME_BYTES, records])?;
+    limits.check_request(&[fixed, records])?;
     let mut lifted = Vec::new();
     let mut strings = 0usize;
-    for field in fields.iter(&mut cx).map_err(|_| HostError::Denied)? {
-        let field = field.map_err(|_| HostError::Denied)?;
+    for item in list.iter(&mut cx).map_err(|_| HostError::Denied)? {
+        let item = item.map_err(|_| HostError::Denied)?;
+        let (name, value) = lengths(&item);
         strings = strings
-            .checked_add(field.name.len())
-            .and_then(|total| total.checked_add(field.value.len()))
+            .checked_add(name)
+            .and_then(|total| total.checked_add(value))
             .ok_or(HostError::LimitExceeded)?;
-        limits.check_request(&[message_bytes, LOG_FRAME_BYTES, records, strings])?;
-        lifted.push(field);
+        limits.check_request(&[fixed, records, strings])?;
+        lifted.push(item);
     }
     Ok(lifted)
 }
@@ -475,7 +485,9 @@ fn link_logging(linker: &mut Linker<HostState>) -> engine::Result<()> {
         "log",
         |mut cx: StoreContextMut<HostState>,
          (level, message, fields): (Level, String, WasmList<Field>)| {
-            let fields = match lift_fields(cx.as_context_mut(), message.len(), &fields) {
+            let fixed = message.len().saturating_add(LOG_FRAME_BYTES);
+            let lengths = |f: &Field| (f.name.len(), f.value.len());
+            let fields = match lift_pairs(cx.as_context_mut(), fixed, &fields, lengths) {
                 Ok(fields) => fields,
                 Err(error) => return wire(Err(error)),
             };
@@ -571,7 +583,15 @@ fn link_http(linker: &mut Linker<HostState>) -> engine::Result<()> {
     instance.func_wrap(
         "request",
         |mut cx: StoreContextMut<HostState>,
-         (url, method, headers, body): (String, String, Vec<Header>, Vec<u8>)| {
+         (url, method, headers, body): (String, String, WasmList<Header>, Vec<u8>)| {
+            let fixed = [url.len(), method.len(), body.len()]
+                .into_iter()
+                .fold(HTTP_REQUEST_FRAME_BYTES, usize::saturating_add);
+            let lengths = |h: &Header| (h.name.len(), h.value.len());
+            let headers = match lift_pairs(cx.as_context_mut(), fixed, &headers, lengths) {
+                Ok(headers) => headers,
+                Err(error) => return wire(Err(error)),
+            };
             let request = HttpRequest {
                 url,
                 method,

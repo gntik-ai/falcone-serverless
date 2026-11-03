@@ -8,6 +8,30 @@ pub const MAX_GUEST_TO_HOST_BYTES: usize = 1_048_576;
 pub const MAX_HOST_TO_GUEST_BYTES: usize = 1_048_576;
 pub const HOST_CALL_TIMEOUT: Duration = Duration::from_millis(30_000);
 
+/// The ceilings count the aggregate serialized call, metadata included
+/// (`worker/wit/README.md`, per-call ceilings). These are the canonical-ABI bytes that frame
+/// the data: a string or list is a pointer and a length, a resource handle is one `u32`, a
+/// `name`/`value` record is two such pairs. Contents are counted on top.
+pub const STRING_FRAME_BYTES: usize = 8;
+pub const HANDLE_FRAME_BYTES: usize = 4;
+pub const U64_FRAME_BYTES: usize = 8;
+pub const RECORD_FRAME_BYTES: usize = 16;
+/// `http.request`: url, method, header list and body, each a pointer and length.
+pub const HTTP_REQUEST_FRAME_BYTES: usize = 4 * STRING_FRAME_BYTES;
+/// `http.response`: the status, the header list and the body list.
+pub const HTTP_RESPONSE_FRAME_BYTES: usize = 4 + 2 * STRING_FRAME_BYTES;
+
+/// Serialized bytes of a string or byte list holding `len` content bytes.
+pub const fn string_bytes(len: usize) -> usize {
+    len.saturating_add(STRING_FRAME_BYTES)
+}
+
+/// Serialized bytes of one `name`/`value` record: the record plus both strings' contents.
+pub const fn pair_bytes(name: usize, value: usize) -> usize {
+    name.saturating_add(value)
+        .saturating_add(RECORD_FRAME_BYTES)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HostLimits {
     guest_to_host: usize,

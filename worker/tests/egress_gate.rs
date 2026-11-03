@@ -386,3 +386,38 @@ fn many_small_chunks_and_trailers_within_the_ceiling_are_decoded() {
         vec![b'x'; 2000]
     );
 }
+
+#[test]
+fn request_header_records_count_towards_the_guest_to_host_ceiling() {
+    let Some((port, heads)) = serve(vec![response("200 OK", "Content-Length: 0\r\n", "")]) else {
+        return;
+    };
+    // 4000 one-byte names with empty values are 4000 bytes of contents but 68000 serialized
+    // bytes: each is a 16 byte record, so the 64 KiB ceiling is crossed.
+    let many: Vec<(&str, &str)> = vec![("a", ""); 4000];
+    assert_eq!(
+        fetch_limited(port, &[port], &many, "GET", &small_limits()).unwrap_err(),
+        HostError::LimitExceeded
+    );
+    assert!(heads.lock().unwrap().is_empty(), "nothing was sent");
+    // 3000 of them are 51000 serialized bytes and go through.
+    assert_eq!(
+        fetch_limited(port, &[port], &many[..3000], "GET", &small_limits())
+            .unwrap()
+            .status,
+        200
+    );
+}
+
+#[test]
+fn response_header_records_count_towards_the_host_to_guest_ceiling() {
+    // 4000 headers of `X: 1` are 8000 bytes of contents but 72000 serialized bytes.
+    let flood: String = (0..4000).map(|_| "X: 1\r\n").collect();
+    let Some((port, _)) = serve(vec![response("200 OK", &flood, "")]) else {
+        return;
+    };
+    assert_eq!(
+        fetch_limited(port, &[port], &[], "GET", &small_limits()).unwrap_err(),
+        HostError::LimitExceeded
+    );
+}

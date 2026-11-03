@@ -65,6 +65,7 @@ pub struct Fixtures {
     pub http: &'static str,
     pub sinks: &'static str,
     pub logging: &'static str,
+    pub http_headers: &'static str,
 }
 
 #[derive(Debug)]
@@ -931,15 +932,39 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
         host_error(0x100, HostError::LimitExceeded),
         "oversized publish",
     )?;
+    // The ceiling counts the serialized call: the topic (1 byte) and the payload are each a
+    // pointer and length pair (8 bytes) on top of their contents, so 1 + 8 + 8 = 17 bytes of
+    // the 1 MiB belong to the call itself.
+    equal(
+        run(&gate_default, &events_fixture(fx, "t", MAX - 16))?,
+        host_error(0x100, HostError::LimitExceeded),
+        "publish one byte over the serialized ceiling",
+    )?;
     equal(
         events.publishes.load(Ordering::SeqCst),
         0,
         "publishes after oversized payloads",
     )?;
     equal(
-        run(&gate_default, &storage_fixture(fx, "p/o", 1, MAX))?,
+        run(&gate_default, &events_fixture(fx, "t", MAX - 17))?,
         0,
-        "write at the ceiling",
+        "publish at the serialized ceiling",
+    )?;
+    equal(
+        events.publishes.load(Ordering::SeqCst),
+        1,
+        "publishes at the serialized ceiling",
+    )?;
+    // A write carries a handle (4 bytes) and the data pair (8 bytes) besides its contents.
+    equal(
+        run(&gate_default, &storage_fixture(fx, "p/o", 1, MAX - 12))?,
+        0,
+        "write at the serialized ceiling",
+    )?;
+    equal(
+        run(&gate_default, &storage_fixture(fx, "p/o", 1, MAX - 11))?,
+        host_error(0x200, HostError::LimitExceeded),
+        "write one byte over the serialized ceiling",
     )?;
     equal(
         run(&gate_default, &storage_fixture(fx, "p/o", 1, MAX + 1))?,
@@ -951,9 +976,11 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
         1,
         "writes after oversized payload",
     )?;
-    // Oversized binding responses are rejected; one at the ceiling passes.
+    // Oversized binding responses are rejected. The returned list is a pointer and length
+    // pair (8 bytes) on top of its contents, so 1 MiB - 8 bytes of data is the largest.
     for (len, expected) in [
-        (MAX, MAX as u32),
+        (MAX - 8, (MAX - 8) as u32),
+        (MAX - 7, host_error(0x200, HostError::LimitExceeded)),
         (MAX + 1, host_error(0x200, HostError::LimitExceeded)),
     ] {
         let big = Arc::new(MockStorage {
@@ -1027,7 +1054,8 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
     wait_for(&cancelled.stopped, "the released binding thread to finish")?;
     stalled_sinks_hit_the_deadline_and_cancellation(fx)?;
     oversized_log_requests(fx)?;
-    oversized_http_response(fx)
+    oversized_http_response(fx)?;
+    oversized_http_requests(fx)
 }
 
 /// The logging and progress interfaces carry the same 30000 ms deadline and cancellation as
@@ -1167,8 +1195,45 @@ fn oversized_log_requests(fx: &Fixtures) -> Verdict {
     )
 }
 
+/// The response is the status, the header and body list pairs (20 bytes), one 16 byte record per
+/// header and the contents. The server's `Content-Length: <7 digits>` and `Connection: close`
+/// are 16 + 14 + 7 and 16 + 10 + 5 bytes, so the largest body is 1 MiB - 20 - 37 - 31 bytes.
 fn oversized_http_response(fx: &Fixtures) -> Verdict {
-    let server = serve(|_| http_response("200 OK", "", &vec![b'x'; MAX + 1]))?;
+    for (len, expected) in [
+        (MAX - 88, (200 << 16) | 65448),
+        (MAX - 87, host_error(0x100, HostError::LimitExceeded)),
+        (MAX + 1, host_error(0x100, HostError::LimitExceeded)),
+    ] {
+        let server = serve(move |_| http_response("200 OK", "", &vec![b'x'; len]))?;
+        let caps = Capabilities {
+            resolver: Some(Arc::new(StubResolver::default())),
+            ..Capabilities::default()
+        };
+        let scope = grants(vec![grant(
+            "http",
+            HTTP,
+            "hosts",
+            &[format!("127.0.0.1:{}", server.port())],
+        )])?;
+        let g = gate(scope, caps, HostLimits::default())?;
+        equal(
+            run(
+                &g,
+                &http_fixture(fx, &format!("http://127.0.0.1:{}/", server.port())),
+            )?,
+            expected,
+            "http response size",
+        )?;
+    }
+    Ok(())
+}
+
+/// A header list is counted by its records, not only by its strings: 65537 one-byte names are
+/// over 1 MiB before any contents. A small list that aliases one large guest string is refused
+/// from its first element. `http_headers_fixture` runs `count` headers of `name` and `value`
+/// bytes against a host that is not allow-listed, so a call that clears the size check is
+/// denied (0xE0000100) rather than sent.
+fn oversized_http_requests(fx: &Fixtures) -> Verdict {
     let caps = Capabilities {
         resolver: Some(Arc::new(StubResolver::default())),
         ..Capabilities::default()
@@ -1177,16 +1242,41 @@ fn oversized_http_response(fx: &Fixtures) -> Verdict {
         "http",
         HTTP,
         "hosts",
-        &[format!("127.0.0.1:{}", server.port())],
+        &strings(&["allowed.example"]),
     )])?;
     let g = gate(scope, caps, HostLimits::default())?;
-    equal(
-        run(
-            &g,
-            &http_fixture(fx, &format!("http://127.0.0.1:{}/", server.port())),
-        )?,
-        host_error(0x100, HostError::LimitExceeded),
-        "oversized http response",
+    let over = host_error(0x100, HostError::LimitExceeded);
+    let denied = host_error(0x100, HostError::Denied);
+    // 4 pairs (32) + the 23 byte url + `GET` leave 1048518 bytes: 61677 records of 17 bytes
+    // (16 + a one byte name and an empty value) fit, 61678 do not.
+    for (count, name, value, expected) in [
+        (61_677, 1, 0, denied),
+        (61_678, 1, 0, over),
+        (65_537, 1, 0, over),
+        (1_024, 1, 4 * MAX, over),
+    ] {
+        equal(
+            run(&g, &http_headers_fixture(fx, count, name, value))?,
+            expected,
+            "serialized http request size",
+        )?;
+    }
+    Ok(())
+}
+
+/// Runs `count` header records of `name` and `value` bytes, all aliasing the same guest bytes.
+pub fn http_headers_fixture(fx: &Fixtures, count: usize, name: usize, value: usize) -> String {
+    let url = "http://allowed.example/";
+    fill(
+        fx.http_headers,
+        &[
+            ("URL", wat_string(url)),
+            ("URL_LEN", url.len().to_string()),
+            ("COUNT", count.to_string()),
+            ("NAME_LEN", name.to_string()),
+            ("VALUE_LEN", value.to_string()),
+            ("PAGES", "96".to_owned()),
+        ],
     )
 }
 
