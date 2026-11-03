@@ -9,7 +9,9 @@
 //! between the sample and its final consistency re-read, and a candidate it cannot kill
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
 //! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
-//! Signals go only through pidfds, never to a numeric PID or process group, and a pidfd is
+//! Signals go only through pidfds, never to a numeric PID or process group (the one exception
+//! is the still-unreaped `Child` of a spawn whose pidfd could not be opened, see
+//! [`spawn_retained`]), and a pidfd is
 //! kept only after the process is seen to still be a child of its tree parent (or of the
 //! tester) once the pidfd is open, so a reused PID is released unsignalled and rescanned. Scratch removal runs once, inside that deadline; when the
 //! deadline passes first, the scratch directory is left behind rather than removed on a new
@@ -1025,15 +1027,17 @@ impl ProcessTable for RealTable {
 }
 
 /// Starts the command and retains its handle, retrying a transient refusal (descriptor or
-/// memory exhaustion) for at most [`KILL_SETTLE`]. The child is never signalled without a
-/// handle: `Child::kill` may fall back to the numeric pid, and a numeric signal is never
-/// sent. When no handle can be had the error names the pid of the child left running and
-/// the caller (which still owns the process tree) must deal with it.
+/// memory exhaustion) for at most [`KILL_SETTLE`]. When no handle can be had the candidate
+/// is not left running: this function still owns the unreaped `std::process::Child`, whose
+/// pid cannot have been reused, so it kills that one process through the `Child` (which
+/// never signals once reaped) and reaps it within [`KILL_SETTLE`]. This is the only signal
+/// not sent through a pidfd; a descendant the candidate started in that window cannot be
+/// found without handles and is a residual risk of an environment that denies `pidfd_open`.
 pub fn spawn_retained(
     command: &mut std::process::Command,
     mut retain: impl FnMut(i32) -> io::Result<u64>,
 ) -> io::Result<(i32, u64)> {
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
     let pid = child.id() as i32;
     // The unreaped child keeps its pid reserved, so a handle opened now names this process.
     let settle = Instant::now() + KILL_SETTLE;
@@ -1044,8 +1048,17 @@ pub fn spawn_retained(
             Err(_) => thread::sleep(Duration::from_millis(5)),
         }
     };
+    let _ = child.kill();
+    let reaped_by = Instant::now() + KILL_SETTLE;
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break "killed and reaped",
+            Ok(None) if Instant::now() < reaped_by => thread::sleep(Duration::from_millis(5)),
+            _ => break "killed but not reaped in time",
+        }
+    };
     Err(io::Error::other(format!(
-        "{error}; candidate pid {pid} has no process handle and was not signalled"
+        "{error}; candidate pid {pid} has no process handle and was {outcome}"
     )))
 }
 

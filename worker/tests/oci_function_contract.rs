@@ -1,5 +1,8 @@
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 fn contracts() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../docs/contracts/oci-function-contract")
@@ -1633,7 +1636,7 @@ fn end_and_reap(pid: i32) {
 }
 
 #[test]
-fn failing_to_retain_the_spawned_child_never_signals_it_by_number() {
+fn failing_to_retain_the_spawned_child_kills_and_reaps_it() {
     let _serial = serial();
     let mut command = Command::new("/bin/sleep");
     command.arg("60");
@@ -1645,16 +1648,14 @@ fn failing_to_retain_the_spawned_child_never_signals_it_by_number() {
     })
     .unwrap_err();
     assert!(error.to_string().contains("pidfd_open refused"), "{error}");
-    assert!(error.to_string().contains("not signalled"), "{error}");
-    assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
+    assert!(error.to_string().contains("killed and reaped"), "{error}");
+    assert!(start.elapsed() < contract::KILL_SETTLE * 2 + Duration::from_secs(1));
+    // Reaped: not even a zombie is left behind, and nothing is left running.
     let pid = spawned.get();
-    // Child::kill() would have fallen back to a numeric kill; a signalled child is not asleep.
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap();
     assert!(
-        status.lines().any(|l| l.starts_with("State:\tS")),
-        "child was signalled: {status}"
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the candidate outlived the failed handle acquisition"
     );
-    end_and_reap(pid);
 }
 
 #[test]
