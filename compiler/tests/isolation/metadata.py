@@ -28,15 +28,15 @@ assert ctypes.sizeof(FileAttr) == 24
 if control:
     # Negative control without the installed filter: the probe must be well-formed, so that
     # EPERM under the filter comes from seccomp. The verdict is reported, not asserted,
-    # because the kernel version and filesystem decide it (ENOSYS before 6.17).
+    # because the kernel version and filesystem decide it (ENOSYS before 6.17). Only the
+    # read-only file_getattr runs unfiltered: an unfiltered file_setattr, even with a zeroed
+    # struct, would clear the parent's settable flags and project id instead of being a no-op.
     libc = ctypes.CDLL(None, use_errno=True)
-    for number in (468, 469):
-        attr = FileAttr()
-        result = libc.syscall(
-            number, -100, os.fsencode(path), ctypes.byref(attr), ctypes.c_size_t(24), 0
-        )
-        # file_setattr with an all-zero struct is a no-op request when it is allowed at all.
-        print(f"control {number}: result={result} errno={ctypes.get_errno()}")
+    attr = FileAttr()
+    result = libc.syscall(
+        468, -100, os.fsencode(path), ctypes.byref(attr), ctypes.c_size_t(24), 0
+    )
+    print(f"control 468: result={result} errno={ctypes.get_errno()}")
     sys.exit(0)
 limits = resource.getrlimit(resource.RLIMIT_NOFILE)
 assert resource.prlimit(0, resource.RLIMIT_NOFILE, limits) == limits

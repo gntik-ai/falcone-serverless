@@ -172,8 +172,9 @@ fn installed_filter_protects_parent_limits_and_workspace_metadata() {
     let flags_before = inode_flags(&root.0);
     let path = root.0.clone();
     let parent = std::process::id().to_string();
-    // Negative control, before any filter is installed: the file_getattr/file_setattr probes
-    // are well-formed. Their verdict depends on the kernel and filesystem, so it is reported.
+    // Negative control, before any filter is installed: the read-only file_getattr probe is
+    // well-formed. Its verdict depends on the kernel and filesystem, so it is reported.
+    // file_setattr is never run unfiltered, because it would rewrite the parent's flags.
     let control = std::process::Command::new("/usr/bin/python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
