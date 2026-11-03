@@ -95,6 +95,10 @@ impl SeccompPlan {
             ("getxattrat", 464, 464),
             ("listxattrat", 465, 465),
             ("removexattrat", 466, 466),
+            // Linux 6.17 inode attribute flags by path. Same number on x86_64 and asm-generic
+            // (arch/x86/entry/syscalls/syscall_64.tbl, include/uapi/asm-generic/unistd.h).
+            ("file_getattr", 468, 468),
+            ("file_setattr", 469, 469),
             ("utimensat", 280, 88),
             ("shmget", 29, 194),
             ("shmat", 30, 196),
@@ -297,6 +301,8 @@ mod tests {
                 ("getxattrat", 464),
                 ("listxattrat", 465),
                 ("removexattrat", 466),
+                ("file_getattr", 468),
+                ("file_setattr", 469),
             ] {
                 assert_eq!(number(name), Some(nr), "{name}");
             }

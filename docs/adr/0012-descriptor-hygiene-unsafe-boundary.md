@@ -57,6 +57,24 @@ prlimit64, and metadata mutation not mediated by Landlock, including fchmodat2.
 sendmsg and sendmmsg are denied unconditionally: no current profile uses
 SCM_RIGHTS, whose descriptor passing requires a separately reviewed issue.
 Null-destination sendto and write preserve unnamed socketpair communication.
+Linux 6.17 added file_getattr (468) and file_setattr (469), which read and change
+inode attribute flags (immutable, append, project id) through a directory fd plus a
+path. The numbers are the same on x86_64 (arch/x86/entry/syscalls/syscall_64.tbl)
+and asm-generic (include/uapi/asm-generic/unistd.h, scripts/syscall.tbl), and were
+checked against the installed UAPI headers of Linux 7.0.14, where they appear as
+`__NR_file_getattr 468` and `__NR_file_setattr 469`. Landlock ABI V6, the level the
+sandbox handles, governs only filesystem access rights (execute, read, write,
+make, remove, refer, truncate, ioctl on devices) through its path and file hooks;
+per Documentation/userspace-api/landlock.rst it does not restrict inode attribute
+changes by path, as with chmod, and security/landlock registers no hook for these
+calls. This was taken from the kernel documentation and sources, not demonstrated
+on a 6.17 kernel in this ChangeSet. Both calls are therefore denied unconditionally
+with EPERM, like the xattrat calls. file_getattr only reads, but no profile is
+claimed to need it, so it is denied too; a profile that needs it must be allowed
+explicitly, with its reason recorded here. The filter's default action stays Allow,
+so syscalls not listed (open_tree_attr 467, and the FS_IOC_SETFLAGS and
+FS_IOC_FSSETXATTR ioctls on an owned fd) keep their verdict and need a separate issue.
+
 Configured forbidden paths augment the fixed credential-presence probes; they
 are never opened or read, and cannot overlap any Landlock allow-list entry.
 

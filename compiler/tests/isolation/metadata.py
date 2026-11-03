@@ -7,6 +7,37 @@ import sys
 
 path = sys.argv[1]
 parent = int(sys.argv[2])
+control = len(sys.argv) > 3 and sys.argv[3] == "control"
+
+
+# Linux UAPI struct file_attr (FILE_ATTR_SIZE_VER0 = 24 bytes), shared by file_getattr and
+# file_setattr on all supported ABIs. A correctly sized buffer keeps a missing denial from
+# failing with EINVAL and passing by accident.
+class FileAttr(ctypes.Structure):
+    _fields_ = [
+        ("fa_xflags", ctypes.c_uint64),
+        ("fa_extsize", ctypes.c_uint32),
+        ("fa_nextents", ctypes.c_uint32),
+        ("fa_projid", ctypes.c_uint32),
+        ("fa_cowextsize", ctypes.c_uint32),
+    ]
+
+
+assert ctypes.sizeof(FileAttr) == 24
+
+if control:
+    # Negative control without the installed filter: the probe must be well-formed, so that
+    # EPERM under the filter comes from seccomp. The verdict is reported, not asserted,
+    # because the kernel version and filesystem decide it (ENOSYS before 6.17).
+    libc = ctypes.CDLL(None, use_errno=True)
+    for number in (468, 469):
+        attr = FileAttr()
+        result = libc.syscall(
+            number, -100, os.fsencode(path), ctypes.byref(attr), ctypes.c_size_t(24), 0
+        )
+        # file_setattr with an all-zero struct is a no-op request when it is allowed at all.
+        print(f"control {number}: result={result} errno={ctypes.get_errno()}")
+    sys.exit(0)
 limits = resource.getrlimit(resource.RLIMIT_NOFILE)
 assert resource.prlimit(0, resource.RLIMIT_NOFILE, limits) == limits
 
@@ -49,6 +80,19 @@ for number, arguments in [
 ]:
     ctypes.set_errno(0)
     assert libc.syscall(number, -100, os.fsencode(path), 0, *arguments) == -1, number
+    assert ctypes.get_errno() == errno.EPERM, (number, ctypes.get_errno())
+
+# file_getattr (468) and file_setattr (469): (dfd, path, struct file_attr *, usize, at_flags).
+# at_flags is the fifth argument, after usize, unlike the xattrat calls above.
+for number in (468, 469):
+    attr = FileAttr()
+    ctypes.set_errno(0)
+    assert (
+        libc.syscall(
+            number, -100, os.fsencode(path), ctypes.byref(attr), ctypes.c_size_t(24), 0
+        )
+        == -1
+    ), number
     assert ctypes.get_errno() == errno.EPERM, (number, ctypes.get_errno())
 
 # Unconditional message-send denial must win even before fd/payload validation.
