@@ -1644,14 +1644,14 @@ fn cleanup_crossing_the_deadline_is_the_timeout_within_the_wall_time_bound() {
 }
 
 #[test]
-fn handle_opened_as_the_settle_time_ends_is_still_confirmed_killed_and_reaped() {
+fn handle_opened_after_the_settle_time_is_held_unsignalled_and_reported() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
     let descendant = fake.with(|w| {
         let descendant = w.fork(100);
-        // Acquiring the handle takes longer than the settle time allows: the handle is open,
-        // so it is confirmed and killed anyway, and reaped in the last pass.
+        // Acquiring the handle takes longer than the settle time allows. Ownership cannot be
+        // confirmed in time, so the pid may have been reused: no signal, and the check fails.
         w.on(&format!("open {descendant}"), false, |_| {
             thread::sleep(contract::KILL_SETTLE + Duration::from_millis(200))
         });
@@ -1659,20 +1659,17 @@ fn handle_opened_as_the_settle_time_ends_is_still_confirmed_killed_and_reaped() 
     });
     let start = Instant::now();
     let error = child.cleanup().unwrap_err();
-    assert!(error.to_string().contains("cleanup"), "{error}");
+    assert!(error.to_string().contains("could not be confirmed"), "{error}");
+    assert!(error.to_string().contains(&descendant.to_string()), "{error}");
     assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
     fake.with(|w| {
-        assert!(w.killed(descendant), "an opened handle was discarded");
-        assert!(
-            w.procs.keys().all(|pid| *pid < 100),
-            "killed but not reaped: {:?}",
-            w.procs.keys()
-        );
+        assert!(!w.killed(descendant), "an unconfirmed handle was signalled");
+        assert!(!w.holds(descendant), "the unconfirmed handle was not closed");
     });
 }
 
 #[test]
-fn confirmation_crossing_the_deadline_never_discards_an_opened_handle() {
+fn confirmation_crossing_the_deadline_holds_the_handle_and_fails_closed() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
@@ -1687,15 +1684,13 @@ fn confirmation_crossing_the_deadline_never_discards_an_opened_handle() {
         });
         descendant
     });
-    child.cleanup().unwrap_err();
-    fake.with(|w| {
-        assert!(w.killed(descendant), "an opened handle was discarded");
-        assert!(w.procs.keys().all(|pid| *pid < 100));
-    });
+    let error = child.cleanup().unwrap_err();
+    assert!(error.to_string().contains("could not be confirmed"), "{error}");
+    fake.with(|w| assert!(!w.killed(descendant), "an unconfirmed handle was signalled"));
 }
 
 #[test]
-fn confirmation_work_is_bounded_cumulatively_and_still_kills_the_descendant() {
+fn confirmation_work_is_bounded_cumulatively() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
@@ -1716,27 +1711,31 @@ fn confirmation_work_is_bounded_cumulatively_and_still_kills_the_descendant() {
         descendant
     });
     let start = Instant::now();
-    let _ = child.cleanup();
+    let error = child.cleanup().unwrap_err();
     let spent = start.elapsed();
     // Reading every list would take over 2 s per pass; the settle bound stops it.
     assert!(
         spent < contract::KILL_SETTLE + Duration::from_secs(1),
         "{spent:?}"
     );
-    fake.with(|w| assert!(w.killed(descendant), "an opened handle was discarded"));
+    assert!(error.to_string().contains("could not be confirmed"), "{error}");
+    fake.with(|w| assert!(!w.killed(descendant), "an unconfirmed handle was signalled"));
 }
 
 #[test]
-fn uncertain_ownership_holds_the_handle_unsignalled_until_cleanup_kills_it() {
+fn uncertain_ownership_holds_the_handle_unsignalled_until_it_is_confirmed() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
-    let descendant = fake.with(|w| {
+    let (root, descendant) = fake.with(|w| {
         let root = *w.procs.keys().filter(|p| **p >= 100).min().unwrap();
         let descendant = w.fork(root);
-        // Its parent's children list cannot be read: ownership is unknown, not foreign.
-        w.unreadable_children.insert(root);
-        descendant
+        // Once the handle is open, the parent's children list cannot be read: ownership is
+        // unknown, not foreign.
+        w.on(&format!("open {descendant}"), false, move |w| {
+            w.unreadable_children.insert(root);
+        });
+        (root, descendant)
     });
     let diagnostics = child.binding(PORT).unwrap();
     let message = diagnostics
@@ -1753,13 +1752,12 @@ fn uncertain_ownership_holds_the_handle_unsignalled_until_cleanup_kills_it() {
             !w.killed(descendant),
             "an unconfirmed handle was signalled while inspecting"
         );
+        // The list becomes readable again: the next confirmation succeeds.
+        w.unreadable_children.remove(&root);
     });
     child.cleanup().unwrap();
     fake.with(|w| {
-        assert!(
-            w.killed(descendant),
-            "cleanup skipped an unconfirmed handle"
-        );
+        assert!(w.killed(descendant), "a confirmed handle was not killed");
         assert!(w.procs.keys().all(|pid| *pid < 100), "{:?}", w.procs.keys());
     });
 }

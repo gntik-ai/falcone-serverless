@@ -1158,7 +1158,7 @@ enum Ownership {
     /// Every children list read in full without it: the handle is not a tree process.
     Foreign,
     /// Not established (unreadable or malformed entry, or out of time). Never released for
-    /// want of proof: held and confirmed again while inspecting, killed during cleanup.
+    /// want of proof, never signalled: held and confirmed again on each pass.
     Uncertain,
 }
 
@@ -1574,7 +1574,8 @@ pub struct Candidate {
     handles: BTreeMap<i32, u64>,
     /// Opened handles whose ownership is not yet established, with the parent they were
     /// seen under. Held (never released for want of proof) and confirmed again on each
-    /// inspection pass; cleanup kills them with the rest.
+    /// pass; signalled only once confirmed, since the pid may have been reused between the
+    /// walk that saw it and the open.
     unconfirmed: BTreeMap<i32, (u64, i32)>,
     deadline: Instant,
     cleaned: bool,
@@ -1697,24 +1698,19 @@ impl Candidate {
     }
 
     /// Retains a handle for every tree process not yet held. A handle counts only once the
-    /// process is confirmed to still be in the tree after the handle was opened. One proven
-    /// foreign is released unsignalled. One whose ownership is uncertain is never released
-    /// for want of proof: while inspecting (`kill` false) it is held in `unconfirmed` and
-    /// confirmed again first on the next pass; during cleanup (`kill` true) it is retained
-    /// and killed like a confirmed one. The handle was opened for a pid seen in the tree an
-    /// instant earlier, and pids are allocated in sequence, so it could only name another
-    /// process after the pid space wrapped in that instant, which this conformance check
-    /// does not defend against (module docs, Rule 5). Confirmation reads stop at `deadline`,
-    /// looked at before each read and after each process. `Ok(None)` means the scan was
-    /// incomplete, a process vanished or a handle could not be had or confirmed: not
-    /// evidence of absence.
+    /// process is confirmed to still be in the tree after the handle was opened: the pid may
+    /// have exited, been reaped and been reused between the walk and the open. One proven
+    /// foreign is released unsignalled. One whose ownership is uncertain is held in
+    /// `unconfirmed`, never released for want of proof and never signalled, and confirmed
+    /// again first on the next pass. Confirmation reads stop at `deadline`, looked at before
+    /// each read and after each process. `Ok(None)` means the scan was incomplete, a process
+    /// vanished or a handle could not be had or confirmed: not evidence of absence.
     fn discover(&mut self, deadline: Instant, kill: bool) -> Result<Option<usize>, Scan> {
         let mut complete = true;
         for (pid, (handle, parent)) in std::mem::take(&mut self.unconfirmed) {
             match self.ownership(pid, parent, deadline) {
                 Ownership::Confirmed => self.retain(pid, handle, kill),
                 Ownership::Foreign => self.table.release(handle),
-                Ownership::Uncertain if kill => self.retain(pid, handle, kill),
                 Ownership::Uncertain => {
                     self.unconfirmed.insert(pid, (handle, parent));
                     complete = false;
@@ -1741,10 +1737,6 @@ impl Candidate {
                         Ownership::Confirmed => self.retain(*pid, handle, kill),
                         Ownership::Foreign => {
                             self.table.release(handle);
-                            complete = false;
-                        }
-                        Ownership::Uncertain if kill => {
-                            self.retain(*pid, handle, kill);
                             complete = false;
                         }
                         Ownership::Uncertain => {
@@ -1808,7 +1800,7 @@ impl Candidate {
         reaped
     }
 
-    /// SIGKILL to every retained handle, then reap until a fresh scan of the tester's
+    /// SIGKILL to every confirmed handle, then reap until a fresh scan of the tester's
     /// descendants, taken after the last reap, is empty and no handle is left unconfirmed.
     /// The kill is never skipped; the whole wait for it, every reap and confirmation read
     /// included, is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not.
@@ -1817,10 +1809,6 @@ impl Candidate {
     /// start a second wait.
     pub fn cleanup(&mut self) -> io::Result<()> {
         self.cleaned = true;
-        // Held but unconfirmed handles are ended with the rest (see `discover`).
-        for (pid, (handle, _)) in std::mem::take(&mut self.unconfirmed) {
-            self.handles.insert(pid, handle);
-        }
         let mut settle = None;
         loop {
             for handle in self.handles.values() {
@@ -1831,7 +1819,11 @@ impl Candidate {
             let Ok(found) = self.discover(settle, true) else {
                 return Err(self.unsettled());
             };
-            if found == Some(0) && !reaped && self.handles.is_empty() {
+            if found == Some(0)
+                && !reaped
+                && self.handles.is_empty()
+                && self.unconfirmed.is_empty()
+            {
                 return Ok(());
             }
             if Instant::now() >= settle {
@@ -1841,10 +1833,23 @@ impl Candidate {
         }
     }
 
-    /// Cleanup ran out of settle time: everything retained has been sent SIGKILL, and no
-    /// further reap budget starts after [`KILL_SETTLE`].
+    /// Cleanup ran out of settle time: everything confirmed has been sent SIGKILL, and no
+    /// further reap budget starts after [`KILL_SETTLE`]. Handles whose ownership was never
+    /// established are closed unsignalled and named, so the check fails closed instead of
+    /// risking a signal to a process that reused the pid.
     fn unsettled(&mut self) -> io::Error {
-        io::Error::other("candidate cleanup did not finish within the kill settle time")
+        let unconfirmed: Vec<i32> = self.unconfirmed.keys().copied().collect();
+        for (_, (handle, _)) in std::mem::take(&mut self.unconfirmed) {
+            self.table.release(handle);
+        }
+        if unconfirmed.is_empty() {
+            io::Error::other("candidate cleanup did not finish within the kill settle time")
+        } else {
+            io::Error::other(format!(
+                "candidate cleanup did not finish within the kill settle time; \
+                 ownership of {unconfirmed:?} could not be confirmed, left unsignalled"
+            ))
+        }
     }
 
     /// When the candidate never got to run, the exit status of the process that tried to
