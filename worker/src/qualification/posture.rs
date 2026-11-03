@@ -2,6 +2,16 @@
 
 use serde_json::Value;
 
+#[path = "../artifact/mod.rs"]
+pub mod artifact;
+
+#[path = "../host/mod.rs"]
+pub mod host;
+
+#[cfg(target_os = "linux")]
+#[path = "compile_budget.rs"]
+pub mod compile_budget;
+
 const RULE_IDS: [&str; 12] = [
     "RP-01", "RP-02", "RP-03", "RP-04", "RP-05", "RP-06", "RP-07", "RP-08", "RP-09", "RP-10",
     "RP-11", "RP-12",

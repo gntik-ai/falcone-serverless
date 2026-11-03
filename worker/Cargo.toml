@@ -27,13 +27,15 @@ wasmtime = { workspace = true }
 
 wasmparser = { workspace = true }
 sha2 = { workspace = true }
+# WAS-02.t4: the capability-gate qualification binary turns its WAT fixtures into component
+# binaries (the tests use it too). Already locked and compiled in by Wasmtime's `wat` feature.
+wat = "=1.258.3"
 
 [[bin]]
 name = "artifact-compile-child"
 path = "src/artifact/compile_child.rs"
 
 [dev-dependencies]
-wat = "=1.258.3"
 wit-parser = "=0.262.0"
 # WAS-01 static checks (#115).
 toml = { workspace = true }
