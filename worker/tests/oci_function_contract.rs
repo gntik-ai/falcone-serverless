@@ -1705,7 +1705,8 @@ fn confirmation_crossing_the_deadline_holds_the_handle_and_fails_closed() {
 fn confirmation_work_is_bounded_cumulatively() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
-    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut child = candidate(&fake, &probe, deadline).unwrap();
     let descendant = fake.with(|w| {
         // The root has many threads, so confirming a descendant against it reads many
         // children lists; no single read is slow, their sum is.
@@ -1714,8 +1715,8 @@ fn confirmation_work_is_bounded_cumulatively() {
             w.set_state(root, tid, 'S');
         }
         let descendant = w.fork(root);
-        // When its handle is opened, the root dies: the descendant moves to the tester, so
-        // it is not found among the root's 201 lists, each read now taking 10 ms.
+        // When its handle is opened, the root dies but is not reaped: it stays listed with
+        // its 201 tasks, the descendant moves to the tester, and each read now takes 10 ms.
         w.on(&format!("open {descendant}"), false, move |w| {
             w.exit(root);
             w.latency = Duration::from_millis(10);
@@ -1723,18 +1724,23 @@ fn confirmation_work_is_bounded_cumulatively() {
         descendant
     });
     let start = Instant::now();
-    let error = child.cleanup().unwrap_err();
+    let error = child.binding(PORT).unwrap_err();
     let spent = start.elapsed();
-    // Reading every list would take over 2 s per pass; the settle bound stops it.
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    // Reading every list would take over 2 s; the check deadline stops it.
     assert!(
-        spent < contract::KILL_SETTLE + Duration::from_secs(1),
+        spent < Duration::from_millis(500) + Duration::from_secs(1),
         "{spent:?}"
     );
-    assert!(
-        error.to_string().contains("could not be confirmed"),
-        "{error}"
-    );
-    fake.with(|w| assert!(!w.killed(descendant), "an unconfirmed handle was signalled"));
+    fake.with(|w| {
+        assert!(!w.killed(descendant), "an unconfirmed handle was signalled");
+        assert!(
+            w.holds(descendant),
+            "an opened handle was released for want of proof"
+        );
+    });
+    fake.with(|w| w.latency = Duration::ZERO);
+    drop(child);
 }
 
 #[test]
