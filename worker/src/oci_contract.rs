@@ -8,7 +8,7 @@
 //! tree, an unreadable or malformed `/proc` value, a tree or socket table that changes
 //! between the sample and its final consistency re-read, and a candidate it cannot kill
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
-//! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`] plus a last pass of at most [`FINAL_REAP`].
+//! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
 //! Signals go only through pidfds, never to a numeric PID or process group: the candidate is
 //! held at a gate until its pidfd is open (see [`spawn_retained`]), so no candidate code
 //! runs, and no signal is needed, when a handle cannot be had. A pidfd is kept only after
@@ -454,9 +454,6 @@ pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
 /// The only wait that may end after the deadline: reaping what SIGKILL was sent to.
 pub const KILL_SETTLE: Duration = Duration::from_secs(1);
-/// The last reap pass after [`KILL_SETTLE`] ended: one attempt per retained handle, stopping
-/// at this bound, for processes whose SIGKILL was sent as the settle time ran out.
-pub const FINAL_REAP: Duration = Duration::from_millis(100);
 /// Full samples of the process tree before the binding check gives up as unstable.
 pub const MAX_SCANS: usize = 5;
 
@@ -1154,6 +1151,17 @@ enum Scan {
     Unstable(String),
 }
 
+/// What a confirmation read established about an opened descendant handle.
+enum Ownership {
+    /// Listed as a child after its handle was opened: the handle is that process.
+    Confirmed,
+    /// Every children list read in full without it: the handle is not a tree process.
+    Foreign,
+    /// Not established (unreadable or malformed entry, or out of time). Never released for
+    /// want of proof: held and confirmed again while inspecting, killed during cleanup.
+    Uncertain,
+}
+
 /// Checks the deadline after a read, success or not.
 fn after<T>(deadline: Instant, result: io::Result<T>) -> Result<io::Result<T>, Scan> {
     if Instant::now() >= deadline {
@@ -1564,6 +1572,10 @@ pub struct Candidate {
     table: Box<dyn ProcessTable>,
     root: i32,
     handles: BTreeMap<i32, u64>,
+    /// Opened handles whose ownership is not yet established, with the parent they were
+    /// seen under. Held (never released for want of proof) and confirmed again on each
+    /// inspection pass; cleanup kills them with the rest.
+    unconfirmed: BTreeMap<i32, (u64, i32)>,
     deadline: Instant,
     cleaned: bool,
 }
@@ -1610,6 +1622,7 @@ impl Candidate {
             table,
             root,
             handles: BTreeMap::from([(root, handle)]),
+            unconfirmed: BTreeMap::new(),
             deadline,
             cleaned: false,
         };
@@ -1639,67 +1652,105 @@ impl Candidate {
         Ok(diagnostics)
     }
 
-    /// True when `pid` is listed as a child of `parent` or of the tester, read now. A child
+    /// Whether `pid` is listed as a child of `parent` or of the tester, read now. A child
     /// stays listed (even as a zombie) until its parent reaps it, so a pid that is listed
-    /// after its handle was opened cannot have been reused by an unrelated process. The reads
-    /// are a fixed, small number and are not cut short by the deadline: a handle that is open
-    /// is either confirmed and kept or proven foreign, never dropped for want of time.
-    fn still_a_child(&self, pid: i32, parent: i32) -> Result<bool, Scan> {
+    /// after its handle was opened cannot have been reused by an unrelated process. `Foreign`
+    /// needs every task's children list read in full without finding it; an unreadable or
+    /// malformed entry, or `until` passing (looked at before each read), leaves ownership
+    /// `Uncertain`, which is not proof of anything.
+    fn ownership(&self, pid: i32, parent: i32, until: Instant) -> Ownership {
         for owner in [parent, self.table.me()] {
+            if Instant::now() >= until {
+                return Ownership::Uncertain;
+            }
             let dir = format!("/proc/{owner}/task");
-            let tids = match self.table.list(&dir) {
-                Ok(names) => parse_ids(names)?,
+            let tids = match self.table.list(&dir).map(parse_ids) {
+                Ok(Ok(tids)) => tids,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(Scan::Unstable(format!("{dir}: {error}"))),
+                _ => return Ownership::Uncertain,
             };
             for tid in tids {
+                if Instant::now() >= until {
+                    return Ownership::Uncertain;
+                }
                 let path = format!("{dir}/{tid}/children");
                 match self.table.read(&path) {
-                    Ok(text) => {
-                        if parse_pids(&text)?.contains(&pid) {
-                            return Ok(true);
-                        }
-                    }
+                    Ok(text) => match parse_pids(&text) {
+                        Ok(children) if children.contains(&pid) => return Ownership::Confirmed,
+                        Ok(_) => {}
+                        Err(_) => return Ownership::Uncertain,
+                    },
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(Scan::Unstable(format!("{path}: {error}"))),
+                    Err(_) => return Ownership::Uncertain,
                 }
             }
         }
-        Ok(false)
+        Ownership::Foreign
+    }
+
+    /// Keeps a confirmed handle: retained for good, and killed when asked.
+    fn retain(&mut self, pid: i32, handle: u64, kill: bool) {
+        self.handles.insert(pid, handle);
+        if kill {
+            let _ = self.table.signal(handle, Signal::KILL);
+        }
     }
 
     /// Retains a handle for every tree process not yet held. A handle counts only once the
-    /// process is confirmed to still be in the tree after the handle was opened; one that
-    /// is not in the tree (or cannot be read) is released unsignalled. Expiry of the deadline
-    /// is looked at after each process, so a confirmed handle is always kept (and killed when
-    /// asked) first. `Ok(None)` means the scan was incomplete,
-    /// a process vanished or a handle could not be had or confirmed: not evidence of absence.
+    /// process is confirmed to still be in the tree after the handle was opened. One proven
+    /// foreign is released unsignalled. One whose ownership is uncertain is never released
+    /// for want of proof: while inspecting (`kill` false) it is held in `unconfirmed` and
+    /// confirmed again first on the next pass; during cleanup (`kill` true) it is retained
+    /// and killed like a confirmed one. The handle was opened for a pid seen in the tree an
+    /// instant earlier, and pids are allocated in sequence, so it could only name another
+    /// process after the pid space wrapped in that instant, which this conformance check
+    /// does not defend against (module docs, Rule 5). Confirmation reads stop at `deadline`,
+    /// looked at before each read and after each process. `Ok(None)` means the scan was
+    /// incomplete, a process vanished or a handle could not be had or confirmed: not
+    /// evidence of absence.
     fn discover(&mut self, deadline: Instant, kill: bool) -> Result<Option<usize>, Scan> {
+        let mut complete = true;
+        for (pid, (handle, parent)) in std::mem::take(&mut self.unconfirmed) {
+            match self.ownership(pid, parent, deadline) {
+                Ownership::Confirmed => self.retain(pid, handle, kill),
+                Ownership::Foreign => self.table.release(handle),
+                Ownership::Uncertain if kill => self.retain(pid, handle, kill),
+                Ownership::Uncertain => {
+                    self.unconfirmed.insert(pid, (handle, parent));
+                    complete = false;
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Scan::Deadline);
+        }
         let seen = match walk(&*self.table, deadline, false) {
             Ok(seen) => seen,
             Err(Scan::Unstable(_)) => return Ok(None),
             Err(Scan::Deadline) => return Err(Scan::Deadline),
         };
         let pids = seen.pids();
-        let mut complete = true;
         for pid in &pids {
-            if self.handles.contains_key(pid) {
+            if self.handles.contains_key(pid) || self.unconfirmed.contains_key(pid) {
                 continue;
             }
-            // A handle that was opened and confirmed is retained (and killed when asked)
-            // before the deadline is looked at: expiry never discards it.
             match self.table.open(*pid) {
                 Ok(handle) => {
                     let parent = seen.parents.get(pid).copied().unwrap_or(self.table.me());
-                    let ours = matches!(self.still_a_child(*pid, parent), Ok(true));
-                    if ours {
-                        self.handles.insert(*pid, handle);
-                        if kill {
-                            let _ = self.table.signal(handle, Signal::KILL);
+                    match self.ownership(*pid, parent, deadline) {
+                        Ownership::Confirmed => self.retain(*pid, handle, kill),
+                        Ownership::Foreign => {
+                            self.table.release(handle);
+                            complete = false;
                         }
-                    } else {
-                        self.table.release(handle);
-                        complete = false;
+                        Ownership::Uncertain if kill => {
+                            self.retain(*pid, handle, kill);
+                            complete = false;
+                        }
+                        Ownership::Uncertain => {
+                            self.unconfirmed.insert(*pid, (handle, parent));
+                            complete = false;
+                        }
                     }
                 }
                 Err(_) => complete = false,
@@ -1758,14 +1809,18 @@ impl Candidate {
     }
 
     /// SIGKILL to every retained handle, then reap until a fresh scan of the tester's
-    /// descendants, taken after the last reap, is empty. The kill is never skipped; the
-    /// wait for it is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not,
-    /// plus one last reap pass of at most [`FINAL_REAP`] for what was killed as that time
-    /// ran out. Retained handles are reaped before every scan, so processes already dead are
+    /// descendants, taken after the last reap, is empty and no handle is left unconfirmed.
+    /// The kill is never skipped; the whole wait for it, every reap and confirmation read
+    /// included, is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not.
+    /// Retained handles are reaped before every scan, so processes already dead are
     /// collected even when the scan then runs out of time. Runs at most once: Drop does not
     /// start a second wait.
     pub fn cleanup(&mut self) -> io::Result<()> {
         self.cleaned = true;
+        // Held but unconfirmed handles are ended with the rest (see `discover`).
+        for (pid, (handle, _)) in std::mem::take(&mut self.unconfirmed) {
+            self.handles.insert(pid, handle);
+        }
         let mut settle = None;
         loop {
             for handle in self.handles.values() {
@@ -1786,10 +1841,9 @@ impl Candidate {
         }
     }
 
-    /// Cleanup ran out of settle time: everything retained has been sent SIGKILL; give what
-    /// was killed last one bounded reap pass.
+    /// Cleanup ran out of settle time: everything retained has been sent SIGKILL, and no
+    /// further reap budget starts after [`KILL_SETTLE`].
     fn unsettled(&mut self) -> io::Error {
-        self.reap_known(Instant::now() + FINAL_REAP);
         io::Error::other("candidate cleanup did not finish within the kill settle time")
     }
 

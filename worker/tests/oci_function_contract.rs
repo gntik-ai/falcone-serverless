@@ -777,6 +777,8 @@ mod synthetic {
         pub scratch: Option<std::path::PathBuf>,
         /// Tasks that are listed but gone by the time they are read.
         pub ghosts: BTreeSet<(i32, i32)>,
+        /// Pids whose children lists refuse to be read.
+        pub unreadable_children: BTreeSet<i32>,
         handles: BTreeMap<u64, i32>,
         next_handle: u64,
         next_pid: i32,
@@ -832,6 +834,10 @@ mod synthetic {
         }
         pub fn set_state(&mut self, pid: i32, tid: i32, state: char) {
             self.procs.get_mut(&pid).unwrap().tasks.insert(tid, state);
+        }
+        /// True while the tester still holds an open handle to `pid`.
+        pub fn holds(&self, pid: i32) -> bool {
+            self.handles.values().any(|p| *p == pid)
         }
         pub fn killed(&self, pid: i32) -> bool {
             self.signals
@@ -957,6 +963,7 @@ mod synthetic {
                         let state = proc.tasks.get(&tid).ok_or_else(not_found)?;
                         match *file {
                             "status" => Ok(format!("Name:\tx\nState:\t{state} (state)\n")),
+                            "children" if w.unreadable_children.contains(&pid) => Err(denied()),
                             "children" if tid == pid => Ok(w.children(pid)),
                             "children" => Ok(String::new()),
                             _ => Err(not_found()),
@@ -1688,6 +1695,61 @@ fn confirmation_crossing_the_deadline_never_discards_an_opened_handle() {
 }
 
 #[test]
+fn confirmation_work_is_bounded_cumulatively_and_still_kills_the_descendant() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let descendant = fake.with(|w| {
+        // The root has many threads, so confirming a descendant against it reads many
+        // children lists; no single read is slow, their sum is.
+        let root = *w.procs.keys().filter(|p| **p >= 100).min().unwrap();
+        for tid in 300..500 {
+            w.set_state(root, tid, 'S');
+        }
+        let descendant = w.fork(root);
+        // When its handle is opened, the root dies: the descendant moves to the tester, so
+        // it is not found among the root's 201 lists, each read now taking 10 ms.
+        w.on(&format!("open {descendant}"), false, move |w| {
+            w.exit(root);
+            w.latency = Duration::from_millis(10);
+        });
+        descendant
+    });
+    let start = Instant::now();
+    let _ = child.cleanup();
+    let spent = start.elapsed();
+    // Reading every list would take over 2 s per pass; the settle bound stops it.
+    assert!(spent < contract::KILL_SETTLE + Duration::from_secs(1), "{spent:?}");
+    fake.with(|w| assert!(w.killed(descendant), "an opened handle was discarded"));
+}
+
+#[test]
+fn uncertain_ownership_holds_the_handle_unsignalled_until_cleanup_kills_it() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let descendant = fake.with(|w| {
+        let root = *w.procs.keys().filter(|p| **p >= 100).min().unwrap();
+        let descendant = w.fork(root);
+        // Its parent's children list cannot be read: ownership is unknown, not foreign.
+        w.unreadable_children.insert(root);
+        descendant
+    });
+    let diagnostics = child.binding(PORT).unwrap();
+    let message = diagnostics.get("OCI-V1-BINDING").cloned().unwrap_or_default();
+    assert!(message.contains("inspection unstable"), "{message}");
+    fake.with(|w| {
+        assert!(w.holds(descendant), "an opened handle was released for want of proof");
+        assert!(!w.killed(descendant), "an unconfirmed handle was signalled while inspecting");
+    });
+    child.cleanup().unwrap();
+    fake.with(|w| {
+        assert!(w.killed(descendant), "cleanup skipped an unconfirmed handle");
+        assert!(w.procs.keys().all(|pid| *pid < 100), "{:?}", w.procs.keys());
+    });
+}
+
+#[test]
 fn reaping_is_bounded_cumulatively_when_every_attempt_is_slow() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
@@ -1705,14 +1767,10 @@ fn reaping_is_bounded_cumulatively_when_every_attempt_is_slow() {
     let error = child.cleanup().unwrap_err();
     let spent = start.elapsed();
     assert!(error.to_string().contains("cleanup"), "{error}");
-    // Forty-one attempts would take 12 s: the settle time, one attempt past it and the last
-    // pass bound it instead.
+    // Forty-one attempts would take 12 s: the settle time and the one attempt in flight when
+    // it ran out bound it instead, with no further reap budget after it.
     assert!(
-        spent
-            < contract::KILL_SETTLE
-                + contract::FINAL_REAP
-                + Duration::from_millis(600)
-                + Duration::from_secs(1),
+        spent < contract::KILL_SETTLE + Duration::from_millis(300) + Duration::from_secs(1),
         "{spent:?}"
     );
     fake.with(|w| {
