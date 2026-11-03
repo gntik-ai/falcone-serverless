@@ -9,13 +9,13 @@
 //! between the sample and its final consistency re-read, and a candidate it cannot kill
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
 //! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
-//! Signals go only through pidfds, never to a numeric PID or process group (the one exception
-//! is the still-unreaped `Child` of a spawn whose pidfd could not be opened, see
-//! [`spawn_retained`]), and a pidfd is
-//! kept only after the process is seen to still be a child of its tree parent (or of the
-//! tester) once the pidfd is open, so a reused PID is released unsignalled and rescanned. Scratch removal runs once, inside that deadline; when the
-//! deadline passes first, the scratch directory is left behind rather than removed on a new
-//! budget by a destructor.
+//! Signals go only through pidfds, never to a numeric PID or process group: the candidate is
+//! held at a gate until its pidfd is open (see [`spawn_retained`]), so no candidate code
+//! runs, and no signal is needed, when a handle cannot be had. A pidfd is kept only after
+//! the process is seen to still be a child of its tree parent (or of the tester) once the
+//! pidfd is open, so a reused PID is released unsignalled and rescanned. Scratch removal
+//! runs once, inside that deadline; when the deadline passes first, the scratch directory is
+//! left behind rather than removed on a new budget by a destructor.
 //!
 //! # Residual risk (not detected here)
 //!
@@ -456,8 +456,6 @@ pub const TERM_GRACE: Duration = Duration::from_secs(10);
 pub const KILL_SETTLE: Duration = Duration::from_secs(1);
 /// Full samples of the process tree before the binding check gives up as unstable.
 pub const MAX_SCANS: usize = 5;
-/// Time to confirm a freshly opened handle once the deadline has already passed.
-const CONFIRM_GRACE: Duration = Duration::from_millis(100);
 
 fn deadline_error() -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, "conformance deadline exceeded")
@@ -934,8 +932,10 @@ pub trait ProcessTable {
     fn read(&self, path: &str) -> io::Result<String>;
     fn list(&self, path: &str) -> io::Result<Vec<String>>;
     fn link(&self, path: &str) -> io::Result<String>;
-    /// Starts the command and retains a handle for it before returning.
-    fn spawn(&self, command: &mut std::process::Command) -> io::Result<(i32, u64)>;
+    /// Starts the command and retains a handle for it before the candidate runs. `command`
+    /// names the program, arguments, environment and working directory; how the process is
+    /// isolated and held is the table's business. Handle acquisition stops at `deadline`.
+    fn spawn(&self, command: &std::process::Command, deadline: Instant) -> io::Result<(i32, u64)>;
     fn open(&self, pid: i32) -> io::Result<u64>;
     /// Drops a handle without signalling it (a handle that turned out not to be ours).
     fn release(&self, handle: u64);
@@ -978,11 +978,11 @@ impl ProcessTable for RealTable {
     fn link(&self, path: &str) -> io::Result<String> {
         fs::read_link(path).map(|target| target.to_string_lossy().into_owned())
     }
-    fn spawn(&self, command: &mut std::process::Command) -> io::Result<(i32, u64)> {
+    fn spawn(&self, command: &std::process::Command, deadline: Instant) -> io::Result<(i32, u64)> {
         use rustix::process::{Pid, set_child_subreaper};
         // Adopt orphaned descendants so cleanup can find and reap them.
         set_child_subreaper(Some(Pid::from_raw(1).unwrap()))?;
-        spawn_retained(command, |pid| self.retain(pid))
+        spawn_retained(command, |pid| self.retain(pid), deadline)
     }
     fn open(&self, pid: i32) -> io::Result<u64> {
         self.retain(pid)
@@ -1026,39 +1026,96 @@ impl ProcessTable for RealTable {
     }
 }
 
-/// Starts the command and retains its handle, retrying a transient refusal (descriptor or
-/// memory exhaustion) for at most [`KILL_SETTLE`]. When no handle can be had the candidate
-/// is not left running: this function still owns the unreaped `std::process::Child`, whose
-/// pid cannot have been reused, so it kills that one process through the `Child` (which
-/// never signals once reaped) and reaps it within [`KILL_SETTLE`]. This is the only signal
-/// not sent through a pidfd; a descendant the candidate started in that window cannot be
-/// found without handles and is a residual risk of an environment that denies `pidfd_open`.
+/// Releases a gated candidate: it reads one line from its stdin and only then runs the
+/// program (with an empty environment but the given assignments, stdin at /dev/null). End of
+/// input, which is what a tester that has no handle (or has died) leaves, ends the gate
+/// without ever running the program.
+const GATE: &str = r#"IFS= read -r _ || exit 125; exec /usr/bin/env -i "$@" </dev/null"#;
+
+/// An error that may pass if the handle is asked for again: a descriptor or memory shortage.
+fn transient(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    error
+        .raw_os_error()
+        .map(Errno::from_raw_os_error)
+        .is_some_and(|errno| {
+            [
+                Errno::MFILE,
+                Errno::NFILE,
+                Errno::NOMEM,
+                Errno::AGAIN,
+                Errno::INTR,
+            ]
+            .contains(&errno)
+        })
+}
+
+/// Starts the program in its own process group, held at a gate (see [`GATE`]) until
+/// `retain` has produced a handle for its pid; only then does the candidate run. A
+/// transient refusal is retried until `deadline` (the handle is asked for at least once).
+/// When no handle can be had the gate is closed: the program has not run, nothing was
+/// forked and nothing needs a signal; the gate process exits by itself and is reaped
+/// within [`KILL_SETTLE`].
 pub fn spawn_retained(
-    command: &mut std::process::Command,
+    command: &std::process::Command,
     mut retain: impl FnMut(i32) -> io::Result<u64>,
+    deadline: Instant,
 ) -> io::Result<(i32, u64)> {
-    let mut child = command.spawn()?;
+    use std::{io::Write, os::unix::ffi::OsStringExt, os::unix::fs::PermissionsExt};
+    let program = Path::new(command.get_program());
+    if fs::metadata(program)?.permissions().mode() & 0o111 == 0 {
+        return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+    }
+    let mut gate = std::process::Command::new("/bin/sh");
+    gate.arg("-c").arg(GATE).arg("candidate");
+    for (name, value) in command.get_envs() {
+        if let Some(value) = value {
+            let mut assignment = name.to_os_string().into_vec();
+            assignment.push(b'=');
+            assignment.extend(value.to_os_string().into_vec());
+            gate.arg(std::ffi::OsString::from_vec(assignment));
+        }
+    }
+    gate.arg(program).args(command.get_args());
+    if let Some(dir) = command.get_current_dir() {
+        gate.current_dir(dir);
+    }
+    use std::os::unix::process::CommandExt;
+    gate.env_clear()
+        .process_group(0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = gate.spawn()?;
     let pid = child.id() as i32;
+    let mut stdin = child.stdin.take();
     // The unreaped child keeps its pid reserved, so a handle opened now names this process.
-    let settle = Instant::now() + KILL_SETTLE;
     let error = loop {
         match retain(pid) {
-            Ok(handle) => return Ok((pid, handle)),
-            Err(error) if Instant::now() >= settle => break error,
-            Err(_) => thread::sleep(Duration::from_millis(5)),
+            Ok(handle) => {
+                if let Some(stdin) = stdin.as_mut() {
+                    // A gate that is already gone has nothing to release.
+                    let _ = stdin.write_all(b"go\n");
+                }
+                return Ok((pid, handle));
+            }
+            Err(error) if transient(&error) && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => break error,
         }
     };
-    let _ = child.kill();
+    drop(stdin);
     let reaped_by = Instant::now() + KILL_SETTLE;
     let outcome = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break "killed and reaped",
+            Ok(Some(_)) => break "closed and reaped",
             Ok(None) if Instant::now() < reaped_by => thread::sleep(Duration::from_millis(5)),
-            _ => break "killed but not reaped in time",
+            _ => break "closed but not yet reaped",
         }
     };
     Err(io::Error::other(format!(
-        "{error}; candidate pid {pid} has no process handle and was {outcome}"
+        "{error}; the candidate was never started: its gate (pid {pid}) was {outcome}"
     )))
 }
 
@@ -1505,7 +1562,6 @@ impl Candidate {
         probe: &FilesystemProbe,
         deadline: Instant,
     ) -> io::Result<Self> {
-        use std::os::unix::process::CommandExt;
         if !Path::new(executable).is_absolute() {
             return Err(io::Error::other(
                 "candidate executable must be an absolute path",
@@ -1518,13 +1574,9 @@ impl Candidate {
             .env("PORT", port.to_string())
             .env("HOME", probe.sentinel())
             .env("TMPDIR", probe.scratch())
-            .current_dir(probe.sentinel())
-            .process_group(0)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        // The root handle is retained before anything can fail; from here on Drop owns the kill.
-        let (root, handle) = table.spawn(&mut command)?;
+            .current_dir(probe.sentinel());
+        // The root handle is retained before the candidate runs; from here on Drop owns the kill.
+        let (root, handle) = table.spawn(&command, deadline)?;
         let mut candidate = Self {
             table,
             root,
@@ -1606,10 +1658,9 @@ impl Candidate {
             match self.table.open(*pid) {
                 Ok(handle) => {
                     let parent = seen.parents.get(pid).copied().unwrap_or(self.table.me());
-                    // An unconfirmed handle is released, never signalled, so the answer is
-                    // read even when the deadline passed while the handle was opened.
-                    let until = deadline.max(Instant::now() + CONFIRM_GRACE);
-                    let ours = matches!(self.still_a_child(*pid, parent, until), Ok(true));
+                    // Confirmation stops at the deadline like every read; a handle that cannot
+                    // be confirmed in time is released unsignalled.
+                    let ours = matches!(self.still_a_child(*pid, parent, deadline), Ok(true));
                     if ours {
                         self.handles.insert(*pid, handle);
                         if kill {
@@ -1659,10 +1710,28 @@ impl Candidate {
         }
     }
 
+    /// One non-blocking reap attempt per retained handle; true when any was reaped. With
+    /// `until` the attempts stop at that instant (always after trying the first handle).
+    fn reap_known(&mut self, until: Option<Instant>) -> bool {
+        let mut reaped = false;
+        for (index, (pid, handle)) in self.handles.clone().into_iter().enumerate() {
+            if index > 0 && until.is_some_and(|until| Instant::now() >= until) {
+                break;
+            }
+            if self.table.reap(handle).unwrap_or(false) {
+                self.handles.remove(&pid);
+                reaped = true;
+            }
+        }
+        reaped
+    }
+
     /// SIGKILL to every retained handle, then reap until a fresh scan of the tester's
     /// descendants, taken after the last reap, is empty. The kill is never skipped; the
     /// wait for it is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not.
-    /// Runs at most once: Drop does not start a second wait.
+    /// Retained handles are reaped before every scan, so processes already dead are collected
+    /// even when the scan then runs out of time. Runs at most once: Drop does not start a
+    /// second wait.
     pub fn cleanup(&mut self) -> io::Result<()> {
         self.cleaned = true;
         let mut settle = None;
@@ -1671,21 +1740,24 @@ impl Candidate {
                 let _ = self.table.signal(*handle, Signal::KILL);
             }
             let settle = *settle.get_or_insert_with(|| Instant::now() + KILL_SETTLE);
-            let timed_out =
-                || io::Error::other("candidate cleanup did not finish within the kill settle time");
-            let found = self.discover(settle, true).map_err(|_| timed_out())?;
-            let mut reaped = false;
-            for (pid, handle) in self.handles.clone() {
-                ensure(settle).map_err(|_| timed_out())?;
-                if self.table.reap(handle).unwrap_or(false) {
-                    self.handles.remove(&pid);
-                    reaped = true;
-                }
-            }
+            let reaped = self.reap_known(Some(settle));
+            let found = self.discover(settle, true);
+            let Ok(found) = found else {
+                // Processes the scan just killed still get their reap attempt.
+                self.reap_known(None);
+                return Err(io::Error::other(
+                    "candidate cleanup did not finish within the kill settle time",
+                ));
+            };
             if found == Some(0) && !reaped && self.handles.is_empty() {
                 return Ok(());
             }
-            ensure(settle).map_err(|_| timed_out())?;
+            if Instant::now() >= settle {
+                self.reap_known(None);
+                return Err(io::Error::other(
+                    "candidate cleanup did not finish within the kill settle time",
+                ));
+            }
             thread::sleep(Duration::from_millis(5));
         }
     }

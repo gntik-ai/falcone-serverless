@@ -858,7 +858,9 @@ mod synthetic {
             }
             events.append(&mut self.events);
             self.events = events;
-            if !self.latency.is_zero() {
+            // Slow procfs reads; signals and reaps cost nothing.
+            let procfs = ["read ", "list ", "link "];
+            if !self.latency.is_zero() && procfs.iter().any(|p| operation.starts_with(p)) {
                 std::thread::sleep(self.latency);
             }
         }
@@ -1018,7 +1020,11 @@ mod synthetic {
                 Ok(format!("socket:[{inode}]"))
             })
         }
-        fn spawn(&self, command: &mut std::process::Command) -> io::Result<(i32, u64)> {
+        fn spawn(
+            &self,
+            command: &std::process::Command,
+            _deadline: std::time::Instant,
+        ) -> io::Result<(i32, u64)> {
             let scratch = command
                 .get_envs()
                 .find(|(key, _)| *key == "TMPDIR")
@@ -1342,7 +1348,7 @@ fn deadline_expiring_during_acquisition_still_kills_and_reaps_the_root() {
 }
 
 #[test]
-fn cleanup_work_exhausting_the_settle_time_stops_but_every_handle_was_killed() {
+fn cleanup_whose_scan_runs_out_of_settle_time_has_already_killed_and_reaped_every_handle() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     fake.with(|w| {
@@ -1355,8 +1361,8 @@ fn cleanup_work_exhausting_the_settle_time_stops_but_every_handle_was_killed() {
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
     let retained: Vec<i32> = fake.with(|w| w.procs.keys().copied().filter(|p| *p >= 100).collect());
     assert_eq!(retained.len(), 41);
-    // Every procfs read now takes long enough that one scan cannot finish in the settle time.
-    fake.with(|w| w.latency = Duration::from_millis(10));
+    // Every procfs read now takes long enough that no scan can finish in the settle time.
+    fake.with(|w| w.latency = Duration::from_millis(400));
     let start = Instant::now();
     let error = child.cleanup().unwrap_err();
     let spent = start.elapsed();
@@ -1366,8 +1372,18 @@ fn cleanup_work_exhausting_the_settle_time_stops_but_every_handle_was_killed() {
         spent < contract::KILL_SETTLE + Duration::from_secs(1),
         "{spent:?}"
     );
-    let signalled = fake.with(|w| retained.iter().all(|pid| w.killed(*pid)));
-    assert!(signalled, "a retained handle was not sent SIGKILL");
+    fake.with(|w| {
+        assert!(
+            retained.iter().all(|pid| w.killed(*pid)),
+            "a retained handle was not sent SIGKILL"
+        );
+        // Reaped before the slow scan began, not left for a scan that never finished.
+        assert!(
+            w.procs.keys().all(|pid| *pid < 100),
+            "killed but not reaped: {:?}",
+            w.procs.keys()
+        );
+    });
     // Drop neither signals nor waits again.
     let signals = fake.with(|w| w.signals.len());
     let start = Instant::now();
@@ -1423,8 +1439,8 @@ fn terminate_that_reaps_the_child_leaves_drop_with_nothing_to_signal() {
         fn link(&self, p: &str) -> std::io::Result<String> {
             self.0.link(p)
         }
-        fn spawn(&self, c: &mut std::process::Command) -> std::io::Result<(i32, u64)> {
-            self.0.spawn(c)
+        fn spawn(&self, c: &std::process::Command, d: Instant) -> std::io::Result<(i32, u64)> {
+            self.0.spawn(c, d)
         }
         fn open(&self, pid: i32) -> std::io::Result<u64> {
             self.0.open(pid)
@@ -1604,23 +1620,26 @@ fn cleanup_crossing_the_deadline_is_the_timeout_within_the_wall_time_bound() {
 }
 
 #[test]
-fn handle_opened_as_the_cleanup_settle_time_runs_out_is_still_killed() {
+fn handle_that_cannot_be_confirmed_before_the_settle_time_ends_is_never_signalled() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
     let descendant = fake.with(|w| {
         let descendant = w.fork(100);
-        // Acquiring the handle takes longer than the settle time allows.
+        // Acquiring the handle takes longer than the settle time allows, so there is no time
+        // left to confirm that the pid still names the process that was listed.
         w.on(&format!("open {descendant}"), false, |_| {
             thread::sleep(contract::KILL_SETTLE + Duration::from_millis(200))
         });
         descendant
     });
+    let start = Instant::now();
     let error = child.cleanup().unwrap_err();
     assert!(error.to_string().contains("cleanup"), "{error}");
+    assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
     assert!(
-        fake.with(|w| w.killed(descendant)),
-        "a handle opened successfully was discarded without SIGKILL"
+        !fake.with(|w| w.killed(descendant)),
+        "an unconfirmed handle was signalled"
     );
 }
 
@@ -1635,46 +1654,128 @@ fn end_and_reap(pid: i32) {
     waitpid(Some(pid), WaitOptions::empty()).expect("reap");
 }
 
-#[test]
-fn failing_to_retain_the_spawned_child_kills_and_reaps_it() {
-    let _serial = serial();
-    let mut command = Command::new("/bin/sleep");
-    command.arg("60");
-    let spawned = std::cell::Cell::new(0);
-    let start = Instant::now();
-    let error = contract::spawn_retained(&mut command, |pid| {
-        spawned.set(pid);
-        Err(std::io::Error::other("pidfd_open refused"))
-    })
-    .unwrap_err();
-    assert!(error.to_string().contains("pidfd_open refused"), "{error}");
-    assert!(error.to_string().contains("killed and reaped"), "{error}");
-    assert!(start.elapsed() < contract::KILL_SETTLE * 2 + Duration::from_secs(1));
-    // Reaped: not even a zombie is left behind, and nothing is left running.
-    let pid = spawned.get();
-    assert!(
-        !Path::new(&format!("/proc/{pid}")).exists(),
-        "the candidate outlived the failed handle acquisition"
-    );
+fn tempfile_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("oci-gate-{name}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// A candidate that, if it ever ran, would fork a long-lived child and leave a marker.
+fn forking_candidate(marker: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!("sleep 60 & echo ran > {}; wait", marker.display()));
+    command
+}
+
+fn refused() -> std::io::Error {
+    std::io::Error::from_raw_os_error(rustix::io::Errno::MFILE.raw_os_error())
 }
 
 #[test]
-fn a_transient_refusal_to_retain_the_spawned_child_is_retried_and_the_handle_returned() {
+fn failing_to_retain_the_spawned_child_never_runs_the_candidate() {
+    let _serial = serial();
+    let dir = tempfile_dir("gate-closed");
+    let marker = dir.join("ran");
+    let command = forking_candidate(&marker);
+    let spawned = std::cell::Cell::new(0);
+    let start = Instant::now();
+    let error = contract::spawn_retained(
+        &command,
+        |pid| {
+            spawned.set(pid);
+            Err(std::io::Error::other("pidfd_open refused"))
+        },
+        deadline_in(60),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("pidfd_open refused"), "{error}");
+    assert!(error.to_string().contains("never started"), "{error}");
+    assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
+    // Not even a zombie is left behind, and the candidate had no time to fork or write.
+    let pid = spawned.get();
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "the gate outlived the failed handle acquisition"
+    );
+    thread::sleep(Duration::from_millis(300));
+    assert!(!marker.exists(), "the candidate ran without a handle");
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_transient_refusal_to_retain_the_spawned_child_is_retried_until_the_deadline() {
     let _serial = serial();
     let mut command = Command::new("/bin/sleep");
     command.arg("60");
     let mut refusals = 2;
-    let (pid, handle) = contract::spawn_retained(&mut command, |_| {
-        if refusals > 0 {
-            refusals -= 1;
-            Err(std::io::Error::other("EMFILE"))
-        } else {
-            Ok(7)
-        }
-    })
+    let (pid, handle) = contract::spawn_retained(
+        &command,
+        |_| {
+            if refusals > 0 {
+                refusals -= 1;
+                Err(refused())
+            } else {
+                Ok(7)
+            }
+        },
+        deadline_in(60),
+    )
     .unwrap();
     assert_eq!(handle, 7);
     end_and_reap(pid);
+
+    // Past the deadline the handle is asked for once, and the refusal ends the attempt.
+    let mut asked = 0;
+    let error = contract::spawn_retained(
+        &command,
+        |_| {
+            asked += 1;
+            Err(refused())
+        },
+        Instant::now(),
+    )
+    .unwrap_err();
+    assert_eq!(asked, 1, "{error}");
+}
+
+#[test]
+fn released_candidate_runs_with_only_the_given_environment_and_no_stdin() {
+    let _serial = serial();
+    let dir = tempfile_dir("gate-open");
+    let out = dir.join("out");
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(format!(
+            "env | sort > {0}.tmp; cat >> {0}.tmp; mv {0}.tmp {0}",
+            out.display()
+        ))
+        .env_clear()
+        .env("PORT", "8080")
+        .env("HOME", "/h o")
+        .current_dir(&dir);
+    let (pid, _) = contract::spawn_retained(&command, |_| Ok(1), deadline_in(60)).unwrap();
+    let start = Instant::now();
+    while !out.exists() && start.elapsed() < Duration::from_secs(10) {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let text = fs::read_to_string(&out).unwrap();
+    // `env` is the only extra the shell itself adds (PWD); nothing leaks from the tester.
+    let names: Vec<&str> = text.lines().map(|l| l.split('=').next().unwrap()).collect();
+    assert!(
+        names
+            .iter()
+            .all(|n| ["HOME", "PORT", "PWD", "_"].contains(n)),
+        "{text}"
+    );
+    assert!(text.contains("HOME=/h o"), "{text}");
+    assert!(text.contains("PORT=8080"), "{text}");
+    // stdin is /dev/null: `cat` returned at once instead of waiting for the tester.
+    end_and_reap(pid);
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
