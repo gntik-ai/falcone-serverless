@@ -23,7 +23,7 @@ Unknown application params are legal; the tester makes no assertion about their 
 | --- | --- |
 | OCI-V1-HEALTHZ | `GET /healthz` returns HTTP 200 within 2 s, after a startup allowance of 3 s. A missing or stalled health handler fails. |
 | OCI-V1-INVOKE | `POST /invoke` returns HTTP 200. `GET /invoke` and `POST /__conformance_missing__` return 404 or 405. |
-| OCI-V1-REQUEST | Accept exactly the request/context schemas; malformed JSON, missing/extra fields, invalid context and non-JSON Content-Type return HTTP 400. Valid requests built by the tester must validate. |
+| OCI-V1-REQUEST | Accept exactly the request/context schemas; malformed JSON, missing/extra fields, invalid context and non-JSON Content-Type return HTTP 400. Valid requests built by the tester must validate: the tester sends several valid deadlines (whole-second and fractional UTC, which must be accepted with HTTP 200) and malformed ones (offset, missing `Z`, more than 9 fractional digits, impossible dates, which must be rejected with HTTP 400), so a candidate that knows one literal deadline fails. |
 | OCI-V1-ENVELOPE | Every accepted invocation returns `application/json` and exactly `{status, result, logs}` matching envelope.schema.json (status membership is checked separately). `result` is any JSON value, `logs` a string. |
 | OCI-V1-STATUS | Envelope `status` is `success` or `error`. Both use HTTP 200; errors encode their application result in `result`. These values are provisional legacy semantics. |
 | OCI-V1-PARAMS-LIMIT | The compact UTF-8 JSON encoding of `params` is at most 6,000,000 bytes (6 MB decimal). Accept an exactly-at-limit value; reject a value one byte larger with HTTP 413 before invoking. |
@@ -31,8 +31,8 @@ Unknown application params are legal; the tester makes no assertion about their 
 | OCI-V1-LOGS-LIMIT | Decoded UTF-8 `logs` is at most 256,000 bytes (256 KB decimal), including any marker. |
 | OCI-V1-LOGS-TRUNCATION | Truncate logs with the explicit suffix `[TRUNCATED]`, included in the budget. A full-budget log must end with this marker, even if it naturally fills the budget. Shorter logs may also carry the marker; whether they omitted original content cannot be inferred by the tester. |
 | OCI-V1-PORT | `$PORT` is mandatory, a decimal port in 1–65535, with no default. The tester refuses to run either mode if it is missing or invalid. Process mode passes the validated port to the candidate. |
-| OCI-V1-BINDING | Listen only on `127.0.0.1:$PORT`, never wildcard, another address or IPv6. Process mode inspects Linux `/proc/net/tcp{,6}` for that port while the candidate is running. Unavailable inspection fails closed. HTTP mode cannot establish process binding. |
-| OCI-V1-SIGTERM | Exit after SIGTERM within 10 s. In-flight calls may finish within this grace. Process mode sends SIGTERM; after the grace it reports failure, kills the process group and reaps its child. |
+| OCI-V1-BINDING | Listen only on `127.0.0.1:$PORT`, never wildcard, another address or IPv6, in the candidate or in any descendant. Process mode reads `/proc/net/tcp{,6}` and the sockets of every live task (`/proc/<pid>/task/<tid>/fd`) of the candidate and its descendants, found through `/proc/<pid>/task/<tid>/children`. Any listener other than `127.0.0.1:$PORT` fails, and the diagnostic names it, unless a process outside the candidate tree is seen holding it. A listener with no seen owner, an unreadable or malformed `/proc` entry, or a tree or socket table that differs on the final re-read fails closed after at most 5 rescans (`inspection unstable`). HTTP mode cannot establish process binding. |
+| OCI-V1-SIGTERM | Exit after SIGTERM within 10 s. In-flight calls may finish within this grace. Process mode sends SIGTERM to the candidate through a pidfd; after the grace it reports failure, sends SIGKILL through the pidfd of every process of the tree and reaps them, whatever process group they joined. All of process mode shares one absolute deadline; only the final reap may outlast it, by at most 1 s. |
 | OCI-V1-FILESYSTEM | The runtime root is read-only; only `/tmp` is writable. The bounded tester supplies separate scratch TMPDIR and sentinel cwd/HOME. Any entry created, changed or removed in the sentinel is a violation; TMPDIR writes pass. |
 
 The schemas express structural constraints. `x-maxSerializedBytes`,
@@ -54,8 +54,22 @@ on CLI/infrastructure errors. A failure to start the candidate is infrastructure
 not evidence of contract conformance. HTTP I/O has an absolute 2 s budget per
 request, bounded headers (16 KiB) and body (8 MB), with no unbounded read-to-EOF.
 A candidate that fails health does not receive further HTTP probes.
-Process cleanup always kills the tester-owned process group and waits for its
-child, including early errors. Temporary directories are removed after inspection.
+Process cleanup always sends SIGKILL, through pidfds retained as each process of the
+tree is discovered (never by numeric PID or process group), to the candidate and every
+descendant, and reports success only after a fresh scan of the tester's descendants,
+taken after the last reap, is empty. The tester is the child subreaper of its process
+and treats all of that process's children as the candidate tree, so run one check per
+process. The scratch directory is removed before the verdict is produced; running out
+of the shared deadline there is the deadline error (exit 2), not a verdict. Binding
+inspection needs `/proc/<pid>/task/<tid>/children`; run it in the candidate's own
+network namespace, because root-owned host listeners it cannot attribute fail it closed.
+
+This is a conformance check, not a security boundary. It does not detect a candidate
+that deliberately evades sampling (processes of its tree signalling, resuming or
+passing sockets to each other), nor an outside process that cooperates with it
+(stopping, resuming or tracing it, or passing it descriptors). Runtime enforcement,
+the restricted pod, the seccomp profile and the NetworkPolicy, is the boundary against
+both. Temporary directories are removed after inspection.
 
 The filesystem sentinel covers cwd/HOME only, including nested files, symlinks
 and metadata changes. It does not sandbox code or detect absolute-path writes
