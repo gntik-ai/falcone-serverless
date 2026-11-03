@@ -11,6 +11,9 @@ mod config;
 #[cfg(test)]
 mod runtime_metrics;
 
+#[cfg(test)]
+mod oci_execution_profile;
+
 /// The worker's build identity, reported by `--version`.
 pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")

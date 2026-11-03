@@ -1,0 +1,672 @@
+[
+  {
+    "id": "r1-plaintext",
+    "rule": "R1",
+    "input": {
+      "transport": "plaintext"
+    },
+    "expected": {
+      "outcome": "reject",
+      "request_read": false
+    }
+  },
+  {
+    "id": "r1-server-only-tls",
+    "rule": "R1",
+    "input": {
+      "transport": "server_tls"
+    },
+    "expected": {
+      "outcome": "reject",
+      "request_read": false
+    }
+  },
+  {
+    "id": "r1-mutual-tls",
+    "rule": "R1",
+    "input": {
+      "transport": "mutual_tls"
+    },
+    "expected": {
+      "outcome": "accept",
+      "request_read": true
+    }
+  },
+  {
+    "id": "r1-missing",
+    "rule": "R1",
+    "input": {},
+    "expected": {
+      "outcome": "reject",
+      "request_read": false
+    }
+  },
+  {
+    "id": "r1-unknown",
+    "rule": "R1",
+    "input": {
+      "transport": "tls"
+    },
+    "expected": {
+      "outcome": "reject",
+      "request_read": false
+    }
+  },
+  {
+    "id": "r2-verified",
+    "rule": "R2",
+    "input": {
+      "identity": "verified"
+    },
+    "expected": {
+      "outcome": "allow",
+      "audit_events": 0,
+      "credential_sent": true,
+      "request_sent": true
+    }
+  },
+  {
+    "id": "r2-absent",
+    "rule": "R2",
+    "input": {
+      "identity": "absent"
+    },
+    "expected": {
+      "outcome": "refuse",
+      "audit_events": 1,
+      "credential_sent": false,
+      "request_sent": false
+    }
+  },
+  {
+    "id": "r2-wrong",
+    "rule": "R2",
+    "input": {
+      "identity": "wrong"
+    },
+    "expected": {
+      "outcome": "refuse",
+      "audit_events": 1,
+      "credential_sent": false,
+      "request_sent": false
+    }
+  },
+  {
+    "id": "r2-squatted-port",
+    "rule": "R2",
+    "input": {
+      "identity": "unverified"
+    },
+    "expected": {
+      "outcome": "refuse",
+      "audit_events": 1,
+      "credential_sent": false,
+      "request_sent": false
+    }
+  },
+  {
+    "id": "r2-missing",
+    "rule": "R2",
+    "input": {},
+    "expected": {
+      "outcome": "refuse",
+      "audit_events": 1,
+      "credential_sent": false,
+      "request_sent": false
+    }
+  },
+  {
+    "id": "r2-unknown",
+    "rule": "R2",
+    "input": {
+      "identity": "trusted"
+    },
+    "expected": {
+      "outcome": "refuse",
+      "audit_events": 1,
+      "credential_sent": false,
+      "request_sent": false
+    }
+  },
+  {
+    "id": "r3-verified",
+    "rule": "R3",
+    "input": {
+      "identity": "verified"
+    },
+    "expected": {
+      "outcome": "accept",
+      "forwarded": false
+    }
+  },
+  {
+    "id": "r3-missing",
+    "rule": "R3",
+    "input": {},
+    "expected": {
+      "outcome": "reject",
+      "forwarded": false
+    }
+  },
+  {
+    "id": "r3-unverified",
+    "rule": "R3",
+    "input": {
+      "identity": "unverified"
+    },
+    "expected": {
+      "outcome": "reject",
+      "forwarded": false
+    }
+  },
+  {
+    "id": "r3-wrong",
+    "rule": "R3",
+    "input": {
+      "identity": "wrong"
+    },
+    "expected": {
+      "outcome": "reject",
+      "forwarded": false
+    }
+  },
+  {
+    "id": "r3-unknown",
+    "rule": "R3",
+    "input": {
+      "identity": "trusted"
+    },
+    "expected": {
+      "outcome": "reject",
+      "forwarded": false
+    }
+  },
+  {
+    "id": "r4-shim-only",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim"
+      ],
+      "automountServiceAccountToken": false
+    },
+    "expected": {
+      "outcome": "conformant"
+    }
+  },
+  {
+    "id": "r4-tenant-mount",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim",
+        "tenant"
+      ],
+      "automountServiceAccountToken": false
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-init-mount",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim",
+        "init"
+      ],
+      "automountServiceAccountToken": false
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-automount-true",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim"
+      ],
+      "automountServiceAccountToken": true
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-automount-unset",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim"
+      ]
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-no-mount",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [],
+      "automountServiceAccountToken": false
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-ambiguous-mount",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim",
+        "shim"
+      ],
+      "automountServiceAccountToken": false
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r4-unknown-field",
+    "rule": "R4",
+    "input": {
+      "identity_mounts": [
+        "shim"
+      ],
+      "automountServiceAccountToken": false,
+      "tenant_mount": true
+    },
+    "expected": {
+      "outcome": "non_conformant"
+    }
+  },
+  {
+    "id": "r5-credential-removed",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "SYNTHETIC-ONLY-92",
+      "params": {
+        "message": "hello"
+      },
+      "context": {
+        "handle": "opaque-attempt"
+      }
+    },
+    "expected": {
+      "outcome": "forward",
+      "request": {
+        "params": {
+          "message": "hello"
+        },
+        "context": {
+          "handle": "opaque-attempt"
+        }
+      }
+    }
+  },
+  {
+    "id": "r5-nested-field",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "SYNTHETIC-ONLY-92",
+      "params": {
+        "nested": {
+          "execution_credential": "other"
+        }
+      },
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-nested-value",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "SYNTHETIC-ONLY-92",
+      "params": [
+        {
+          "echo": "prefix-SYNTHETIC-ONLY-92-suffix"
+        }
+      ],
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-field-in-string",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "SYNTHETIC-ONLY-92",
+      "params": "execution_credential",
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-value-in-key",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "SYNTHETIC-ONLY-92",
+      "params": {},
+      "context": {
+        "SYNTHETIC-ONLY-92": "echo"
+      }
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-escaped-value",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "synthetic\"quoted",
+      "params": {
+        "echo": "synthetic\"quoted"
+      },
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-empty-credential",
+    "rule": "R5",
+    "input": {
+      "execution_credential": "",
+      "params": {},
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r5-missing-credential",
+    "rule": "R5",
+    "input": {
+      "params": {},
+      "context": {}
+    },
+    "expected": {
+      "outcome": "refuse",
+      "request": null
+    }
+  },
+  {
+    "id": "r6-zero-in-flight",
+    "rule": "R6",
+    "input": {
+      "limit": 2,
+      "in_flight": 0
+    },
+    "expected": {
+      "outcome": "admit",
+      "reason": null
+    }
+  },
+  {
+    "id": "r6-one-in-flight",
+    "rule": "R6",
+    "input": {
+      "limit": 2,
+      "in_flight": 1
+    },
+    "expected": {
+      "outcome": "admit",
+      "reason": null
+    }
+  },
+  {
+    "id": "r6-at-limit",
+    "rule": "R6",
+    "input": {
+      "limit": 2,
+      "in_flight": 2
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "concurrency_limit_exceeded"
+    }
+  },
+  {
+    "id": "r6-over-limit",
+    "rule": "R6",
+    "input": {
+      "limit": 2,
+      "in_flight": 3
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "concurrency_limit_exceeded"
+    }
+  },
+  {
+    "id": "r6-zero-limit",
+    "rule": "R6",
+    "input": {
+      "limit": 0,
+      "in_flight": 0
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_configuration"
+    }
+  },
+  {
+    "id": "r6-missing-limit",
+    "rule": "R6",
+    "input": {
+      "in_flight": 0
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_configuration"
+    }
+  },
+  {
+    "id": "r6-fractional-limit",
+    "rule": "R6",
+    "input": {
+      "limit": 1.5,
+      "in_flight": 0
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_configuration"
+    }
+  },
+  {
+    "id": "r6-negative-in-flight",
+    "rule": "R6",
+    "input": {
+      "limit": 2,
+      "in_flight": -1
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input"
+    }
+  },
+  {
+    "id": "r6-missing-in-flight",
+    "rule": "R6",
+    "input": {
+      "limit": 2
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input"
+    }
+  },
+  {
+    "id": "r7-admission-before",
+    "rule": "R7",
+    "input": {
+      "phase": "admission",
+      "deadline_ms": 1000,
+      "now_ms": 999
+    },
+    "expected": {
+      "outcome": "admit",
+      "reason": null,
+      "result_discarded": false
+    }
+  },
+  {
+    "id": "r7-admission-at",
+    "rule": "R7",
+    "input": {
+      "phase": "admission",
+      "deadline_ms": 1000,
+      "now_ms": 1000
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "deadline_exceeded",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-admission-after",
+    "rule": "R7",
+    "input": {
+      "phase": "admission",
+      "deadline_ms": 1000,
+      "now_ms": 1001
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "deadline_exceeded",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-response-before",
+    "rule": "R7",
+    "input": {
+      "phase": "response",
+      "deadline_ms": 1000,
+      "now_ms": 999
+    },
+    "expected": {
+      "outcome": "completed",
+      "reason": null,
+      "result_discarded": false
+    }
+  },
+  {
+    "id": "r7-response-at",
+    "rule": "R7",
+    "input": {
+      "phase": "response",
+      "deadline_ms": 1000,
+      "now_ms": 1000
+    },
+    "expected": {
+      "outcome": "deadline_exceeded",
+      "reason": "deadline_exceeded",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-response-after",
+    "rule": "R7",
+    "input": {
+      "phase": "response",
+      "deadline_ms": 1000,
+      "now_ms": 1001
+    },
+    "expected": {
+      "outcome": "deadline_exceeded",
+      "reason": "deadline_exceeded",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-unknown-phase",
+    "rule": "R7",
+    "input": {
+      "phase": "other",
+      "deadline_ms": 1000,
+      "now_ms": 999
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-missing-deadline",
+    "rule": "R7",
+    "input": {
+      "phase": "admission",
+      "now_ms": 999
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-missing-now",
+    "rule": "R7",
+    "input": {
+      "phase": "response",
+      "deadline_ms": 1000
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-negative-time",
+    "rule": "R7",
+    "input": {
+      "phase": "response",
+      "deadline_ms": 1000,
+      "now_ms": -1
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input",
+      "result_discarded": true
+    }
+  },
+  {
+    "id": "r7-missing-phase",
+    "rule": "R7",
+    "input": {
+      "deadline_ms": 1000,
+      "now_ms": 999
+    },
+    "expected": {
+      "outcome": "reject",
+      "reason": "invalid_input",
+      "result_discarded": true
+    }
+  }
+]
