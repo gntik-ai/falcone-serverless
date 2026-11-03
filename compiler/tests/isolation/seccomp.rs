@@ -127,16 +127,28 @@ fn compiled_filter_blocks_pathname_ipc_parent_limits_and_metadata_changes() {
     let denied: &[u32] = if generic {
         &[
             200, 203, 211, 269, 52, 53, 452, 54, 55, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 88,
-            463, 464, 465, 466,
+            463, 464, 465, 466, 468, 469,
         ]
     } else {
         &[
             42, 49, 46, 307, 90, 91, 268, 452, 92, 93, 94, 260, 188, 189, 190, 191, 192, 193, 194,
-            195, 196, 197, 198, 199, 280, 261, 463, 464, 465, 466,
+            195, 196, 197, 198, 199, 280, 261, 463, 464, 465, 466, 468, 469,
         ]
     };
     for &nr in denied {
         assert_eq!(result(&programs, nr, [0; 6]), 0x50001, "syscall {nr}");
+    }
+    // file_getattr/file_setattr(AT_FDCWD, path, buffer, usize, at_flags) stay denied with real arguments.
+    for nr in [468, 469] {
+        assert_eq!(
+            result(&programs, nr, [0xffff_ff9c, 0x7000, 0x7100, 24, 0, 0]),
+            0x50001,
+            "syscall {nr} with arguments"
+        );
+    }
+    // Neighbours of 468/469 that are not listed keep the default Allow verdict.
+    for nr in [467, 470] {
+        assert_eq!(result(&programs, nr, [0; 6]), 0x7fff0000, "syscall {nr}");
     }
     let sendto = if generic { 206 } else { 44 };
     assert_eq!(result(&programs, sendto, [3, 0, 0, 0, 0, 0]), 0x7fff0000);
@@ -157,8 +169,24 @@ fn installed_filter_protects_parent_limits_and_workspace_metadata() {
     let root = TempRoot::new();
     std::fs::create_dir(root.0.join("workspace")).unwrap();
     let before = std::fs::metadata(&root.0).unwrap();
+    let flags_before = inode_flags(&root.0);
     let path = root.0.clone();
     let parent = std::process::id().to_string();
+    // Negative control, before any filter is installed: the read-only file_getattr probe is
+    // well-formed. Its verdict depends on the kernel and filesystem, so it is reported.
+    // file_setattr is never run unfiltered, because it would rewrite the parent's flags.
+    let control = std::process::Command::new("/usr/bin/python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/isolation/metadata.py"
+        ))
+        .arg(&path)
+        .arg(&parent)
+        .arg("control")
+        .output()
+        .unwrap();
+    assert!(control.status.success(), "{control:?}");
+    eprintln!("{}", String::from_utf8_lossy(&control.stdout).trim_end());
     let status = std::thread::spawn(move || {
         for program in SeccompPlan::for_host().unwrap().compile().unwrap() {
             seccompiler::apply_filter(&program).unwrap();
@@ -193,6 +221,20 @@ fn installed_filter_protects_parent_limits_and_workspace_metadata() {
             before.mtime_nsec()
         )
     );
+    match (flags_before, inode_flags(&root.0)) {
+        (Ok(before), Ok(after)) => assert_eq!(before, after, "inode attribute flags changed"),
+        (Err(reason), _) | (_, Err(reason)) => {
+            eprintln!("SKIPPED inode attribute flag comparison: {reason}")
+        }
+    }
+}
+
+/// Inode attribute flags through FS_IOC_GETFLAGS, or the reason the filesystem cannot report them.
+fn inode_flags(path: &std::path::Path) -> Result<u32, String> {
+    let directory = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    rustix::fs::ioctl_getflags(&directory)
+        .map(|flags| flags.bits())
+        .map_err(|e| format!("FS_IOC_GETFLAGS: {e}"))
 }
 
 #[test]
