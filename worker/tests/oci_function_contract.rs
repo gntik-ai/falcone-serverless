@@ -766,6 +766,8 @@ mod synthetic {
         pub latency: Duration,
         /// Pids whose fd directories refuse to be read.
         pub locked: BTreeSet<i32>,
+        /// The TMPDIR the candidate was started with.
+        pub scratch: Option<std::path::PathBuf>,
         /// Tasks that are listed but gone by the time they are read.
         pub ghosts: BTreeSet<(i32, i32)>,
         handles: BTreeMap<u64, i32>,
@@ -1013,8 +1015,19 @@ mod synthetic {
                 Ok(format!("socket:[{inode}]"))
             })
         }
-        fn spawn(&self, _command: &mut std::process::Command) -> io::Result<(i32, u64)> {
+        fn spawn(&self, command: &mut std::process::Command) -> io::Result<(i32, u64)> {
+            let scratch = command
+                .get_envs()
+                .find(|(key, _)| *key == "TMPDIR")
+                .and_then(|(_, value)| value.map(std::path::PathBuf::from));
             self.operate("spawn".into(), |w| {
+                // The candidate writes to its scratch directory, as it is allowed to.
+                for n in 0..3 {
+                    if let Some(dir) = &scratch {
+                        let _ = std::fs::write(dir.join(format!("candidate-{n}")), b"x");
+                    }
+                }
+                w.scratch = scratch;
                 let pid = w.fork(ME);
                 w.handles.insert(w.next_handle, pid);
                 w.next_handle += 1;
@@ -1503,7 +1516,7 @@ fn check_process_ends_within_deadline_plus_kill_settle_even_when_the_candidate_r
 }
 
 #[test]
-fn scratch_removal_runs_out_of_time_as_the_deadline_error() {
+fn scratch_removal_runs_out_of_time_once_and_drop_does_not_restart_it() {
     let mut probe = contract::FilesystemProbe::new().unwrap();
     for n in 0..20 {
         fs::write(probe.scratch().join(format!("entry-{n}")), b"x").unwrap();
@@ -1513,15 +1526,114 @@ fn scratch_removal_runs_out_of_time_as_the_deadline_error() {
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     drop(probe);
     assert!(
-        !root.exists(),
-        "Drop must still clean up what remove_tree could not"
+        root.join("scratch/entry-0").exists(),
+        "Drop restarted a removal that had already run out of time"
     );
+    fs::remove_dir_all(&root).unwrap();
+
+    // A probe whose deadline has passed never starts an unbounded traversal either.
+    let probe = contract::FilesystemProbe::new_until(Instant::now()).unwrap();
+    fs::write(probe.scratch().join("entry"), b"x").unwrap();
+    let root = probe.root().to_path_buf();
+    drop(probe);
+    assert!(root.join("scratch/entry").exists());
+    fs::remove_dir_all(&root).unwrap();
 
     let mut probe = contract::FilesystemProbe::new().unwrap();
     fs::write(probe.scratch().join("entry"), b"x").unwrap();
     let root = probe.root().to_path_buf();
     probe.remove_tree(deadline_in(30)).unwrap();
     assert!(!root.exists());
+
+    // Within its deadline Drop still cleans up after an earlier failure.
+    let probe = contract::FilesystemProbe::new_until(deadline_in(30)).unwrap();
+    fs::write(probe.scratch().join("entry"), b"x").unwrap();
+    let root = probe.root().to_path_buf();
+    drop(probe);
+    assert!(!root.exists());
+}
+
+#[test]
+fn cleanup_crossing_the_deadline_is_the_timeout_within_the_wall_time_bound() {
+    let fake = Fake::new();
+    fake.with(|w| {
+        // The candidate has a descendant; reaping it is slow enough to exhaust both the
+        // kill settle time and the check deadline.
+        w.on("spawn", false, |w| {
+            w.fork(100);
+        });
+        w.on("reap 1", false, |_| {
+            thread::sleep(Duration::from_millis(1500))
+        });
+    });
+    let start = Instant::now();
+    let result = contract::check_process_with(
+        Box::new(fake.clone()),
+        free_port(),
+        std::ffi::OsStr::new("/bin/true"),
+        &[],
+        deadline_in(4),
+    );
+    let spent = start.elapsed();
+    assert_eq!(
+        result.expect_err("deadline error").kind(),
+        std::io::ErrorKind::TimedOut,
+        "a cleanup failure after the deadline must be the deadline error"
+    );
+    assert!(spent >= Duration::from_secs(4), "{spent:?}");
+    assert!(
+        spent < Duration::from_secs(4) + contract::KILL_SETTLE + Duration::from_secs(1),
+        "{spent:?}"
+    );
+    // The scratch removal ran out of time with the check; Drop did not start it again.
+    let scratch = fake.with(|w| w.scratch.clone()).expect("candidate scratch");
+    assert!(
+        scratch.join("candidate-0").exists(),
+        "Drop restarted scratch removal after the deadline"
+    );
+    fs::remove_dir_all(scratch.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn handle_opened_as_the_cleanup_settle_time_runs_out_is_still_killed() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let descendant = fake.with(|w| {
+        let descendant = w.fork(100);
+        // Acquiring the handle takes longer than the settle time allows.
+        w.on(&format!("open {descendant}"), false, |_| {
+            thread::sleep(contract::KILL_SETTLE + Duration::from_millis(200))
+        });
+        descendant
+    });
+    let error = child.cleanup().unwrap_err();
+    assert!(error.to_string().contains("cleanup"), "{error}");
+    assert!(
+        fake.with(|w| w.killed(descendant)),
+        "a handle opened successfully was discarded without SIGKILL"
+    );
+}
+
+#[test]
+fn failing_to_retain_the_spawned_child_kills_and_reaps_it_within_the_settle_time() {
+    let _serial = serial();
+    let mut command = Command::new("/bin/sleep");
+    command.arg("60");
+    let spawned = std::cell::Cell::new(0);
+    let start = Instant::now();
+    let error = contract::spawn_retained(&mut command, |pid| {
+        spawned.set(pid);
+        Err(std::io::Error::other("pidfd_open refused"))
+    })
+    .unwrap_err();
+    assert!(error.to_string().contains("pidfd_open refused"), "{error}");
+    assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
+    let pid = rustix::process::Pid::from_raw(spawned.get()).expect("spawned");
+    assert!(
+        rustix::process::test_kill_process(pid).is_err(),
+        "child was left running or unreaped"
+    );
 }
 
 fn post_deadline(port: u16, deadline: &str) -> u16 {

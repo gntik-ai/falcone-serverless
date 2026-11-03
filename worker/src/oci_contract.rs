@@ -10,7 +10,9 @@
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
 //! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
 //! Signals go only through pidfds opened while the process was provably ours, never to a
-//! numeric PID or process group.
+//! numeric PID or process group. Scratch removal runs once, inside that deadline; when the
+//! deadline passes first, the scratch directory is left behind rather than removed on a new
+//! budget by a destructor.
 //!
 //! # Residual risk (not detected here)
 //!
@@ -728,8 +730,39 @@ pub fn check_process_until(
     args: &[OsString],
     deadline: Instant,
 ) -> io::Result<Diagnostics> {
-    let mut probe = FilesystemProbe::new()?;
-    let table = Box::new(RealTable::default());
+    check_process_with(
+        Box::new(RealTable::default()),
+        port,
+        executable,
+        args,
+        deadline,
+    )
+}
+
+/// [`check_process_until`] over any process table. An infrastructure error that arrives
+/// once the deadline has passed is the deadline error.
+pub fn check_process_with(
+    table: Box<dyn ProcessTable>,
+    port: u16,
+    executable: &OsStr,
+    args: &[OsString],
+    deadline: Instant,
+) -> io::Result<Diagnostics> {
+    match process_phases(table, port, executable, args, deadline) {
+        Err(_) if Instant::now() >= deadline => Err(deadline_error()),
+        result => result,
+    }
+}
+
+fn process_phases(
+    table: Box<dyn ProcessTable>,
+    port: u16,
+    executable: &OsStr,
+    args: &[OsString],
+    deadline: Instant,
+) -> io::Result<Diagnostics> {
+    // Declared first, dropped last: the candidate is killed before the scratch tree goes.
+    let mut probe = FilesystemProbe::new_until(deadline)?;
     let mut child = Candidate::spawn_until(table, port, executable, args, &probe, deadline)?;
     let mut diagnostics = check_http_until(port, deadline);
     ensure(deadline)?;
@@ -784,10 +817,17 @@ fn stamp(path: &Path) -> io::Result<Stamp> {
 pub struct FilesystemProbe {
     root: PathBuf,
     baseline: Option<(Stamp, Stamp)>,
+    /// Scratch removal has been attempted; it is never started again.
     removed: bool,
+    /// The check's deadline, which also bounds the removal run by Drop.
+    deadline: Instant,
 }
 impl FilesystemProbe {
     pub fn new() -> io::Result<Self> {
+        Self::new_until(Instant::now() + CHECK_BUDGET)
+    }
+    /// `deadline` bounds every removal of the scratch tree, Drop's included.
+    pub fn new_until(deadline: Instant) -> io::Result<Self> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let mut root = None;
         for _ in 0..32 {
@@ -809,6 +849,7 @@ impl FilesystemProbe {
             root: root.ok_or_else(|| io::Error::other("cannot allocate private temp directory"))?,
             baseline: None,
             removed: false,
+            deadline,
         };
         fs::create_dir(probe.sentinel())?;
         fs::create_dir(probe.scratch())?;
@@ -842,40 +883,39 @@ impl FilesystemProbe {
         Ok(fs::read(sentinel.join("unchanged"))? == b"unchanged\n")
     }
     /// Removes the scratch tree, checking `deadline` before every entry. Other failures are
-    /// not a verdict (the entry stays behind); the deadline is.
+    /// not a verdict (the entry stays behind); the deadline is. Runs out of time at most
+    /// once: whatever was left behind is not retried by Drop.
     pub fn remove_tree(&mut self, deadline: Instant) -> io::Result<()> {
-        fn sweep(path: &Path, deadline: Instant) -> io::Result<()> {
-            ensure(deadline)?;
-            match fs::symlink_metadata(path) {
-                Ok(meta) if meta.is_dir() => {
-                    let _ = fs::set_permissions(
-                        path,
-                        std::os::unix::fs::PermissionsExt::from_mode(0o700),
-                    );
-                    if let Ok(entries) = fs::read_dir(path) {
-                        for entry in entries.flatten() {
-                            sweep(&entry.path(), deadline)?;
-                        }
-                    }
-                    let _ = fs::remove_dir(path);
-                }
-                Ok(_) => {
-                    let _ = fs::remove_file(path);
-                }
-                Err(_) => {}
-            }
-            Ok(())
-        }
-        sweep(&self.root, deadline)?;
         self.removed = true;
-        Ok(())
+        sweep(&self.root, deadline)
     }
 }
 
+fn sweep(path: &Path, deadline: Instant) -> io::Result<()> {
+    ensure(deadline)?;
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => {
+            let _ = fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+            if let Ok(entries) = fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    sweep(&entry.path(), deadline)?;
+                }
+            }
+            let _ = fs::remove_dir(path);
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(path);
+        }
+        Err(_) => {}
+    }
+    Ok(())
+}
+
 impl Drop for FilesystemProbe {
+    /// Removal that did not already run, on the check's deadline and no new budget.
     fn drop(&mut self) {
         if !self.removed {
-            let _ = fs::remove_dir_all(&self.root);
+            let _ = self.remove_tree(self.deadline);
         }
     }
 }
@@ -935,17 +975,7 @@ impl ProcessTable for RealTable {
         use rustix::process::{Pid, set_child_subreaper};
         // Adopt orphaned descendants so cleanup can find and reap them.
         set_child_subreaper(Some(Pid::from_raw(1).unwrap()))?;
-        let mut child = command.spawn()?;
-        let pid = child.id() as i32;
-        // The unreaped child keeps its pid reserved, so this pidfd names the right process.
-        match self.retain(pid) {
-            Ok(handle) => Ok((pid, handle)),
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                Err(error)
-            }
-        }
+        spawn_retained(command, |pid| self.retain(pid))
     }
     fn open(&self, pid: i32) -> io::Result<u64> {
         self.retain(pid)
@@ -983,6 +1013,34 @@ impl ProcessTable for RealTable {
             handles.remove(&handle);
         }
         Ok(gone)
+    }
+}
+
+/// Starts the command and retains its handle. When the handle cannot be had the child is
+/// SIGKILLed and reaped, waiting at most [`KILL_SETTLE`]; this precedes `Candidate`
+/// ownership, so nothing else will clean it up.
+pub fn spawn_retained(
+    command: &mut std::process::Command,
+    retain: impl FnOnce(i32) -> io::Result<u64>,
+) -> io::Result<(i32, u64)> {
+    let mut child = command.spawn()?;
+    let pid = child.id() as i32;
+    // The unreaped child keeps its pid reserved, so a handle opened now names this process.
+    match retain(pid) {
+        Ok(handle) => Ok((pid, handle)),
+        Err(error) => {
+            let _ = child.kill();
+            let settle = Instant::now() + KILL_SETTLE;
+            while !matches!(child.try_wait(), Ok(Some(_))) {
+                if Instant::now() >= settle {
+                    return Err(io::Error::other(format!(
+                        "{error}; candidate was not reaped within the kill settle time"
+                    )));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(error)
+        }
     }
 }
 
@@ -1472,7 +1530,10 @@ impl Candidate {
             if self.handles.contains_key(pid) {
                 continue;
             }
-            match after(deadline, self.table.open(*pid))? {
+            // A handle that was opened is retained (and killed when asked) before the
+            // deadline is looked at: expiry never discards it.
+            let opened = self.table.open(*pid);
+            match opened {
                 Ok(handle) => {
                     self.handles.insert(*pid, handle);
                     if kill {
@@ -1480,6 +1541,9 @@ impl Candidate {
                     }
                 }
                 Err(_) => complete = false,
+            }
+            if Instant::now() >= deadline {
+                return Err(Scan::Deadline);
             }
         }
         Ok(complete.then_some(pids.len()))
