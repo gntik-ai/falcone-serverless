@@ -307,7 +307,6 @@ fn read_response(
 ) -> Result<HttpResponse, HostError> {
     let cap = limits.host_to_guest_bytes();
     let mut buffer: Vec<u8> = Vec::new();
-    let mut eof = false;
     let mut fill = |buffer: &mut Vec<u8>| -> Result<bool, HostError> {
         loop {
             stop_check(control)?;
@@ -372,13 +371,8 @@ fn read_response(
     let body = if no_body {
         Vec::new()
     } else if chunked {
-        loop {
-            match decode_chunked(&buffer[body_start..], body_cap)? {
-                Some(body) => break body,
-                None if eof => return Err(HostError::Denied),
-                None => eof = !fill(&mut buffer)?,
-            }
-        }
+        buffer.drain(..body_start);
+        read_chunked(&mut buffer, body_cap, &mut fill)?
     } else if let Some(length) = length {
         limits.check_response(header_bytes.saturating_add(length))?;
         while buffer.len() - body_start < length {
@@ -409,28 +403,66 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// `Ok(None)` while the chunked body is incomplete.
-fn decode_chunked(mut input: &[u8], cap: usize) -> Result<Option<Vec<u8>>, HostError> {
+/// Longest chunk-size line (size plus extensions) or trailer line the gate buffers.
+const MAX_FRAMING_LINE: usize = 1024;
+
+/// Decodes a chunked body incrementally. Consumed bytes leave `buffer` at once, so it never
+/// holds more than the chunk being read or one framing line, and the total framing the server
+/// may send is bounded by `cap` as well: a stream of extensions or trailers cannot grow
+/// memory or hold the call until its deadline.
+fn read_chunked(
+    buffer: &mut Vec<u8>,
+    cap: usize,
+    fill: &mut dyn FnMut(&mut Vec<u8>) -> Result<bool, HostError>,
+) -> Result<Vec<u8>, HostError> {
     let mut body = Vec::new();
+    let mut framing = 0usize;
+    let mut take_line = |buffer: &mut Vec<u8>,
+                         fill: &mut dyn FnMut(&mut Vec<u8>) -> Result<bool, HostError>|
+     -> Result<Vec<u8>, HostError> {
+        loop {
+            if let Some(end) = find(buffer, b"\r\n") {
+                framing = framing.saturating_add(end + 2);
+                if framing > cap {
+                    return Err(HostError::LimitExceeded);
+                }
+                let line = buffer[..end].to_vec();
+                buffer.drain(..end + 2);
+                return Ok(line);
+            }
+            if buffer.len() > MAX_FRAMING_LINE {
+                return Err(HostError::LimitExceeded);
+            }
+            if !fill(buffer)? {
+                return Err(HostError::Denied);
+            }
+        }
+    };
     loop {
-        let Some(line_end) = find(input, b"\r\n") else {
-            return Ok(None);
-        };
-        let size_text = std::str::from_utf8(&input[..line_end]).map_err(|_| HostError::Denied)?;
-        let size_text = size_text.split(';').next().unwrap_or_default().trim();
+        let line = take_line(buffer, fill)?;
+        if line.len() > MAX_FRAMING_LINE {
+            return Err(HostError::LimitExceeded);
+        }
+        let text = std::str::from_utf8(&line).map_err(|_| HostError::Denied)?;
+        let size_text = text.split(';').next().unwrap_or_default().trim();
         let size = usize::from_str_radix(size_text, 16).map_err(|_| HostError::Denied)?;
-        input = &input[line_end + 2..];
         if size == 0 {
             // Trailers are not carried; the terminator is the blank line after them.
-            return Ok((find(input, b"\r\n").is_some()).then_some(body));
+            while !take_line(buffer, fill)?.is_empty() {}
+            return Ok(body);
         }
         if body.len().saturating_add(size) > cap {
             return Err(HostError::LimitExceeded);
         }
-        if input.len() < size + 2 {
-            return Ok(None);
+        while buffer.len() < size + 2 {
+            if !fill(buffer)? {
+                return Err(HostError::Denied);
+            }
         }
-        body.extend_from_slice(&input[..size]);
-        input = &input[size + 2..];
+        if &buffer[size..size + 2] != b"\r\n" {
+            return Err(HostError::Denied);
+        }
+        body.extend_from_slice(&buffer[..size]);
+        buffer.drain(..size + 2);
     }
 }

@@ -12,14 +12,17 @@ use std::time::Duration;
 const CHILD: &str = env!("CARGO_BIN_EXE_artifact-compile-child");
 
 fn small() -> Vec<u8> {
-    wat::parse_str(include_str!("fixtures/was-02/allowed.wat")).unwrap()
+    wat::parse_str(include_str!(
+        "../src/qualification/gate_fixtures/allowed.wat"
+    ))
+    .unwrap()
 }
 
 /// Deterministically expanded, never instantiated: compile time and memory scale with it.
 fn heavy() -> Vec<u8> {
     let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
-    let function =
-        include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
+    let function = include_str!("../src/qualification/gate_fixtures/heavy-function.wat")
+        .replace(";; OPERATIONS", &body);
     wat::parse_str(format!(
         "(component (core module {}))",
         function.repeat(128)

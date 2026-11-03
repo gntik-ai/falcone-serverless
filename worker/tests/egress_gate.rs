@@ -58,6 +58,16 @@ type Reply = Result<falcone_serverless_worker::host::egress::HttpResponse, HostE
 
 /// Fetches from `port`, with every port in `granted` allow-listed on the loopback literal.
 fn fetch_from(port: u16, granted: &[u16], extra: &[(&str, &str)], method: &str) -> Reply {
+    fetch_limited(port, granted, extra, method, &HostLimits::default())
+}
+
+fn fetch_limited(
+    port: u16,
+    granted: &[u16],
+    extra: &[(&str, &str)],
+    method: &str,
+    limits: &HostLimits,
+) -> Reply {
     let hosts: Vec<String> = granted.iter().map(|p| format!("127.0.0.1:{p}")).collect();
     let grants = GrantSet::from_manifest(&json!([{
         "family": "http", "interface": "falcone:host/http@0.1.0", "scope": {"hosts": hosts}
@@ -71,7 +81,7 @@ fn fetch_from(port: u16, granted: &[u16], extra: &[(&str, &str)], method: &str) 
         &NoNames,
         &TcpConnector,
         &grants,
-        &HostLimits::default(),
+        limits,
         HttpRequest {
             url: format!("http://127.0.0.1:{port}/start"),
             method: method.to_owned(),
@@ -302,4 +312,77 @@ fn a_cancelled_or_expired_call_never_connects() {
         HostError::Timeout
     );
     assert!(heads.lock().unwrap().is_empty());
+}
+
+/// Wire bytes the adversarial servers stream; far above the 64 KiB ceiling the tests set.
+const FLOOD: usize = 4 * 1024 * 1024;
+const SMALL_CEILING: usize = 64 * 1024;
+
+fn small_limits() -> HostLimits {
+    HostLimits::new(SMALL_CEILING, SMALL_CEILING, Duration::from_secs(10))
+}
+
+#[test]
+fn an_endless_chunk_extension_line_hits_the_byte_ceiling() {
+    let flood = format!("5;{}", "a".repeat(FLOOD));
+    let Some((port, _)) = serve(vec![response(
+        "200 OK",
+        "Transfer-Encoding: chunked\r\n",
+        &flood,
+    )]) else {
+        return;
+    };
+    assert_eq!(
+        fetch_limited(port, &[port], &[], "GET", &small_limits()).unwrap_err(),
+        HostError::LimitExceeded
+    );
+}
+
+#[test]
+fn endless_chunk_trailers_hit_the_byte_ceiling() {
+    let flood = format!("0\r\nX-Trailer: {}", "a".repeat(FLOOD));
+    let Some((port, _)) = serve(vec![response(
+        "200 OK",
+        "Transfer-Encoding: chunked\r\n",
+        &flood,
+    )]) else {
+        return;
+    };
+    assert_eq!(
+        fetch_limited(port, &[port], &[], "GET", &small_limits()).unwrap_err(),
+        HostError::LimitExceeded
+    );
+}
+
+#[test]
+fn a_chunk_larger_than_the_ceiling_is_rejected_from_its_size_line() {
+    let Some((port, _)) = serve(vec![response(
+        "200 OK",
+        "Transfer-Encoding: chunked\r\n",
+        &format!("{:x}\r\nabc", SMALL_CEILING * 2),
+    )]) else {
+        return;
+    };
+    assert_eq!(
+        fetch_limited(port, &[port], &[], "GET", &small_limits()).unwrap_err(),
+        HostError::LimitExceeded
+    );
+}
+
+#[test]
+fn many_small_chunks_and_trailers_within_the_ceiling_are_decoded() {
+    let body: String = (0..2000).map(|_| "1\r\nx\r\n").collect();
+    let Some((port, _)) = serve(vec![response(
+        "200 OK",
+        "Transfer-Encoding: chunked\r\n",
+        &format!("{body}0\r\nX-Sum: 1\r\n\r\n"),
+    )]) else {
+        return;
+    };
+    assert_eq!(
+        fetch_limited(port, &[port], &[], "GET", &small_limits())
+            .unwrap()
+            .body,
+        vec![b'x'; 2000]
+    );
 }

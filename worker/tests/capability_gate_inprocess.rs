@@ -11,17 +11,24 @@ use std::path::Path;
 
 fn fixtures() -> Fixtures {
     Fixtures {
-        allowed: include_str!("fixtures/was-02/allowed.wat"),
-        heavy_function: include_str!("fixtures/was-02/heavy-function.wat"),
-        baseline_only: include_str!("fixtures/was-02/baseline-only.wat"),
-        imports_wasi_filesystem: include_str!("fixtures/was-02/imports-wasi-filesystem.wat"),
-        imports_wasi_sockets: include_str!("fixtures/was-02/imports-wasi-sockets.wat"),
-        imports_wasi_environment: include_str!("fixtures/was-02/imports-wasi-environment.wat"),
-        ungranted_storage: include_str!("fixtures/was-02/ungranted-storage.wat"),
-        storage: include_str!("fixtures/was-02/storage.wat"),
-        events: include_str!("fixtures/was-02/events.wat"),
-        workflows: include_str!("fixtures/was-02/workflows.wat"),
-        http: include_str!("fixtures/was-02/http.wat"),
+        allowed: include_str!("../src/qualification/gate_fixtures/allowed.wat"),
+        heavy_function: include_str!("../src/qualification/gate_fixtures/heavy-function.wat"),
+        baseline_only: include_str!("../src/qualification/gate_fixtures/baseline-only.wat"),
+        imports_wasi_filesystem: include_str!(
+            "../src/qualification/gate_fixtures/imports-wasi-filesystem.wat"
+        ),
+        imports_wasi_sockets: include_str!(
+            "../src/qualification/gate_fixtures/imports-wasi-sockets.wat"
+        ),
+        imports_wasi_environment: include_str!(
+            "../src/qualification/gate_fixtures/imports-wasi-environment.wat"
+        ),
+        ungranted_storage: include_str!("../src/qualification/gate_fixtures/ungranted-storage.wat"),
+        storage: include_str!("../src/qualification/gate_fixtures/storage.wat"),
+        events: include_str!("../src/qualification/gate_fixtures/events.wat"),
+        workflows: include_str!("../src/qualification/gate_fixtures/workflows.wat"),
+        http: include_str!("../src/qualification/gate_fixtures/http.wat"),
+        sinks: include_str!("../src/qualification/gate_fixtures/sinks.wat"),
     }
 }
 

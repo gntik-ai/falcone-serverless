@@ -19,7 +19,10 @@ fn bounded_transfer_preserves_destination_on_rejection() {
 }
 
 fn small() -> Vec<u8> {
-    wat::parse_str(include_str!("fixtures/was-02/allowed.wat")).unwrap()
+    wat::parse_str(include_str!(
+        "../src/qualification/gate_fixtures/allowed.wat"
+    ))
+    .unwrap()
 }
 
 #[test]
@@ -228,8 +231,8 @@ fn heavy() -> &'static [u8] {
     static HEAVY: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     HEAVY.get_or_init(|| {
         let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
-        let function =
-            include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
+        let function = include_str!("../src/qualification/gate_fixtures/heavy-function.wat")
+            .replace(";; OPERATIONS", &body);
         wat::parse_str(format!(
             "(component (core module {}))",
             function.repeat(128)

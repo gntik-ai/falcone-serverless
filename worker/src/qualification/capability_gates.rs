@@ -18,7 +18,7 @@ use falcone_serverless_worker::compile_budget::{
 };
 use falcone_serverless_worker::host::HostError;
 use falcone_serverless_worker::host::bindings::{
-    BindingError, CallControl, EventBinding, LogSink, StorageBinding, WorkflowBinding,
+    BindingError, CallControl, EventBinding, LogSink, ProgressSink, StorageBinding, WorkflowBinding,
 };
 use falcone_serverless_worker::host::egress::{Connector, Resolver, TcpConnector};
 use falcone_serverless_worker::host::grant::GrantSet;
@@ -63,6 +63,7 @@ pub struct Fixtures {
     pub events: &'static str,
     pub workflows: &'static str,
     pub http: &'static str,
+    pub sinks: &'static str,
 }
 
 #[derive(Debug)]
@@ -103,6 +104,44 @@ impl LogSink for MockLogs {
     fn log(&self, _level: &str, message: &str, _fields: &[(String, String)]) {
         self.0.lock().unwrap().push(message.to_owned());
     }
+}
+
+/// Log and progress sinks that can stall, ignoring any deadline, until `release` is set.
+#[derive(Default)]
+pub struct MockSinks {
+    pub log_stall: bool,
+    pub progress_stall: bool,
+    pub release: AtomicBool,
+    pub logged: AtomicUsize,
+    pub reported: AtomicUsize,
+}
+
+impl MockSinks {
+    fn stall(&self) {
+        while !self.release.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl LogSink for MockSinks {
+    fn log(&self, _level: &str, _message: &str, _fields: &[(String, String)]) {
+        self.logged.fetch_add(1, Ordering::SeqCst);
+        if self.log_stall {
+            self.stall();
+        }
+    }
+}
+
+impl ProgressSink for MockSinks {
+    fn report(&self, _completed: u64, _total: u64, _message: &str) {
+        self.reported.fetch_add(1, Ordering::SeqCst);
+        if self.progress_stall {
+            self.stall();
+        }
+    }
+
+    fn checkpoint(&self, _key: &str) {}
 }
 
 #[derive(Default)]
@@ -976,7 +1015,85 @@ pub fn limits_and_deadlines_hold(fx: &Fixtures) -> Verdict {
     })?;
     cancelled.release.store(true, Ordering::SeqCst);
     wait_for(&cancelled.stopped, "the released binding thread to finish")?;
+    stalled_sinks_hit_the_deadline_and_cancellation(fx)?;
     oversized_http_response(fx)
+}
+
+/// The logging and progress interfaces carry the same 30000 ms deadline and cancellation as
+/// every other host call: a stalled sink cannot hold the guest.
+fn stalled_sinks_hit_the_deadline_and_cancellation(fx: &Fixtures) -> Verdict {
+    let deadline = Duration::from_millis(200);
+    let sinks_gate = |sinks: &Arc<MockSinks>| {
+        let caps = Capabilities {
+            logs: sinks.clone(),
+            progress: sinks.clone(),
+            ..Capabilities::default()
+        };
+        gate(grants(vec![])?, caps, HostLimits::new(MAX, MAX, deadline))
+    };
+    let healthy = Arc::new(MockSinks::default());
+    equal(run(&sinks_gate(&healthy)?, fx.sinks)?, 0, "healthy sinks")?;
+    equal(
+        (
+            healthy.logged.load(Ordering::SeqCst),
+            healthy.reported.load(Ordering::SeqCst),
+        ),
+        (1, 1),
+        "healthy sink calls",
+    )?;
+    for (log_stall, expected) in [
+        (true, host_error(0x100, HostError::Timeout)),
+        (false, host_error(0x200, HostError::Timeout)),
+    ] {
+        let sinks = Arc::new(MockSinks {
+            log_stall,
+            progress_stall: !log_stall,
+            ..MockSinks::default()
+        });
+        let started = Instant::now();
+        equal(
+            run(&sinks_gate(&sinks)?, fx.sinks)?,
+            expected,
+            "stalled sink",
+        )?;
+        let elapsed = started.elapsed();
+        sinks.release.store(true, Ordering::SeqCst);
+        ensure(elapsed <= deadline + DEADLINE_TOLERANCE, || {
+            format!("sink deadline overrun: {elapsed:?}")
+        })?;
+    }
+    let sinks = Arc::new(MockSinks {
+        progress_stall: true,
+        ..MockSinks::default()
+    });
+    let long = HostLimits::default();
+    let caps = Capabilities {
+        logs: sinks.clone(),
+        progress: sinks.clone(),
+        ..Capabilities::default()
+    };
+    let mut guest = guest(&gate(grants(vec![])?, caps, long)?, fx.sinks)?;
+    let token = guest.cancel_token();
+    let delay = Duration::from_millis(100);
+    let canceller = thread::spawn(move || {
+        thread::sleep(delay);
+        token.cancel();
+    });
+    let started = Instant::now();
+    let result = guest
+        .call_u32("run")
+        .map_err(|e| Failure::Failed(e.to_string()))?;
+    let _ = canceller.join();
+    let elapsed = started.elapsed();
+    sinks.release.store(true, Ordering::SeqCst);
+    equal(
+        result,
+        host_error(0x200, HostError::Cancelled),
+        "cancelled sink",
+    )?;
+    ensure(elapsed <= delay + DEADLINE_TOLERANCE, || {
+        format!("sink cancellation overrun: {elapsed:?}")
+    })
 }
 
 fn oversized_http_response(fx: &Fixtures) -> Verdict {

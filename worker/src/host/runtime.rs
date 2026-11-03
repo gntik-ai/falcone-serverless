@@ -327,8 +327,40 @@ impl HostState {
                 (f.name, value)
             })
             .collect();
-        self.caps.logs.log(level.name(), &message, &fields);
-        Ok(())
+        let logs = Arc::clone(&self.caps.logs);
+        let level = level.name();
+        self.bounded(move |_| {
+            logs.log(level, &message, &fields);
+            Ok(())
+        })
+    }
+
+    fn report_progress(
+        &mut self,
+        completed: u64,
+        total: u64,
+        message: String,
+    ) -> Result<(), HostError> {
+        self.limits.check_request(&[message.len()])?;
+        let progress = Arc::clone(&self.caps.progress);
+        self.bounded(move |_| {
+            progress.report(completed, total, &message);
+            Ok(())
+        })
+    }
+
+    fn report_checkpoint(&mut self, handle: &Resource<Checkpoint>) -> Result<(), HostError> {
+        let key = self
+            .table
+            .get(handle)
+            .map_err(|_| HostError::Denied)?
+            .0
+            .clone();
+        let progress = Arc::clone(&self.caps.progress);
+        self.bounded(move |_| {
+            progress.checkpoint(&key);
+            Ok(())
+        })
     }
 }
 
@@ -400,25 +432,14 @@ fn link_progress(linker: &mut Linker<HostState>) -> engine::Result<()> {
     let mut instance = linker.instance("falcone:host/progress@0.1.0")?;
     instance.func_wrap(
         "report",
-        |cx: StoreContextMut<HostState>, (completed, total, message): (u64, u64, String)| {
-            let state = cx.data();
-            let result = state
-                .limits
-                .check_request(&[message.len()])
-                .map(|()| state.caps.progress.report(completed, total, &message));
-            wire(result)
+        |mut cx: StoreContextMut<HostState>, (completed, total, message): (u64, u64, String)| {
+            wire(cx.data_mut().report_progress(completed, total, message))
         },
     )?;
     instance.func_wrap(
         "report-checkpoint",
-        |cx: StoreContextMut<HostState>, (handle,): (Resource<Checkpoint>,)| {
-            let state = cx.data();
-            let result = state
-                .table
-                .get(&handle)
-                .map_err(|_| HostError::Denied)
-                .map(|checkpoint| state.caps.progress.checkpoint(&checkpoint.0));
-            wire(result)
+        |mut cx: StoreContextMut<HostState>, (handle,): (Resource<Checkpoint>,)| {
+            wire(cx.data_mut().report_checkpoint(&handle))
         },
     )
 }
