@@ -51,7 +51,9 @@ Build with `cargo build -p falcone-serverless-worker --bins --locked`.
 Use a free port. The tester never connects outside 127.0.0.1. It exits 0 on
 conformance, 1 on rule violations (one `RULE-ID: diagnostic` line each), or 2
 on CLI/infrastructure errors. A failure to start the candidate is infrastructure,
-not evidence of contract conformance. HTTP I/O has an absolute 2 s budget per
+not evidence of contract conformance. A program that cannot be executed (not a regular file,
+or a missing interpreter or loader) is such a failure; so is a candidate that ends
+with status 126 or 127, the shell convention for it, before answering health. HTTP I/O has an absolute 2 s budget per
 request, bounded headers (16 KiB) and body (8 MB), with no unbounded read-to-EOF.
 A candidate that fails health does not receive further HTTP probes.
 Process cleanup always sends SIGKILL, through pidfds retained as each process of the

@@ -767,6 +767,10 @@ mod synthetic {
         pub raw_tcp_rows: Vec<String>,
         pub signals: Vec<(i32, Signal)>,
         pub latency: Duration,
+        /// Time one reap attempt takes.
+        pub reap_latency: Duration,
+        /// Exit status of a process that ended on its own.
+        pub statuses: BTreeMap<i32, i32>,
         /// Pids whose fd directories refuse to be read.
         pub locked: BTreeSet<i32>,
         /// The TMPDIR the candidate was started with.
@@ -1071,6 +1075,7 @@ mod synthetic {
         }
         fn reap(&self, handle: u64) -> io::Result<bool> {
             self.operate(format!("reap {handle}"), |w| {
+                std::thread::sleep(w.reap_latency);
                 let pid = w.handles[&handle];
                 let Some(proc) = w.procs.get(&pid) else {
                     w.handles.remove(&handle);
@@ -1086,6 +1091,15 @@ mod synthetic {
                 w.handles.remove(&handle);
                 Ok(true)
             })
+        }
+        fn exit_status(&self, handle: u64) -> io::Result<Option<i32>> {
+            let world = self.0.borrow();
+            let pid = world.handles[&handle];
+            Ok(world
+                .procs
+                .get(&pid)
+                .filter(|_| world.dead(pid))
+                .and_then(|_| world.statuses.get(&pid).copied()))
         }
     }
 }
@@ -1455,6 +1469,9 @@ fn terminate_that_reaps_the_child_leaves_drop_with_nothing_to_signal() {
         fn reap(&self, h: u64) -> std::io::Result<bool> {
             self.0.reap(h)
         }
+        fn exit_status(&self, h: u64) -> std::io::Result<Option<i32>> {
+            self.0.exit_status(h)
+        }
     }
     let _serial = serial();
     let log = Rc::new(RefCell::new(Vec::new()));
@@ -1620,14 +1637,14 @@ fn cleanup_crossing_the_deadline_is_the_timeout_within_the_wall_time_bound() {
 }
 
 #[test]
-fn handle_that_cannot_be_confirmed_before_the_settle_time_ends_is_never_signalled() {
+fn handle_opened_as_the_settle_time_ends_is_still_confirmed_killed_and_reaped() {
     let fake = Fake::new();
     let probe = contract::FilesystemProbe::new().unwrap();
     let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
     let descendant = fake.with(|w| {
         let descendant = w.fork(100);
-        // Acquiring the handle takes longer than the settle time allows, so there is no time
-        // left to confirm that the pid still names the process that was listed.
+        // Acquiring the handle takes longer than the settle time allows: the handle is open,
+        // so it is confirmed and killed anyway, and reaped in the last pass.
         w.on(&format!("open {descendant}"), false, |_| {
             thread::sleep(contract::KILL_SETTLE + Duration::from_millis(200))
         });
@@ -1637,10 +1654,150 @@ fn handle_that_cannot_be_confirmed_before_the_settle_time_ends_is_never_signalle
     let error = child.cleanup().unwrap_err();
     assert!(error.to_string().contains("cleanup"), "{error}");
     assert!(start.elapsed() < contract::KILL_SETTLE + Duration::from_secs(1));
+    fake.with(|w| {
+        assert!(w.killed(descendant), "an opened handle was discarded");
+        assert!(
+            w.procs.keys().all(|pid| *pid < 100),
+            "killed but not reaped: {:?}",
+            w.procs.keys()
+        );
+    });
+}
+
+#[test]
+fn confirmation_crossing_the_deadline_never_discards_an_opened_handle() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let descendant = fake.with(|w| {
+        let descendant = w.fork(100);
+        // The root died, so the descendant belongs to the tester now; its confirmation read of
+        // the tester's tasks is the one that crosses the settle time.
+        w.on(&format!("open {descendant}"), false, move |w| {
+            w.on("list /proc/10/task", false, |_| {
+                thread::sleep(contract::KILL_SETTLE + Duration::from_millis(200))
+            });
+        });
+        descendant
+    });
+    child.cleanup().unwrap_err();
+    fake.with(|w| {
+        assert!(w.killed(descendant), "an opened handle was discarded");
+        assert!(w.procs.keys().all(|pid| *pid < 100));
+    });
+}
+
+#[test]
+fn reaping_is_bounded_cumulatively_when_every_attempt_is_slow() {
+    let fake = Fake::new();
+    let probe = contract::FilesystemProbe::new().unwrap();
+    fake.with(|w| {
+        w.on("spawn", false, |w| {
+            for _ in 0..40 {
+                w.fork(100);
+            }
+        });
+    });
+    let mut child = candidate(&fake, &probe, deadline_in(60)).unwrap();
+    let retained: Vec<i32> = fake.with(|w| w.procs.keys().copied().filter(|p| *p >= 100).collect());
+    fake.with(|w| w.reap_latency = Duration::from_millis(300));
+    let start = Instant::now();
+    let error = child.cleanup().unwrap_err();
+    let spent = start.elapsed();
+    assert!(error.to_string().contains("cleanup"), "{error}");
+    // Forty-one attempts would take 12 s: the settle time, one attempt past it and the last
+    // pass bound it instead.
     assert!(
-        !fake.with(|w| w.killed(descendant)),
-        "an unconfirmed handle was signalled"
+        spent
+            < contract::KILL_SETTLE
+                + contract::FINAL_REAP
+                + Duration::from_millis(600)
+                + Duration::from_secs(1),
+        "{spent:?}"
     );
+    fake.with(|w| {
+        assert!(
+            retained.iter().all(|pid| w.killed(*pid)),
+            "a retained handle was not sent SIGKILL"
+        );
+    });
+    let signals = fake.with(|w| w.signals.len());
+    drop(child);
+    assert_eq!(fake.with(|w| w.signals.len()), signals);
+}
+
+#[test]
+fn candidate_that_cannot_be_executed_is_an_infrastructure_error_not_a_health_failure() {
+    let fake = Fake::new();
+    fake.with(|w| {
+        w.on("spawn", false, |w| {
+            w.statuses.insert(100, 127);
+            w.exit(100);
+        });
+    });
+    let error = contract::check_process_with(
+        Box::new(fake.clone()),
+        free_port(),
+        std::ffi::OsStr::new("/bin/true"),
+        &[],
+        deadline_in(60),
+    )
+    .expect_err("infrastructure error");
+    assert_ne!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        error.to_string().contains("could not be executed"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("127"), "{error}");
+}
+
+#[test]
+fn candidate_that_runs_and_fails_health_is_still_a_health_violation() {
+    let fake = Fake::new();
+    fake.with(|w| {
+        w.on("spawn", false, |w| {
+            w.statuses.insert(100, 1);
+            w.exit(100);
+        });
+    });
+    let diagnostics = contract::check_process_with(
+        Box::new(fake.clone()),
+        free_port(),
+        std::ffi::OsStr::new("/bin/true"),
+        &[],
+        deadline_in(60),
+    )
+    .unwrap();
+    assert!(
+        diagnostics.contains_key("OCI-V1-HEALTHZ"),
+        "{:?}",
+        *diagnostics
+    );
+}
+
+#[test]
+fn programs_that_cannot_be_executed_exit_with_infrastructure_status_two() {
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = serial();
+    let dir = tempfile_dir("no-exec");
+    let script = dir.join("script");
+    fs::write(&script, "#!/nonexistent/interpreter\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let directory = dir.join("directory");
+    fs::create_dir(&directory).unwrap();
+    for program in [&script, &directory] {
+        let output = tester(
+            Some(free_port()),
+            &["process", "--", program.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(2), "{}", program.display());
+        assert!(
+            String::from_utf8_lossy(&output.stdout).is_empty(),
+            "a start failure reported as a rule violation: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
 }
 
 /// Ends a process the test itself spawned, through a pidfd of its own.

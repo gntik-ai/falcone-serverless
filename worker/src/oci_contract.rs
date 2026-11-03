@@ -8,7 +8,7 @@
 //! tree, an unreadable or malformed `/proc` value, a tree or socket table that changes
 //! between the sample and its final consistency re-read, and a candidate it cannot kill
 //! and reap. One absolute deadline covers every phase of a process-mode check; the only
-//! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`].
+//! wait that may outlive it is the final reap after SIGKILL, bounded by [`KILL_SETTLE`] plus a last pass of at most [`FINAL_REAP`].
 //! Signals go only through pidfds, never to a numeric PID or process group: the candidate is
 //! held at a gate until its pidfd is open (see [`spawn_retained`]), so no candidate code
 //! runs, and no signal is needed, when a handle cannot be had. A pidfd is kept only after
@@ -454,6 +454,9 @@ pub const CHECK_BUDGET: Duration = Duration::from_secs(90);
 pub const TERM_GRACE: Duration = Duration::from_secs(10);
 /// The only wait that may end after the deadline: reaping what SIGKILL was sent to.
 pub const KILL_SETTLE: Duration = Duration::from_secs(1);
+/// The last reap pass after [`KILL_SETTLE`] ended: one attempt per retained handle, stopping
+/// at this bound, for processes whose SIGKILL was sent as the settle time ran out.
+pub const FINAL_REAP: Duration = Duration::from_millis(100);
 /// Full samples of the process tree before the binding check gives up as unstable.
 pub const MAX_SCANS: usize = 5;
 
@@ -769,6 +772,13 @@ fn process_phases(
     let mut child = Candidate::spawn_until(table, port, executable, args, &probe, deadline)?;
     let mut diagnostics = check_http_until(port, deadline);
     ensure(deadline)?;
+    if diagnostics.contains_key("OCI-V1-HEALTHZ")
+        && let Some(status) = child.start_failure()
+    {
+        return Err(io::Error::other(format!(
+            "candidate could not be executed (exit status {status})"
+        )));
+    }
     // Health failures must not cascade into fictitious binding failures.
     if !diagnostics.contains_key("OCI-V1-HEALTHZ") {
         diagnostics.extend(child.binding(port)?);
@@ -943,6 +953,9 @@ pub trait ProcessTable {
     /// True once the process is gone (reaped by us, or dead and left to its parent);
     /// the handle is released then.
     fn reap(&self, handle: u64) -> io::Result<bool>;
+    /// Exit status of a child of ours that has ended, read without reaping it; `None` while
+    /// it runs, when it was killed by a signal, or when it is not our child.
+    fn exit_status(&self, handle: u64) -> io::Result<Option<i32>>;
 }
 
 #[derive(Default)]
@@ -1024,6 +1037,21 @@ impl ProcessTable for RealTable {
         }
         Ok(gone)
     }
+    fn exit_status(&self, handle: u64) -> io::Result<Option<i32>> {
+        use rustix::process::{WaitId, WaitIdOptions, waitid};
+        let handles = self.handles.borrow();
+        let Some((_, fd)) = handles.get(&handle) else {
+            return Ok(None);
+        };
+        match waitid(
+            WaitId::PidFd(fd.as_fd()),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        ) {
+            Ok(status) => Ok(status.and_then(|status| status.exit_status())),
+            Err(rustix::io::Errno::CHILD | rustix::io::Errno::INTR) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
 }
 
 /// Releases a gated candidate: it reads one line from its stdin and only then runs the
@@ -1063,7 +1091,8 @@ pub fn spawn_retained(
 ) -> io::Result<(i32, u64)> {
     use std::{io::Write, os::unix::ffi::OsStringExt, os::unix::fs::PermissionsExt};
     let program = Path::new(command.get_program());
-    if fs::metadata(program)?.permissions().mode() & 0o111 == 0 {
+    let metadata = fs::metadata(program)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(io::Error::from(io::ErrorKind::PermissionDenied));
     }
     let mut gate = std::process::Command::new("/bin/sh");
@@ -1612,18 +1641,20 @@ impl Candidate {
 
     /// True when `pid` is listed as a child of `parent` or of the tester, read now. A child
     /// stays listed (even as a zombie) until its parent reaps it, so a pid that is listed
-    /// after its handle was opened cannot have been reused by an unrelated process.
-    fn still_a_child(&self, pid: i32, parent: i32, deadline: Instant) -> Result<bool, Scan> {
+    /// after its handle was opened cannot have been reused by an unrelated process. The reads
+    /// are a fixed, small number and are not cut short by the deadline: a handle that is open
+    /// is either confirmed and kept or proven foreign, never dropped for want of time.
+    fn still_a_child(&self, pid: i32, parent: i32) -> Result<bool, Scan> {
         for owner in [parent, self.table.me()] {
             let dir = format!("/proc/{owner}/task");
-            let tids = match after(deadline, self.table.list(&dir))? {
+            let tids = match self.table.list(&dir) {
                 Ok(names) => parse_ids(names)?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(Scan::Unstable(format!("{dir}: {error}"))),
             };
             for tid in tids {
                 let path = format!("{dir}/{tid}/children");
-                match after(deadline, self.table.read(&path))? {
+                match self.table.read(&path) {
                     Ok(text) => {
                         if parse_pids(&text)?.contains(&pid) {
                             return Ok(true);
@@ -1639,7 +1670,9 @@ impl Candidate {
 
     /// Retains a handle for every tree process not yet held. A handle counts only once the
     /// process is confirmed to still be in the tree after the handle was opened; one that
-    /// cannot be confirmed is released unsignalled. `Ok(None)` means the scan was incomplete,
+    /// is not in the tree (or cannot be read) is released unsignalled. Expiry of the deadline
+    /// is looked at after each process, so a confirmed handle is always kept (and killed when
+    /// asked) first. `Ok(None)` means the scan was incomplete,
     /// a process vanished or a handle could not be had or confirmed: not evidence of absence.
     fn discover(&mut self, deadline: Instant, kill: bool) -> Result<Option<usize>, Scan> {
         let seen = match walk(&*self.table, deadline, false) {
@@ -1658,9 +1691,7 @@ impl Candidate {
             match self.table.open(*pid) {
                 Ok(handle) => {
                     let parent = seen.parents.get(pid).copied().unwrap_or(self.table.me());
-                    // Confirmation stops at the deadline like every read; a handle that cannot
-                    // be confirmed in time is released unsignalled.
-                    let ours = matches!(self.still_a_child(*pid, parent, deadline), Ok(true));
+                    let ours = matches!(self.still_a_child(*pid, parent), Ok(true));
                     if ours {
                         self.handles.insert(*pid, handle);
                         if kill {
@@ -1710,12 +1741,12 @@ impl Candidate {
         }
     }
 
-    /// One non-blocking reap attempt per retained handle; true when any was reaped. With
-    /// `until` the attempts stop at that instant (always after trying the first handle).
-    fn reap_known(&mut self, until: Option<Instant>) -> bool {
+    /// One non-blocking reap attempt per retained handle; true when any was reaped. The
+    /// attempts stop at `until`, which is looked at before each handle.
+    fn reap_known(&mut self, until: Instant) -> bool {
         let mut reaped = false;
-        for (index, (pid, handle)) in self.handles.clone().into_iter().enumerate() {
-            if index > 0 && until.is_some_and(|until| Instant::now() >= until) {
+        for (pid, handle) in self.handles.clone() {
+            if Instant::now() >= until {
                 break;
             }
             if self.table.reap(handle).unwrap_or(false) {
@@ -1728,10 +1759,11 @@ impl Candidate {
 
     /// SIGKILL to every retained handle, then reap until a fresh scan of the tester's
     /// descendants, taken after the last reap, is empty. The kill is never skipped; the
-    /// wait for it is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not.
-    /// Retained handles are reaped before every scan, so processes already dead are collected
-    /// even when the scan then runs out of time. Runs at most once: Drop does not start a
-    /// second wait.
+    /// wait for it is bounded by [`KILL_SETTLE`] from the first SIGKILL, deadline or not,
+    /// plus one last reap pass of at most [`FINAL_REAP`] for what was killed as that time
+    /// ran out. Retained handles are reaped before every scan, so processes already dead are
+    /// collected even when the scan then runs out of time. Runs at most once: Drop does not
+    /// start a second wait.
     pub fn cleanup(&mut self) -> io::Result<()> {
         self.cleaned = true;
         let mut settle = None;
@@ -1740,25 +1772,36 @@ impl Candidate {
                 let _ = self.table.signal(*handle, Signal::KILL);
             }
             let settle = *settle.get_or_insert_with(|| Instant::now() + KILL_SETTLE);
-            let reaped = self.reap_known(Some(settle));
-            let found = self.discover(settle, true);
-            let Ok(found) = found else {
-                // Processes the scan just killed still get their reap attempt.
-                self.reap_known(None);
-                return Err(io::Error::other(
-                    "candidate cleanup did not finish within the kill settle time",
-                ));
+            let reaped = self.reap_known(settle);
+            let Ok(found) = self.discover(settle, true) else {
+                return Err(self.unsettled());
             };
             if found == Some(0) && !reaped && self.handles.is_empty() {
                 return Ok(());
             }
             if Instant::now() >= settle {
-                self.reap_known(None);
-                return Err(io::Error::other(
-                    "candidate cleanup did not finish within the kill settle time",
-                ));
+                return Err(self.unsettled());
             }
             thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Cleanup ran out of settle time: everything retained has been sent SIGKILL; give what
+    /// was killed last one bounded reap pass.
+    fn unsettled(&mut self) -> io::Error {
+        self.reap_known(Instant::now() + FINAL_REAP);
+        io::Error::other("candidate cleanup did not finish within the kill settle time")
+    }
+
+    /// When the candidate never got to run, the exit status of the process that tried to
+    /// start it: 126 or 127, the shell convention for a program that cannot be executed
+    /// (a directory, a missing interpreter or loader). A candidate that ends that way on its
+    /// own is reported the same way, as one that failed to start.
+    pub fn start_failure(&self) -> Option<i32> {
+        let handle = self.handles.get(&self.root)?;
+        match self.table.exit_status(*handle) {
+            Ok(Some(status @ (126 | 127))) => Some(status),
+            _ => None,
         }
     }
 }
