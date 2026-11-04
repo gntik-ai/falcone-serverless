@@ -95,6 +95,7 @@ fn fixture_names_valid(names: &[String]) -> bool {
             "capability-import.wat",
             "capability-logging.wat",
             "capability-storage.wat",
+            "capability-table.wat",
             "capability-workflows.wat",
             "infinite_loop.wat",
             "valid.wat",
