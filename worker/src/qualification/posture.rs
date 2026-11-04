@@ -1,4 +1,7 @@
-//! Static restricted-posture contract v1; never executes a workload.
+//! Restricted-posture contract v1 and separately wired worker capability host.
+
+#[path = "../host/mod.rs"]
+pub mod host;
 
 use serde_json::Value;
 

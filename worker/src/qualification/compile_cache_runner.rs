@@ -1,9 +1,13 @@
-//! Standalone WAS-02 qualification. No worker service or tenant execution.
+//! Standalone WAS-02 qualification of embedded fixtures; no worker service.
 #[path = "../artifact/mod.rs"]
 pub mod artifact;
 #[path = "../cache/mod.rs"]
 pub mod cache;
+mod capability_http;
+mod capability_invocations;
+mod capability_support;
 mod compile_cache_fixtures;
+pub use falcone_serverless_worker::host;
 
 use artifact::supervisor::CompileLimits;
 use cache::Cache;
@@ -120,6 +124,37 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
 }
 
 fn main() -> std::process::ExitCode {
+    match std::env::args().nth(1).as_deref() {
+        Some("allocation_probe") => {
+            capability_invocations::allocation_probe();
+            return std::process::ExitCode::SUCCESS;
+        }
+        Some("process_budget_probe") => {
+            capability_invocations::process_budget_probe();
+            return std::process::ExitCode::SUCCESS;
+        }
+        Some("--capability-gates") => {
+            capability_invocations::absent_grants_and_ambient_imports_fail_before_a_guest_start();
+            capability_invocations::event_scope_and_oversized_lazy_arguments_are_checked_before_binding();
+            capability_invocations::logging_is_ungated_and_record_lists_are_lifted_lazily();
+            capability_invocations::record_aggregate_accepts_the_ceiling_and_stops_at_first_excess(
+            );
+            capability_invocations::storage_keys_cannot_escape_the_verified_binding_and_buffers_are_bounded();
+            capability_invocations::workflows_authorize_targets_and_signal_only_host_issued_handles(
+            );
+            capability_invocations::ungated_context_progress_and_cancellation_follow_the_world_contract();
+            capability_invocations::utf16_decoding_is_bounded_by_the_configured_guest_memory();
+            capability_invocations::cancellation_interrupts_a_stalled_binding_without_guest_fuel_or_epoch();
+            capability_invocations::oversized_utf8_and_byte_list_have_bounded_host_allocation();
+            capability_invocations::helper_cap_holds_across_fresh_invocations();
+            capability_http::allow_list_resolution_pinning_and_every_redirect_are_enforced();
+            capability_http::private_dns_and_nat64_answers_and_redirects_never_reach_transport();
+            capability_http::http_lists_scalars_fields_and_responses_obey_the_aggregate_ceiling();
+            capability_http::socket_rebinding_and_redirects_accept_no_forbidden_connections();
+        }
+        Some(_) => return std::process::ExitCode::FAILURE,
+        None => {}
+    }
     let root = std::env::temp_dir().join(format!("was02-qualification-{}", std::process::id()));
     let result = std::env::current_exe()
         .map_err(|_| "executable_path".to_owned())
@@ -137,6 +172,12 @@ fn main() -> std::process::ExitCode {
         });
     match result {
         Ok(()) => {
+            if std::env::args().nth(1).as_deref() == Some("--capability-gates") {
+                println!(
+                    "{}",
+                    serde_json::json!({"check":"capability_gates","status":"passed"})
+                );
+            }
             println!(
                 "{}",
                 serde_json::json!({"check":"compile_cache","status":"passed"})
