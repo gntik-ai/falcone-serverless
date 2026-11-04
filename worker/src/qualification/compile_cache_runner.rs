@@ -129,6 +129,10 @@ fn main() -> std::process::ExitCode {
             capability_invocations::binding_drop_probe();
             return std::process::ExitCode::SUCCESS;
         }
+        Some("thread_local_destructor_probe") => {
+            capability_invocations::thread_local_destructor_probe();
+            return std::process::ExitCode::SUCCESS;
+        }
         Some("retained_storage_probe") => {
             capability_invocations::retained_storage_probe();
             return std::process::ExitCode::SUCCESS;
@@ -144,6 +148,7 @@ fn main() -> std::process::ExitCode {
         Some("--capability-gates") => {
             capability_invocations::guest_table_growth_is_bounded_independently_of_linear_memory();
             capability_invocations::exhausted_execution_handles_do_not_start_untracked_workflows();
+            capability_invocations::execution_handles_retain_bounded_workflow_metadata();
             capability_invocations::absent_grants_and_ambient_imports_fail_before_a_guest_start();
             capability_invocations::event_scope_and_oversized_lazy_arguments_are_checked_before_binding();
             capability_invocations::logging_is_ungated_and_record_lists_are_lifted_lazily();
@@ -161,6 +166,7 @@ fn main() -> std::process::ExitCode {
             capability_invocations::helper_cap_holds_across_fresh_invocations();
             capability_invocations::helper_permits_cover_binding_destructors_even_during_unwinding(
             );
+            capability_invocations::helper_permits_cover_thread_local_destructors();
             capability_invocations::retained_storage_memory_is_bounded();
             capability_invocations::dropped_storage_handles_release_live_capacity();
             capability_http::allow_list_resolution_pinning_and_every_redirect_are_enforced();

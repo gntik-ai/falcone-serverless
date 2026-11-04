@@ -21,9 +21,13 @@
       (local $ptr i32) (local $len i32) (local $handle i32)
       (local.set $ptr (i32.const 1024)) (local.set $len (i32.const 7))
       (if (i32.eq (local.get $mode) (i32.const 1)) (then (local.set $ptr (i32.const 1031)) (local.set $len (i32.const 5))))
+      (if (i32.ge_u (local.get $mode) (i32.const 16)) (then
+        (memory.fill (i32.const 65536) (i32.const 97) (local.get $mode))
+        (local.set $ptr (i32.const 65536)) (local.set $len (local.get $mode))))
       (if (i32.ne (local.get $mode) (i32.const 3)) (then
         (call $start (local.get $ptr) (local.get $len) (i32.const 4096) (i32.const 0) (i32.const 0))
         (if (i32.load8_u (i32.const 0)) (then (return (i32.add (i32.const 1) (i32.load8_u (i32.const 4))))))
+        (if (i32.ge_u (local.get $mode) (i32.const 16)) (then (return (i32.const 0))))
         (local.set $handle (i32.load (i32.const 4)))))
       (if (i32.ge_u (local.get $mode) (i32.const 2)) (then (local.set $handle (i32.const -1))))
       (call $signal (local.get $handle) (i32.const 1036) (i32.const 4) (i32.const 4096) (i32.const 0) (i32.const 0))

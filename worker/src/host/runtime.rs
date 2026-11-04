@@ -25,6 +25,10 @@ const GUEST_TABLE_ELEMENTS: usize = 65_536;
 // Retained storage metadata is outside guest linear memory. With at most 1024
 // live handles, this bounds retained keys to 1 MiB, independently of call count.
 const STORAGE_KEY_BYTES: usize = 1024;
+// Execution handles retain their workflow target and execution id outside guest
+// linear memory too. Bound each like a storage key, so 1024 live handles retain
+// at most 2 MiB of execution metadata, independently of call count.
+const EXECUTION_ID_BYTES: usize = 1024;
 // ADR 0007's qualification concurrency is 20. Reserve four additional helpers
 // for detached calls, but bound *all* running helpers, including binding drops.
 const HELPER_THREADS: usize = 20 + 4;
@@ -145,9 +149,10 @@ fn permit(
     }
 }
 
-// Struct fields drop in declaration order, on return and during unwinding.
-// The closure owns this entire value, so all binding captures retire before
-// its permit, including a binding destructor that blocks after a panic.
+// The helper thread owns every binding capture; its permit is held by a joiner
+// thread instead. Thread-local destructors run after Helper::run returns, so
+// only a completed join, which observes thread termination, may release the
+// permit: a binding destructor or TLS destructor that stalls keeps its slot.
 struct Helper {
     binding: Arc<dyn Bindings>,
     context: Context,
@@ -155,7 +160,6 @@ struct Helper {
     operation: Option<Operation>,
     send: mpsc::SyncSender<Result<Reply, HostError>>,
     deadline: Instant,
-    _permit: Permit,
 }
 impl Helper {
     fn run(mut self) {
@@ -370,11 +374,21 @@ impl Host {
             operation: Some(operation),
             send,
             deadline,
-            _permit: permit,
         };
+        // Each permit covers one helper and its joiner. If the helper cannot be
+        // spawned, its closure, and with it the reply sender, is dropped, so the
+        // caller observes a disconnected channel and fails closed.
         std::thread::Builder::new()
-            .name("capability-binding".into())
-            .spawn(move || helper.run())
+            .name("capability-joiner".into())
+            .spawn(move || {
+                let _permit = permit;
+                if let Ok(helper) = std::thread::Builder::new()
+                    .name("capability-binding".into())
+                    .spawn(move || helper.run())
+                {
+                    let _ = helper.join();
+                }
+            })
             .map_err(|_| HostError::LimitExceeded)?;
         loop {
             if self.cancelled.load(Ordering::Acquire) {
@@ -637,6 +651,14 @@ pub fn instantiate(
             |mut store: StoreContextMut<'_, Host>, (workflow, input): (WasmStr, WasmList<u8>)| {
                 let result: Result<Resource<Execution>, HostError> = (|| {
                     preflight(&mut store, &[&workflow], &[&input], None, 0)?;
+                    if workflow
+                        .to_str(&store)
+                        .map_err(|_| HostError::Denied)?
+                        .len()
+                        > EXECUTION_ID_BYTES
+                    {
+                        return Err(HostError::LimitExceeded);
+                    }
                     let mut bytes = Bytes::default();
                     let workflow = string(&workflow, &store, &mut bytes)?;
                     let input = data(&input, &mut store, &mut bytes)?;
@@ -660,7 +682,9 @@ pub fn instantiate(
                     else {
                         return Err(HostError::Denied);
                     };
-                    Bytes::default().add(execution.len())?;
+                    if execution.len() > EXECUTION_ID_BYTES {
+                        return Err(HostError::LimitExceeded);
+                    }
                     store
                         .data_mut()
                         .executions

@@ -75,6 +75,73 @@ pub fn exhausted_execution_handles_do_not_start_untracked_workflows() {
 }
 
 #[cfg_attr(test, test)]
+pub fn execution_handles_retain_bounded_workflow_metadata() {
+    let _case = crate::capability_support::serial_case();
+    // Records every start; the reply's execution id has a configurable length.
+    struct Workflows {
+        starts: AtomicUsize,
+        execution_id: usize,
+    }
+    impl Bindings for Workflows {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            match operation {
+                Operation::Start { .. } => {
+                    self.starts.fetch_add(1, Ordering::SeqCst);
+                    Ok(Reply::Execution("e".repeat(self.execution_id)))
+                }
+                _ => Err(HostError::Timeout),
+            }
+        }
+    }
+    let engine = wasmtime::Engine::default();
+    let instantiate = |execution_id: usize| {
+        let binding = Arc::new(Workflows {
+            starts: AtomicUsize::new(0),
+            execution_id,
+        });
+        // Every target is granted, so only the retention bound can reject one.
+        let context = Context {
+            grants: Grants {
+                targets: [16, 1024, 1025, host::BUFFER_BYTES - 8]
+                    .iter()
+                    .map(|len| "a".repeat(*len))
+                    .collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/capability-workflows.wat"),
+            Host::new(context, binding.clone()),
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        (store, run, binding)
+    };
+    // A granted target that passes the per-call ceiling would otherwise be copied
+    // into each of 1024 live handles: about 1 GiB outside the store limiter.
+    let (mut store, run, binding) = instantiate(16);
+    for target in [1025, host::BUFFER_BYTES as u32 - 8] {
+        assert_eq!(run.call(&mut store, (target,)).unwrap(), (2,), "{target}");
+    }
+    assert_eq!(binding.starts.load(Ordering::SeqCst), 0);
+    // The bound itself is accepted for every live handle, up to the handle ceiling.
+    for _ in 0..1024 {
+        assert_eq!(run.call(&mut store, (1024,)).unwrap(), (0,));
+    }
+    assert_eq!(run.call(&mut store, (1024,)).unwrap(), (2,));
+    assert_eq!(binding.starts.load(Ordering::SeqCst), 1024);
+    // A binding's execution id is retained metadata as well.
+    let (mut store, run, _) = instantiate(1024);
+    assert_eq!(run.call(&mut store, (16,)).unwrap(), (0,));
+    let (mut store, run, _) = instantiate(1025);
+    assert_eq!(run.call(&mut store, (16,)).unwrap(), (2,));
+}
+
+#[cfg_attr(test, test)]
 pub fn logging_is_ungated_and_record_lists_are_lifted_lazily() {
     let _case = crate::capability_support::serial_case();
     let engine = wasmtime::Engine::default();
@@ -1169,6 +1236,105 @@ pub fn helper_permits_cover_binding_destructors_even_during_unwinding() {
     assert!(
         output.status.success()
             && String::from_utf8_lossy(&output.stdout).contains("binding-drop-probe passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg_attr(test, test)]
+pub fn thread_local_destructor_probe() {
+    if std::env::var_os("WAS02_TLS_PROBE").is_none() {
+        return;
+    }
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+    // Thread-local destructors cannot capture state, so the gate is process-wide.
+    static RELEASE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
+    static ENTERED: AtomicUsize = AtomicUsize::new(0);
+    static EXITED: AtomicUsize = AtomicUsize::new(0);
+    struct Stall;
+    impl Drop for Stall {
+        fn drop(&mut self) {
+            ENTERED.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &RELEASE;
+            drop(
+                wake.wait_while(
+                    lock.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    |released| !*released,
+                )
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            );
+            EXITED.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    thread_local! {
+        static STALL: Stall = const { Stall };
+    }
+    // Returns promptly, but leaves a destructor that stalls after Helper::run
+    // has returned and its reply has been delivered.
+    struct ThreadLocalBinding(AtomicUsize);
+    impl Bindings for ThreadLocalBinding {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            STALL.with(|_| {});
+            Ok(Reply::Empty)
+        }
+    }
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(ThreadLocalBinding(AtomicUsize::new(0)));
+    let context = Context {
+        grants: Grants {
+            topics: vec!["orders".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let guest = |timeout: Duration| {
+        let mut host = Host::new(context.clone(), binding.clone());
+        host.set_call_timeout(timeout);
+        event_guest(&engine, host)
+    };
+    for _ in 0..24 {
+        let (mut store, run) = guest(Duration::from_secs(30));
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    }
+    wait_for("all 24 thread-local destructors to stall", || {
+        ENTERED.load(Ordering::SeqCst) == 24
+    });
+    // Every helper thread is still live, so no further helper may be admitted.
+    let (mut store, run) = guest(Duration::from_millis(200));
+    let result = run.call(&mut store, (0,)).unwrap();
+    let calls = binding.0.load(Ordering::SeqCst);
+    // Always release the destructor gate before asserting the result.
+    *RELEASE.0.lock().unwrap() = true;
+    RELEASE.1.notify_all();
+    assert_eq!(
+        (result, calls),
+        ((3,), 24),
+        "helpers released their permits before thread-local destructors exited"
+    );
+    wait_for("stalled thread-local destructors to exit", || {
+        EXITED.load(Ordering::SeqCst) == ENTERED.load(Ordering::SeqCst)
+    });
+    // A permit becomes available once its helper thread has terminated.
+    let (mut store, run) = guest(Duration::from_secs(30));
+    assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    println!("thread-local-destructor-probe passed");
+}
+
+#[cfg_attr(test, test)]
+pub fn helper_permits_cover_thread_local_destructors() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["thread_local_destructor_probe", "--nocapture"])
+        .env("WAS02_TLS_PROBE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .contains("thread-local-destructor-probe passed"),
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
