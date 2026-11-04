@@ -203,7 +203,9 @@ fn monitor(
         }
         if let Some(pipe) = &mut stdin {
             match pipe.write(&bytes[written..]) {
-                Ok(0) => return Err(Error::new("compile_failed")),
+                Ok(0) => {
+                    stdin.take();
+                }
                 Ok(count) => {
                     written += count;
                     progressed = true;
@@ -217,6 +219,11 @@ fn monitor(
                         error.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) => {}
+                Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+                    // A child may hit a limit before consuming all input. Close
+                    // the pipe and let its exit status retain that diagnostic.
+                    stdin.take();
+                }
                 Err(_) => return Err(Error::new("compile_failed")),
             }
         }
@@ -233,7 +240,7 @@ fn monitor(
             }
         }
         if exited {
-            if stdin.is_some() {
+            if written != bytes.len() {
                 return Err(Error::new("compile_failed"));
             }
             if eof {

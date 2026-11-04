@@ -156,6 +156,7 @@ fn untrusted_entries_are_misses_before_any_native_load() {
         ("wrong_config", "provenance"),
         ("wrong_module", "provenance"),
         ("foreign_key", "key"),
+        ("relabelled_foreign_entry", "mac"),
         ("tenant_file", "mac"),
         ("symlink", "unavailable"),
         ("directory", "not_bounded_regular_file"),
@@ -253,13 +254,25 @@ fn untrusted_entries_are_misses_before_any_native_load() {
             "wrong_module" => rewrite_manifest(&mut entry, |m| {
                 m["provenance"]["module_hash"] = serde_json::to_value([0_u8; 32]).unwrap()
             }),
-            "foreign_key" => {
+            "foreign_key" | "relabelled_foreign_entry" => {
                 // A complete authenticated entry produced for a different artifact.
+                let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+                let requested: serde_json::Value =
+                    serde_json::from_slice(&entry[4..4 + size]).unwrap();
                 let other = wat::parse_str("(component)").unwrap();
                 let loaded = cache
                     .compile(3, &other, limits(), &AtomicBool::new(false))
                     .unwrap();
                 entry = std::fs::read(store.0.join(format!("{}.cache", loaded.key))).unwrap();
+                if case == "relabelled_foreign_entry" {
+                    // Keep the foreign native bytes, digest and genuine MAC, but
+                    // make the metadata match this request. Only authentication
+                    // can reject this after key, provenance and integrity pass.
+                    rewrite_manifest(&mut entry, |m| {
+                        m["key"] = requested["key"].clone();
+                        m["provenance"] = requested["provenance"].clone();
+                    });
+                }
             }
             "symlink" | "directory" | "fifo" => {
                 std::fs::remove_file(&path).unwrap();
@@ -401,6 +414,13 @@ struct ChildFixture(std::path::PathBuf);
 
 impl ChildFixture {
     fn new(directory: &std::path::Path, script: &str) -> Self {
+        Self::before_input(
+            directory,
+            &format!("while IFS= read -r line; do :; done\n{script}"),
+        )
+    }
+
+    fn before_input(directory: &std::path::Path, script: &str) -> Self {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
         let path = directory.join("trusted-test-child");
@@ -410,12 +430,44 @@ impl ChildFixture {
             .mode(0o700)
             .open(&path)
             .unwrap();
-        writeln!(
-            file,
-            "#!/bin/sh\nwhile IFS= read -r line; do :; done\n{script}"
-        )
-        .unwrap();
+        writeln!(file, "#!/bin/sh\n{script}").unwrap();
         Self(path)
+    }
+}
+
+#[test]
+fn child_limit_exit_during_input_transfer_keeps_its_diagnostic() {
+    use cache::LoadEvent::*;
+    // Larger than a pipe buffer, but still a valid, otherwise empty component.
+    let bytes = wat::parse_str(format!(
+        "(component (@custom \"padding\" \"{}\"))",
+        "x".repeat(1024 * 1024)
+    ))
+    .unwrap();
+    for (termination, diagnostic) in [
+        ("exit 66", "compile_memory_limit_exceeded"),
+        ("kill -XCPU $$", "compile_cpu_limit_exceeded"),
+        ("kill -KILL $$", "compile_cpu_limit_exceeded"),
+        ("exit 77", "compile_failed"),
+        ("printf incomplete; exit 0", "compile_failed"),
+    ] {
+        let store = Store::new();
+        let fixture_dir = Store::new();
+        // Wait for input so the parent has applied limits, then die without
+        // draining stdin. The parent must classify the exit and reap the child.
+        let child = ChildFixture::before_input(
+            &fixture_dir.0,
+            &format!(
+                "dd bs=1 count=1 of=/dev/null 2>/dev/null\nexec 0<&-\nsleep 0.05\n{termination}"
+            ),
+        );
+        let mut cache = cache::Cache::new(&store.0, &child.0).unwrap();
+        let result = cache.compile(3, &bytes, limits(), &AtomicBool::new(false));
+        assert_eq!(cache::verdict(&result), ("rejected", Some(diagnostic)));
+        assert_eq!(cache.spawn_count(), 1);
+        assert!(cache.last_child_status().unwrap().is_some());
+        assert_eq!(std::fs::read_dir(&store.0).unwrap().count(), 0);
+        assert_eq!(cache.take_events(), [Read, Rejected("unavailable")]);
     }
 }
 
