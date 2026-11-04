@@ -346,9 +346,14 @@ impl Kubectl for ProcessKubectl {
         };
         // A descendant may still hold the pipe; wait only for what is left of the allowance.
         let wait = deadline.saturating_duration_since(Instant::now());
-        let stdout = output
-            .recv_timeout(wait.max(Duration::from_millis(250)))
-            .map_err(|_| "kubectl output was not closed")?;
+        let stdout = match output.recv_timeout(wait.max(Duration::from_millis(250))) {
+            Ok(stdout) => stdout,
+            Err(_) => {
+                // Take down the group, so the descendant and the reader thread end with it.
+                kill_group(&mut child);
+                return Err("kubectl output was not closed".into());
+            }
+        };
         Ok(Reply {
             stdout: String::from_utf8(stdout).map_err(|_| "kubectl output is not UTF-8")?,
             code: status.code().unwrap_or(-1),

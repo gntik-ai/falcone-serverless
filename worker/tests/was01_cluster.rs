@@ -2577,6 +2577,43 @@ mod evidence {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn the_process_runner_cleans_up_a_descendant_that_outlives_kubectl() {
+        let dir = scratch("evidence-orphan");
+        let pid_file = dir.join("descendant.pid");
+        // kubectl exits at once while a descendant keeps its stdout open.
+        let script = format!("sleep 30 &\necho $! > '{}'\nexit 0\n", pid_file.display());
+        let kubectl = process(&script, Duration::from_millis(300), &dir);
+        let started = std::time::Instant::now();
+        let error = kubectl.call(&["get", "--raw", "/version"]).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(error, "kubectl output was not closed");
+        let pid = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .to_owned();
+        // Killed, and either reaped or left as a zombie: never still running.
+        let mut running = true;
+        for _ in 0..100 {
+            running = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|stat| {
+                    !stat
+                        .rsplit(')')
+                        .next()
+                        .unwrap_or("")
+                        .trim_start()
+                        .starts_with('Z')
+                })
+                .unwrap_or(false);
+            if !running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!running, "descendant {pid} survived the deadline");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     // ---- README -------------------------------------------------------------------------
 
     #[test]
