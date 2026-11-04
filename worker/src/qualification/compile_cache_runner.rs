@@ -85,16 +85,8 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
         "restart_entry_loaded",
     )?;
     for (version, input, expected) in [
-        (
-            3,
-            include_bytes!("../../tests/fixtures/was-02/native.elf").as_slice(),
-            "precompiled_rejected",
-        ),
-        (
-            3,
-            include_bytes!("../../tests/fixtures/was-02/invalid.wasm").as_slice(),
-            "invalid_module",
-        ),
+        (3, compile_cache_fixtures::NATIVE, "precompiled_rejected"),
+        (3, compile_cache_fixtures::INVALID, "invalid_module"),
         (2, small().as_slice(), "unsupported_feature"),
     ] {
         let result = cache.compile(version, input, limits(), &AtomicBool::new(false));

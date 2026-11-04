@@ -2,6 +2,10 @@
 use crate::artifact::supervisor::CompileLimits;
 use std::time::{Duration, Instant};
 
+// Keep binaries self-contained in the image build's source-only copy set.
+pub const NATIVE: &[u8] = b"\x7fELF\x02\x01\x01\0";
+pub const INVALID: &[u8] = b"\0asm\x0d\0\x01\0\xff";
+
 pub fn limits() -> CompileLimits {
     CompileLimits {
         input_bytes: 64 * 1024 * 1024,
@@ -12,11 +16,11 @@ pub fn limits() -> CompileLimits {
 }
 
 pub fn small() -> Vec<u8> {
-    include_bytes!("../../tests/fixtures/was-02/valid.wasm").to_vec()
+    b"\0asm\x0d\0\x01\0".to_vec()
 }
 
 pub fn cpu() -> Vec<u8> {
-    component(128, 8192)
+    component(64, 8192)
 }
 
 pub fn memory() -> Vec<u8> {

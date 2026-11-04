@@ -107,6 +107,36 @@ fn rewrite_manifest(entry: &mut Vec<u8>, change: impl FnOnce(&mut serde_json::Va
 }
 
 #[test]
+fn crash_staged_files_do_not_prevent_a_fresh_publication() {
+    let store = Store::new();
+    // Historical crash files from a container restarting with the same PID.
+    // Cover concurrent publications too; assert only public compile behavior and
+    // preservation of files the new cache owner did not create.
+    let stale = (0..256)
+        .map(|id| store.0.join(format!(".{}-{id}.tmp", std::process::id())))
+        .collect::<Vec<_>>();
+    for path in &stale {
+        std::fs::write(path, b"incomplete entry from a crashed owner").unwrap();
+    }
+    let mut cache = store.cache();
+    let result = cache
+        .compile(3, &small(), limits(), &AtomicBool::new(false))
+        .unwrap();
+    assert!(!result.cache_hit);
+    assert_eq!(cache.spawn_count(), 1);
+    for path in &stale {
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            b"incomplete entry from a crashed owner"
+        );
+    }
+    assert_eq!(
+        std::fs::read_dir(&store.0).unwrap().count(),
+        stale.len() + 1
+    );
+}
+
+#[test]
 fn untrusted_entries_are_misses_before_any_native_load() {
     use cache::LoadEvent::*;
     for (case, reason) in [
@@ -126,7 +156,7 @@ fn untrusted_entries_are_misses_before_any_native_load() {
         ("wrong_config", "provenance"),
         ("wrong_module", "provenance"),
         ("foreign_key", "key"),
-        ("tenant_file", "manifest"),
+        ("tenant_file", "mac"),
         ("symlink", "unavailable"),
         ("directory", "not_bounded_regular_file"),
         ("fifo", "not_bounded_regular_file"),
@@ -153,9 +183,32 @@ fn untrusted_entries_are_misses_before_any_native_load() {
                 .unwrap()
                 .set_len((artifact::supervisor::MAX_COMPILED_OUTPUT_BYTES + 16 * 1024 + 5) as u64)
                 .unwrap(),
-            "missing_manifest" | "tenant_file" => {
+            "missing_manifest" => {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
                 entry.drain(..4 + size);
+            }
+            "tenant_file" => {
+                use ring::hmac;
+                use sha2::{Digest, Sha256};
+                // The tenant can supply matching request metadata and integrity,
+                // but its own well-formed MAC cannot establish compiler origin.
+                let payload = include_bytes!("fixtures/was-02/native.elf");
+                let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+                entry.truncate(4 + size);
+                entry.extend_from_slice(payload);
+                rewrite_manifest(&mut entry, |m| {
+                    let hash: [u8; 32] = Sha256::digest(payload).into();
+                    m["bytes_sha256"] = serde_json::json!(hash);
+                    let message = serde_json::to_vec(&(
+                        "falcone-native-cache-v3",
+                        &m["key"],
+                        &m["bytes_sha256"],
+                        &m["provenance"],
+                    ))
+                    .unwrap();
+                    let tenant_key = hmac::Key::new(hmac::HMAC_SHA256, b"tenant-owned-key");
+                    m["mac"] = serde_json::json!(hmac::sign(&tenant_key, &message).as_ref());
+                });
             }
             "truncated_manifest" => {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
@@ -286,13 +339,27 @@ fn identity_is_stable_and_changes_for_every_contract_input() {
 
 #[test]
 fn qualification_binary_fixtures_match_the_independent_wat_oracle() {
+    assert_eq!(
+        fixtures::small(),
+        include_bytes!("fixtures/was-02/valid.wasm")
+    );
+    assert_eq!(
+        fixtures::NATIVE,
+        include_bytes!("fixtures/was-02/native.elf")
+    );
+    assert_eq!(
+        fixtures::INVALID,
+        include_bytes!("fixtures/was-02/invalid.wasm")
+    );
     assert_eq!(fixtures::small(), wat::parse_str("(component)").unwrap());
     let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
     let function =
         include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
-    let cpu_wat = include_str!("fixtures/was-02/cpu-heavy.wat")
-        .replace(";; FUNCTIONS", &function.repeat(128));
-    assert_eq!(fixtures::cpu(), wat::parse_str(cpu_wat).unwrap());
+    let cpu_wat =
+        include_str!("fixtures/was-02/cpu-heavy.wat").replace(";; FUNCTIONS", &function.repeat(64));
+    let expected_cpu = wat::parse_str(cpu_wat).unwrap();
+    // Avoid printing megabytes of fixture bytes on a calibration mismatch.
+    assert!(fixtures::cpu() == expected_cpu);
     let memory_wat = include_str!("fixtures/was-02/memory-heavy.wat").replace(
         ";; OPERATIONS",
         &"i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(131072),
@@ -383,6 +450,67 @@ fn unsuccessful_children_publish_nothing_and_are_reaped() {
             ]
         );
         assert_eq!(std::fs::read_dir(&store.0).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn stdout_holding_descendant_cannot_delay_deadline_or_cancellation() {
+    for cancel in [false, true] {
+        let store = Store::new();
+        let fixture_dir = Store::new();
+        // The marker confirms a descendant inherited stdout before cancellation.
+        // Its finite lifetime also bounds the regression on the broken supervisor.
+        let child = ChildFixture::new(
+            &fixture_dir.0,
+            "sleep 6 &\nprintf ready > \"${0}.ready\"\nwait",
+        );
+        let ready = child.0.with_extension("ready");
+        let mut cache = cache::Cache::new(&store.0, &child.0).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let mut budget = limits();
+        if !cancel {
+            budget.wall_clock_deadline = Instant::now() + Duration::from_secs(1);
+        }
+        let started = Instant::now();
+        let result = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                if cancel {
+                    while !ready.exists() {
+                        assert!(started.elapsed() < Duration::from_secs(3));
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
+            cache.compile(3, &small(), budget, &cancelled)
+        });
+        assert_eq!(
+            cache::verdict(&result),
+            (
+                "rejected",
+                Some(if cancel {
+                    "compile_cancelled"
+                } else {
+                    "compile_deadline_exceeded"
+                })
+            )
+        );
+        assert!(ready.exists(), "the descendant must inherit stdout");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "stdout held the supervisor for {:?}",
+            started.elapsed()
+        );
+        assert_eq!(cache.spawn_count(), 1);
+        assert!(cache.last_child_status().unwrap().is_some());
+        assert_eq!(std::fs::read_dir(&store.0).unwrap().count(), 0);
+        assert_eq!(
+            cache.take_events(),
+            [
+                cache::LoadEvent::Read,
+                cache::LoadEvent::Rejected("unavailable")
+            ]
+        );
     }
 }
 

@@ -1,7 +1,7 @@
 use std::io::{self, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -138,7 +138,7 @@ fn run(
     cancelled: &AtomicBool,
 ) -> Result<Vec<u8>, Error> {
     apply_limits(child, limits)?;
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
         .ok_or_else(|| Error::new("compile_failed"))?;
@@ -146,57 +146,35 @@ fn run(
         .stdout
         .take()
         .ok_or_else(|| Error::new("compile_failed"))?;
-    let output_failed = AtomicBool::new(false);
-    thread::scope(|scope| {
-        let reader = thread::Builder::new().spawn_scoped(scope, || {
-            let mut output = Vec::new();
-            let read = stdout
-                .take(MAX_COMPILED_OUTPUT_BYTES as u64 + 1)
-                .read_to_end(&mut output);
-            if read.is_err() || output.len() > MAX_COMPILED_OUTPUT_BYTES {
-                output_failed.store(true, Ordering::Release);
-                return Err(Error::new("compile_failed"));
-            }
-            Ok(output)
-        });
-        let reader = match reader {
-            Ok(reader) => reader,
-            Err(_) => {
-                terminate_and_reap(child)?;
-                return Err(Error::new("compile_failed"));
-            }
-        };
-        // A pipe can block. Keep wall/cancel enforcement active during transfer.
-        let writer = thread::Builder::new().spawn_scoped(scope, move || stdin.write_all(bytes));
-        let writer = match writer {
-            Ok(writer) => writer,
-            Err(_) => {
-                let cleanup = terminate_and_reap(child);
-                let _ = reader.join();
-                cleanup?;
-                return Err(Error::new("compile_failed"));
-            }
-        };
-        let result = monitor(child, limits.wall_clock_deadline, cancelled, &output_failed);
-        // Kill before joining the writer so no pipe write can strand the caller.
-        let cleanup = terminate_and_reap(child);
-        let written = writer.join();
-        let output = reader.join();
-        cleanup?;
-        result?;
-        match (written, output) {
-            (Ok(Ok(())), Ok(output)) => output,
-            _ => Err(Error::new("compile_failed")),
-        }
-    })
+    // Poll both pipes with the child. Even an inherited pipe handle cannot strand
+    // a reader/writer join after deadline or cancellation terminates the child.
+    rustix::fs::fcntl_setfl(&stdin, rustix::fs::OFlags::NONBLOCK)
+        .and_then(|()| rustix::fs::fcntl_setfl(&stdout, rustix::fs::OFlags::NONBLOCK))
+        .map_err(|_| Error::new("compile_failed"))?;
+    monitor(
+        child,
+        stdin,
+        stdout,
+        bytes,
+        limits.wall_clock_deadline,
+        cancelled,
+    )
 }
 
 fn monitor(
     child: &mut Child,
+    stdin: ChildStdin,
+    mut stdout: ChildStdout,
+    bytes: &[u8],
     deadline: Instant,
     cancelled: &AtomicBool,
-    output_failed: &AtomicBool,
-) -> Result<(), Error> {
+) -> Result<Vec<u8>, Error> {
+    let mut stdin = Some(stdin);
+    let mut written = 0;
+    let mut output = Vec::new();
+    let mut buffer = [0; 64 * 1024];
+    let mut eof = false;
+    let mut exited = false;
     loop {
         if cancelled.load(Ordering::Acquire) {
             return Err(Error::new("compile_cancelled"));
@@ -204,18 +182,67 @@ fn monitor(
         if Instant::now() >= deadline {
             return Err(Error::new("compile_deadline_exceeded"));
         }
-        if output_failed.load(Ordering::Acquire) {
-            return Err(Error::new("compile_failed"));
+        let mut progressed = false;
+        if !eof {
+            match stdout.read(&mut buffer) {
+                Ok(0) => eof = true,
+                Ok(count) => {
+                    if output.len() + count > MAX_COMPILED_OUTPUT_BYTES {
+                        return Err(Error::new("compile_failed"));
+                    }
+                    output.extend_from_slice(&buffer[..count]);
+                    progressed = true;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error::new("compile_failed")),
+            }
         }
-        if let Some(status) = child.try_wait().map_err(|_| Error::new("compile_failed"))? {
-            return match (status.code(), status.signal()) {
-                (Some(0), None) => Ok(()),
-                (_, Some(24 | 9)) => Err(Error::new("compile_cpu_limit_exceeded")),
-                (Some(66), None) | (_, Some(6)) => Err(Error::new("compile_memory_limit_exceeded")),
-                _ => Err(Error::new("compile_failed")),
-            };
+        if let Some(pipe) = &mut stdin {
+            match pipe.write(&bytes[written..]) {
+                Ok(0) => return Err(Error::new("compile_failed")),
+                Ok(count) => {
+                    written += count;
+                    progressed = true;
+                    if written == bytes.len() {
+                        // EOF is the child's barrier before compilation.
+                        stdin.take();
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error::new("compile_failed")),
+            }
         }
-        thread::sleep(Duration::from_millis(1));
+        if !exited
+            && let Some(status) = child.try_wait().map_err(|_| Error::new("compile_failed"))?
+        {
+            match (status.code(), status.signal()) {
+                (Some(0), None) => exited = true,
+                (_, Some(24 | 9)) => return Err(Error::new("compile_cpu_limit_exceeded")),
+                (Some(66), None) | (_, Some(6)) => {
+                    return Err(Error::new("compile_memory_limit_exceeded"));
+                }
+                _ => return Err(Error::new("compile_failed")),
+            }
+        }
+        if exited {
+            if stdin.is_some() {
+                return Err(Error::new("compile_failed"));
+            }
+            if eof {
+                return Ok(output);
+            }
+        }
+        if !progressed {
+            thread::sleep(Duration::from_millis(1));
+        }
     }
 }
 

@@ -58,8 +58,8 @@ zero or unenforceable budgets fail closed. The child reads stdin to EOF before
 creating the engine; it writes no files, sends native output only to stdout and spawns no
 subprocesses. Thus its process tree consists of the child alone. Core dumps are
 disabled by the parent. The child compiles through the component API. The parent
-reads stdout concurrently with stdin transfer and process monitoring, so output
-backpressure cannot disable deadline or cancellation enforcement. Only a zero
+polls nonblocking stdout and stdin alongside process monitoring, so pipe
+backpressure or inherited handles cannot disable deadline or cancellation enforcement. Only a zero
 exit with bounded, nonempty output can produce a new entry. The legacy
 compile-only method still accepts status-only harnesses but cannot publish entries.
 
@@ -179,8 +179,12 @@ failure is a miss; compile afresh or reject, never load unverified bytes.
 
 Publish one complete verified entry by atomic rename from a create-new, mode
 0600 temporary file in the same directory, only after successful completion,
-verification and the final cancellation/deadline check. Errors remove the staged
-file. No entry survives a process restart as trusted.
+verification and the final cancellation/deadline check. Temporary names include
+a fresh 128-bit random nonce so crash remnants do not collide with a restarted
+owner's counter or PID. Errors remove this call's staged file; abrupt process
+death can leave an untrusted temporary file until pod-local storage is removed.
+The next owner neither adopts nor deletes those files. No entry survives a
+process restart as trusted.
 
 Qualification uses CPU failure budgets of 1 s CPU, 1 GiB address space, 300 s
 deadline and memory failure budgets of 60 s CPU, 128 MiB address space, 300 s

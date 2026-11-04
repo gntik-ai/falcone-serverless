@@ -132,6 +132,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     let outcome = path == Path::new("qualification/outcome.rs");
     let runner = path == Path::new("qualification/runner.rs");
     (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
+        && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin)
         && (!source.contains("Status::Passed") || outcome)
         && (!(runner || bin) || (!source.contains("env::args") && !source.contains("Engine::new")))
@@ -172,6 +173,10 @@ fn qualification_sources_obey_boundaries() {
         ("qualification/runner.rs", "Status::Passed"),
         ("qualification/runner.rs", "env::args()"),
         ("bin/qualification_runner.rs", "Engine::new()"),
+        (
+            "qualification/compile_cache_runner.rs",
+            "include_bytes!(\"../../tests/fixtures/was-02/native.elf\")",
+        ),
     ] {
         assert!(!source_valid(Path::new(path), source), "{path}: {source}");
     }

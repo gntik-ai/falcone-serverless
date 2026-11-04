@@ -9,14 +9,14 @@ use crate::artifact::Error;
 use crate::artifact::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
 use crate::artifact::supervisor::{CompileLimits, MAX_COMPILED_OUTPUT_BYTES, Supervisor};
 use crate::artifact::validate::validate;
-use ring::{hmac, rand::SystemRandom};
+use ring::{hmac, rand::SecureRandom, rand::SystemRandom};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 pub const CONTRACT_VERSION: u32 = 3;
@@ -177,11 +177,16 @@ impl Cache {
         limits: CompileLimits,
         cancelled: &AtomicBool,
     ) -> Result<(), Error> {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        // A PID and restarting counter can collide with crash remnants in a
+        // surviving pod-local directory. Never adopt or remove another owner's file.
+        let mut nonce = [0; 16];
+        SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| error("trusted_cache_unavailable"))?;
+        let id = u128::from_be_bytes(nonce);
         let temp = self
             .directory
-            .join(format!(".{}-{id}.tmp", std::process::id()));
+            .join(format!(".{}-{id:032x}.tmp", std::process::id()));
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
