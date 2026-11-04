@@ -30,19 +30,16 @@ fn run(cluster: &impl Cluster, image: &str, mode: &NamespaceMode) -> Result<(), 
     result
 }
 
-fn opt_in<C: Cluster>(
+/// Validates the opt-in inputs without constructing a client. `Ok(None)` means the gate is unset.
+fn validated_inputs<'a>(
     enabled: Option<&str>,
     config: Option<&str>,
-    image: Option<&str>,
+    image: Option<&'a str>,
     mode: Option<&str>,
     namespace: Option<&str>,
-    connect: impl FnOnce(&kubeconfig::Kubeconfigs) -> Result<C, String>,
-) -> Result<bool, String> {
+) -> Result<Option<(&'a str, NamespaceMode, kubeconfig::Kubeconfigs)>, String> {
     match enabled {
-        None => {
-            println!("not run: FS_TEST_CLUSTER unset");
-            return Ok(false);
-        }
+        None => return Ok(None),
         Some("1") => {}
         Some(_) => return Err("FS_TEST_CLUSTER must be 1 when set".into()),
     }
@@ -51,6 +48,22 @@ fn opt_in<C: Cluster>(
         .ok_or("UNVERIFIED: FS_TEST_WAS02_IMAGE must be <repo>@sha256:<digest>")?;
     let mode = NamespaceMode::parse(mode, namespace)?;
     let configs = kubeconfig::Kubeconfigs::parse(config)?;
+    Ok(Some((image, mode, configs)))
+}
+
+fn opt_in<C: Cluster>(
+    enabled: Option<&str>,
+    config: Option<&str>,
+    image: Option<&str>,
+    mode: Option<&str>,
+    namespace: Option<&str>,
+    connect: impl FnOnce(&kubeconfig::Kubeconfigs) -> Result<C, String>,
+) -> Result<bool, String> {
+    let Some((image, mode, configs)) = validated_inputs(enabled, config, image, mode, namespace)?
+    else {
+        println!("not run: FS_TEST_CLUSTER unset");
+        return Ok(false);
+    };
     let cluster = connect(&configs)?;
     run(&cluster, image, &mode)?;
     Ok(true)
@@ -418,15 +431,87 @@ fn live_qualification_reports_ignored_when_cluster_unset() {
 #[test]
 #[ignore = "not run: FS_TEST_CLUSTER unset"]
 fn cluster_capability_gates() -> Result<(), String> {
-    opt_in(
+    // Only runs when requested (--ignored or --include-ignored); an unset gate is then a
+    // failure, never a pass with no qualification executed.
+    let ran = opt_in(
         std::env::var("FS_TEST_CLUSTER").ok().as_deref(),
         std::env::var("KUBECONFIG").ok().as_deref(),
         std::env::var("FS_TEST_WAS02_IMAGE").ok().as_deref(),
         std::env::var("FS_TEST_NAMESPACE_MODE").ok().as_deref(),
         std::env::var("FS_TEST_NAMESPACE").ok().as_deref(),
         RealCluster::connect,
-    )
-    .map(drop)
+    )?;
+    if ran {
+        Ok(())
+    } else {
+        Err("UNVERIFIED: cluster_capability_gates was requested but FS_TEST_CLUSTER is unset".into())
+    }
+}
+
+/// Runs in every `cargo test`. With FS_TEST_CLUSTER set, invalid opt-in inputs fail here without
+/// constructing a client, and a valid opt-in fails unless the ignored live qualification was
+/// requested, so setting the gate can never yield a green run with no qualification executed.
+#[test]
+fn cluster_gate_inputs_fail_closed_when_set() -> Result<(), String> {
+    let (enabled, config, image, mode, namespace) = (
+        std::env::var("FS_TEST_CLUSTER").ok(),
+        std::env::var("KUBECONFIG").ok(),
+        std::env::var("FS_TEST_WAS02_IMAGE").ok(),
+        std::env::var("FS_TEST_NAMESPACE_MODE").ok(),
+        std::env::var("FS_TEST_NAMESPACE").ok(),
+    );
+    let inputs = validated_inputs(
+        enabled.as_deref(),
+        config.as_deref(),
+        image.as_deref(),
+        mode.as_deref(),
+        namespace.as_deref(),
+    )?;
+    let live_requested =
+        std::env::args().any(|arg| arg == "--ignored" || arg == "--include-ignored");
+    if inputs.is_some() && !live_requested {
+        return Err(
+            "UNVERIFIED: FS_TEST_CLUSTER=1 runs the live qualification only with --include-ignored"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+fn run_self(args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(args)
+        .env_remove("FS_TEST_CLUSTER")
+        .env_remove("FS_TEST_WAS02_IMAGE")
+        .env_remove("KUBECONFIG");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    let output = command.output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).into_owned()
+        + &String::from_utf8_lossy(&output.stderr);
+    (output.status.success(), text)
+}
+
+#[test]
+fn gate_set_with_invalid_inputs_fails_the_default_run() {
+    let (passed, output) = run_self(
+        &["--exact", "cluster_gate_inputs_fail_closed_when_set"],
+        &[("FS_TEST_CLUSTER", "1"), ("FS_TEST_WAS02_IMAGE", "not-pinned")],
+    );
+    assert!(!passed, "an invalid opt-in must fail the default run: {output}");
+    assert!(
+        output.contains("UNVERIFIED: FS_TEST_WAS02_IMAGE must be <repo>@sha256:<digest>"),
+        "{output}"
+    );
+}
+
+#[test]
+fn requesting_the_live_qualification_without_the_gate_fails() {
+    let (passed, output) = run_self(&["--exact", "cluster_capability_gates", "--ignored"], &[]);
+    assert!(!passed, "an unset gate must not read as a pass: {output}");
+    assert!(output.contains("FS_TEST_CLUSTER is unset"), "{output}");
 }
 
 #[test]

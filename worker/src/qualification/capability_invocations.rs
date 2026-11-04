@@ -127,11 +127,13 @@ pub fn storage_keys_cannot_escape_the_verified_binding_and_buffers_are_bounded()
     }
     impl Bindings for Storage {
         fn call(&self, context: &Context, operation: Operation) -> Result<Reply, HostError> {
+            // Count first: a failed assertion below panics in the binding helper, which maps
+            // to Denied, so the count is what proves whether the binding was reached.
+            self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(
                 (&*context.tenant, &*context.workspace),
                 ("verified-tenant", "verified-workspace")
             );
-            self.calls.fetch_add(1, Ordering::SeqCst);
             match operation {
                 Operation::Read { key, .. } => {
                     assert_eq!(key, "objects/good");
@@ -195,36 +197,38 @@ pub fn storage_keys_cannot_escape_the_verified_binding_and_buffers_are_bounded()
 #[cfg_attr(test, test)]
 pub fn workflows_authorize_targets_and_signal_only_host_issued_handles() {
     let _case = crate::capability_support::serial_case();
+    // Records every call before anything else and never panics: a panic in the binding helper
+    // is mapped to Denied, which would let an out-of-grant start that reached the binding pass
+    // as an expected denial with zero recorded starts.
+    #[derive(Default)]
     struct Workflows {
-        starts: AtomicUsize,
-        signals: AtomicUsize,
+        starts: std::sync::Mutex<Vec<String>>,
+        signals: std::sync::Mutex<Vec<(String, String)>>,
+        unexpected: AtomicUsize,
     }
     impl Bindings for Workflows {
         fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
             match operation {
                 Operation::Start { workflow, .. } => {
-                    assert_eq!(workflow, "invoice");
-                    self.starts.fetch_add(1, Ordering::SeqCst);
+                    self.starts.lock().unwrap().push(workflow);
                     Ok(Reply::Execution("binding-id".into()))
                 }
                 Operation::Signal {
                     execution, name, ..
                 } => {
-                    assert_eq!(execution, "binding-id");
-                    assert_eq!(name, "tick");
-                    self.signals.fetch_add(1, Ordering::SeqCst);
+                    self.signals.lock().unwrap().push((execution, name));
                     Ok(Reply::Empty)
                 }
-                _ => panic!("unexpected operation"),
+                _ => {
+                    self.unexpected.fetch_add(1, Ordering::SeqCst);
+                    Err(HostError::Timeout)
+                }
             }
         }
     }
     let engine = wasmtime::Engine::default();
     for mode in 0..4 {
-        let binding = Arc::new(Workflows {
-            starts: AtomicUsize::new(0),
-            signals: AtomicUsize::new(0),
-        });
+        let binding = Arc::new(Workflows::default());
         let context = Context {
             grants: Grants {
                 targets: vec!["invoice".into()],
@@ -247,14 +251,30 @@ pub fn workflows_authorize_targets_and_signal_only_host_issued_handles() {
         } else {
             assert!(result.is_err());
         }
+        // Only the granted target ever reaches the binding; an out-of-grant start does not.
+        let expected_starts: &[&str] = if mode == 0 || mode == 2 {
+            &["invoice"]
+        } else {
+            &[]
+        };
+        assert_eq!(*binding.starts.lock().unwrap(), expected_starts, "mode {mode}");
+        let expected_signals: &[(&str, &str)] = if mode == 0 {
+            &[("binding-id", "tick")]
+        } else {
+            &[]
+        };
         assert_eq!(
-            binding.starts.load(Ordering::SeqCst),
-            usize::from(mode == 0 || mode == 2)
+            binding
+                .signals
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(execution, name)| (execution.as_str(), name.as_str()))
+                .collect::<Vec<_>>(),
+            expected_signals,
+            "mode {mode}"
         );
-        assert_eq!(
-            binding.signals.load(Ordering::SeqCst),
-            usize::from(mode == 0)
-        );
+        assert_eq!(binding.unexpected.load(Ordering::SeqCst), 0, "mode {mode}");
     }
 }
 

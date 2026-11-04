@@ -6,31 +6,42 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Records every binding call and never panics: a panic in the binding helper is mapped to
+/// `Denied`, which would let a crashed mock satisfy an expected denial. Unexpected calls are
+/// recorded and returned as `Timeout`, and `invoke` fails the test on the test thread.
 struct Script {
     answers: Mutex<VecDeque<Vec<IpAddr>>>,
     responses: Mutex<VecDeque<Response>>,
+    resolved: Mutex<Vec<String>>,
     connected: Mutex<Vec<IpAddr>>,
+    unexpected: Mutex<Vec<&'static str>>,
 }
 impl Bindings for Script {
     fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-        panic!("HTTP must use pinned transport");
-    }
-    fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, HostError> {
-        Ok(self
-            .answers
+        self.unexpected
             .lock()
             .unwrap()
-            .pop_front()
-            .expect("unexpected re-resolution"))
+            .push("HTTP must use pinned transport");
+        Err(HostError::Timeout)
+    }
+    fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, HostError> {
+        self.resolved.lock().unwrap().push(host.to_owned());
+        let answer = self.answers.lock().unwrap().pop_front();
+        answer.ok_or_else(|| {
+            self.unexpected
+                .lock()
+                .unwrap()
+                .push("unexpected re-resolution");
+            HostError::Timeout
+        })
     }
     fn http(&self, _: &Context, request: &PinnedRequest) -> Result<Response, HostError> {
         self.connected.lock().unwrap().push(request.address().ip());
-        Ok(self
-            .responses
-            .lock()
-            .unwrap()
-            .pop_front()
-            .expect("unexpected connection"))
+        let response = self.responses.lock().unwrap().pop_front();
+        response.ok_or_else(|| {
+            self.unexpected.lock().unwrap().push("unexpected connection");
+            HostError::Timeout
+        })
     }
 }
 fn response(location: Option<&str>) -> Response {
@@ -65,7 +76,9 @@ fn invoke(
                 .collect(),
         ),
         responses: Mutex::new(responses.into()),
+        resolved: Mutex::new(Vec::new()),
         connected: Mutex::new(Vec::new()),
+        unexpected: Mutex::new(Vec::new()),
     });
     let mut hosts = vec!["allowed.test".into()];
     hosts.extend(extra_hosts.into_iter().map(str::to_owned));
@@ -86,7 +99,13 @@ fn invoke(
     let run = instance
         .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
         .unwrap();
-    (run.call(&mut store, (mode,)).unwrap().0, binding)
+    let result = run.call(&mut store, (mode,)).unwrap().0;
+    assert!(
+        binding.unexpected.lock().unwrap().is_empty(),
+        "unexpected binding calls: {:?}",
+        binding.unexpected.lock().unwrap()
+    );
+    (result, binding)
 }
 
 #[cfg_attr(test, test)]
@@ -108,8 +127,13 @@ pub fn allow_list_resolution_pinning_and_every_redirect_are_enforced() {
         1,
         "transport must not re-resolve"
     );
-    let (result, binding) = invoke(1, vec![], vec![], vec![]);
+    // An unlisted host is denied before resolution, even though a public answer is scripted.
+    let (result, binding) = invoke(1, vec![vec!["8.8.4.4"]], vec![response(None)], vec![]);
     assert_eq!(result, 1);
+    assert!(
+        binding.resolved.lock().unwrap().is_empty(),
+        "the resolver must not be consulted for an unlisted host"
+    );
     assert!(binding.connected.lock().unwrap().is_empty());
     // Every address in an answer must be public, including on a redirect hop.
     for mixed in [vec!["8.8.8.8", "10.0.0.1"], vec!["10.0.0.1", "8.8.8.8"]] {
@@ -125,16 +149,26 @@ pub fn allow_list_resolution_pinning_and_every_redirect_are_enforced() {
         assert_eq!(result, 1);
         assert_eq!(binding.connected.lock().unwrap().len(), 1);
     }
-    for location in ["http://unlisted.test/", "http://allowed.test/redirect"] {
-        let (result, binding) = invoke(
-            0,
-            vec![vec!["8.8.8.8"], vec!["127.0.0.1"]],
-            vec![response(Some(location))],
-            vec![],
-        );
-        assert_eq!(result, 1);
-        assert_eq!(binding.connected.lock().unwrap().len(), 1);
-    }
+    // A redirect to an unlisted host is denied on the hop itself: its answer is public, so
+    // only the allow-list can stop it, and the resolver is consulted for allowed.test only.
+    let (result, binding) = invoke(
+        0,
+        vec![vec!["8.8.8.8"], vec!["8.8.4.4"]],
+        vec![response(Some("http://unlisted.test/")), response(None)],
+        vec![],
+    );
+    assert_eq!(result, 1);
+    assert_eq!(*binding.resolved.lock().unwrap(), ["allowed.test"]);
+    assert_eq!(binding.connected.lock().unwrap().len(), 1);
+    // A redirect to a listed host whose answer is loopback is denied by the address check.
+    let (result, binding) = invoke(
+        0,
+        vec![vec!["8.8.8.8"], vec!["127.0.0.1"]],
+        vec![response(Some("http://allowed.test/redirect"))],
+        vec![],
+    );
+    assert_eq!(result, 1);
+    assert_eq!(binding.connected.lock().unwrap().len(), 1);
     let (result, binding) = invoke(
         0,
         vec![vec!["8.8.8.8"]; 6],
