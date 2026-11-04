@@ -6,8 +6,8 @@
 use super::{Bindings, Context, HostError, Level, Operation, Pair, Reply, import_allowed};
 use std::collections::BTreeMap;
 use std::sync::{
-    Arc, OnceLock,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Condvar, Mutex, OnceLock, Weak,
+    atomic::{AtomicBool, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -19,26 +19,156 @@ use wasmtime::{Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
 pub const BUFFER_BYTES: usize = 1_048_576;
 pub const GUEST_MEMORY_BYTES: usize = 256 * 1024 * 1024;
-const HELPER_THREADS: usize = 4;
+// Retained storage metadata is outside guest linear memory. With at most 1024
+// live handles, this bounds retained keys to 1 MiB, independently of call count.
+const STORAGE_KEY_BYTES: usize = 1024;
+// ADR 0007's qualification concurrency is 20. Reserve four additional helpers
+// for detached calls, but bound *all* running helpers, including binding drops.
+const HELPER_THREADS: usize = 20 + 4;
+const STALLED_PER_BINDING: usize = 4;
 
-struct ThreadBudget(AtomicUsize);
-struct Permit(&'static ThreadBudget);
-impl Drop for Permit {
-    fn drop(&mut self) {
-        self.0.0.fetch_sub(1, Ordering::AcqRel);
+#[derive(Default)]
+struct BudgetState {
+    live: usize,
+    stalled: BTreeMap<usize, usize>,
+}
+#[derive(Default)]
+struct ThreadBudget {
+    state: Mutex<BudgetState>,
+    available: Condvar,
+}
+#[derive(Default)]
+struct CallState {
+    detached: bool,
+    finished: bool,
+}
+struct CallTicket {
+    budget: &'static ThreadBudget,
+    binding_id: usize,
+    // Keep the allocation identity stable even during the binding's destructor.
+    _binding: Weak<dyn Bindings>,
+    state: Mutex<CallState>,
+}
+struct Permit(Arc<CallTicket>);
+
+impl CallTicket {
+    fn detach(&self) {
+        // Always lock budget before call state, as in Permit::drop.
+        let mut budget = self
+            .budget
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut call = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !call.finished && !call.detached {
+            call.detached = true;
+            *budget.stalled.entry(self.binding_id).or_default() += 1;
+            self.budget.available.notify_all();
+        }
     }
 }
-fn permit() -> Result<Permit, HostError> {
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let ticket = &self.0;
+        let mut budget = ticket
+            .budget
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut call = ticket
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        call.finished = true;
+        budget.live -= 1;
+        if call.detached {
+            let remaining = budget
+                .stalled
+                .get_mut(&ticket.binding_id)
+                .expect("detached call is registered");
+            *remaining -= 1;
+            if *remaining == 0 {
+                budget.stalled.remove(&ticket.binding_id);
+            }
+        }
+        ticket.budget.available.notify_all();
+    }
+}
+fn permit(
+    binding: &Arc<dyn Bindings>,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+) -> Result<Permit, HostError> {
     // One budget for this worker process, independent of guest/store lifetime.
     static BUDGET: OnceLock<ThreadBudget> = OnceLock::new();
-    let budget = BUDGET.get_or_init(|| ThreadBudget(AtomicUsize::new(0)));
-    budget
-        .0
-        .try_update(Ordering::AcqRel, Ordering::Acquire, |live| {
-            (live < HELPER_THREADS).then_some(live + 1)
-        })
-        .map(|_| Permit(budget))
-        .map_err(|_| HostError::LimitExceeded)
+    let budget = BUDGET.get_or_init(ThreadBudget::default);
+    let binding_id = Arc::as_ptr(binding) as *const () as usize;
+    let mut state = budget
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(HostError::Cancelled);
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(HostError::Timeout);
+        }
+        if state.stalled.get(&binding_id).copied().unwrap_or(0) >= STALLED_PER_BINDING
+            || state.stalled.values().sum::<usize>() >= HELPER_THREADS
+        {
+            return Err(HostError::LimitExceeded);
+        }
+        if state.live < HELPER_THREADS {
+            state.live += 1;
+            return Ok(Permit(Arc::new(CallTicket {
+                budget,
+                binding_id,
+                _binding: Arc::downgrade(binding),
+                state: Mutex::new(CallState::default()),
+            })));
+        }
+        // Healthy contention waits within the call deadline instead of returning
+        // a spurious limit error. Cancellation is independent of fuel/epochs.
+        state = budget
+            .available
+            .wait_timeout(state, remaining.min(Duration::from_millis(2)))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .0;
+    }
+}
+
+// Struct fields drop in declaration order, on return and during unwinding.
+// The closure owns this entire value, so all binding captures retire before
+// its permit, including a binding destructor that blocks after a panic.
+struct Helper {
+    binding: Arc<dyn Bindings>,
+    context: Context,
+    cancelled: Arc<AtomicBool>,
+    operation: Option<Operation>,
+    send: mpsc::SyncSender<Result<Reply, HostError>>,
+    deadline: Instant,
+    _permit: Permit,
+}
+impl Helper {
+    fn run(mut self) {
+        let result = match self.operation.take().expect("helper operation") {
+            Operation::Http(request) => super::net::request(
+                self.binding.as_ref(),
+                &self.context,
+                request,
+                self.deadline,
+                self.cancelled.clone(),
+            )
+            .map(Reply::Http),
+            operation => self.binding.call(&self.context, operation),
+        };
+        let _ = self.send.send(result);
+    }
 }
 
 #[derive(Default)]
@@ -202,11 +332,13 @@ impl Host {
     }
 
     fn handle(&mut self) -> Result<u32, HostError> {
+        if self.keys.len() + self.executions.len() >= 1024 {
+            return Err(HostError::LimitExceeded);
+        }
         let handle = self.next_handle;
         self.next_handle = self
             .next_handle
             .checked_add(1)
-            .filter(|next| *next <= 1024)
             .ok_or(HostError::LimitExceeded)?;
         Ok(handle)
     }
@@ -224,37 +356,30 @@ impl Host {
             return Err(HostError::Cancelled);
         }
         let deadline = Instant::now() + self.call_timeout;
-        let permit = permit()?;
-        let context = self.context.clone();
-        let binding = self.bindings.clone();
-        let cancelled = self.cancelled.clone();
+        let permit = permit(&self.bindings, deadline, &self.cancelled)?;
+        let ticket = permit.0.clone();
         let (send, receive) = mpsc::sync_channel(1);
+        let helper = Helper {
+            binding: self.bindings.clone(),
+            context: self.context.clone(),
+            cancelled: self.cancelled.clone(),
+            operation: Some(operation),
+            send,
+            deadline,
+            _permit: permit,
+        };
         std::thread::Builder::new()
             .name("capability-binding".into())
-            .spawn(move || {
-                // The detached helper owns the permit, even after timeout, cancellation
-                // or guest destruction. Only actual thread exit releases the slot.
-                let _permit = permit;
-                let result = match operation {
-                    Operation::Http(request) => super::net::request(
-                        binding.as_ref(),
-                        &context,
-                        request,
-                        deadline,
-                        cancelled,
-                    )
-                    .map(Reply::Http),
-                    operation => binding.call(&context, operation),
-                };
-                let _ = send.send(result);
-            })
+            .spawn(move || helper.run())
             .map_err(|_| HostError::LimitExceeded)?;
         loop {
             if self.cancelled.load(Ordering::Acquire) {
+                ticket.detach();
                 return Err(HostError::Cancelled);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
+                ticket.detach();
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
@@ -279,10 +404,14 @@ fn storage_resource<T: Send + 'static>(
         names[1],
         move |mut store: StoreContextMut<'_, Host>, (key,): (WasmStr,)| {
             let result: Result<Resource<T>, HostError> = (|| {
-                let key = string(&key, &store, &mut Bytes::default())?;
+                let key = key.to_str(&store).map_err(|_| HostError::Denied)?;
+                if key.len() > STORAGE_KEY_BYTES {
+                    return Err(HostError::LimitExceeded);
+                }
                 if !store.data().context.grants.allows_key(&key) {
                     return Err(HostError::Denied);
                 }
+                let key = key.into_owned();
                 let rep = store.data_mut().handle()?;
                 store.data_mut().keys.insert(rep, (checkpoint, key));
                 Ok(Resource::new_own(rep))
@@ -328,7 +457,9 @@ fn storage_resource<T: Send + 'static>(
     )
 }
 
-/// Compiles raw component source; never accepts precompiled native artifacts.
+/// Qualification-only: compiles raw source in process, never native artifacts.
+/// A runtime adapter must use the supervised trusted compiler for tenant input;
+/// this fixture entry point does not enforce compilation CPU or memory budgets.
 pub fn instantiate(
     engine: &Engine,
     source: impl AsRef<[u8]>,
@@ -569,20 +700,27 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.hosts.is_empty() {
-        linker.instance("falcone:host/http@0.1.0")?.func_wrap("request", |mut store: StoreContextMut<'_,Host>, (url,method,headers,body): (WasmStr,WasmStr,WasmList<LazyPair>,WasmList<u8>)| {
-            let result: Result<super::net::Response,HostError> = (|| {
-                preflight(&mut store,&[&url,&method],&[&body],Some(&headers),0)?;
-                let mut bytes = Bytes::default();
-                let url = string(&url,&store,&mut bytes)?;
-                let method = string(&method,&store,&mut bytes)?;
-                let headers = pairs(&headers,&mut store,&mut bytes)?;
-                let body = data(&body,&mut store,&mut bytes)?;
-                match store.data().call(Operation::Http(super::net::Request {url,method,headers,body}))? {
-                    Reply::Http(response) => Ok(response), _ => Err(HostError::Denied),
-                }
-            })();
-            Ok((result,))
-        })?;
+        linker.instance("falcone:host/http@0.1.0")?.func_wrap(
+            "request",
+            |mut store: StoreContextMut<'_, Host>,
+             (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
+                let result: Result<super::net::Response, HostError> = (|| {
+                    preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
+                    let mut bytes = Bytes::default();
+                    let url = string(&url, &store, &mut bytes)?;
+                    let method = string(&method, &store, &mut bytes)?;
+                    let headers = pairs(&headers, &mut store, &mut bytes)?;
+                    let body = data(&body, &mut store, &mut bytes)?;
+                    match store.data().call(Operation::Http(super::net::Request {
+                        url, method, headers, body,
+                    }))? {
+                        Reply::Http(response) => Ok(response),
+                        _ => Err(HostError::Denied),
+                    }
+                })();
+                Ok((result,))
+            },
+        )?;
     }
     let mut store = Store::new(engine, host);
     store.limiter(|host| &mut host.limits);

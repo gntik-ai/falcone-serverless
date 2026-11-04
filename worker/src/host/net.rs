@@ -278,7 +278,7 @@ pub(super) fn request(
             let host = if url.host.contains(':') {
                 format!("[{}]", url.host)
             } else {
-                url.host
+                url.host.clone()
             };
             format!(
                 "{}://{host}:{}{location}",
@@ -290,6 +290,22 @@ pub(super) fn request(
         } else {
             return Err(HostError::Denied);
         };
+        let next = parse_url(&request.url)?;
+        if url.tls && !next.tls {
+            return Err(HostError::Denied);
+        }
+        if !url.host.eq_ignore_ascii_case(&next.host)
+            || url.port != next.port
+            || url.tls != next.tls
+        {
+            // Guest credentials belong to this origin, even if the next origin
+            // has its own grant. Never forward them across host/scheme/port.
+            request.headers.retain(|header| {
+                !["authorization", "cookie", "cookie2"]
+                    .iter()
+                    .any(|name| header.name.eq_ignore_ascii_case(name))
+            });
+        }
         if response.status == 303 {
             request.method = "GET".into();
             request.body.clear();
@@ -339,4 +355,54 @@ pub fn public_address(ip: IpAddr) -> bool {
         && segments[0] != 0x2002
         && !(segments[0] == 0x2001 && (segments[1] < 0x200 || segments[1] == 0xdb8))
         && !(segments[0] == 0x3fff && segments[1] & 0xf000 == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{net::TcpListener, time::Duration};
+
+    #[test]
+    fn pinned_connect_uses_only_the_numeric_peer_and_checks_deadline_and_cancellation() {
+        let allowed = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                println!("NOT RUN: EPERM (sandbox), PR CI runs them");
+                return;
+            }
+            Err(error) => panic!("listener: {error}"),
+        };
+        let forbidden = TcpListener::bind("127.0.0.1:0").unwrap();
+        forbidden.set_nonblocking(true).unwrap();
+        // Transport-only fixture: the gate normally constructs this after its
+        // public-address check. No DNS or TLS connection is needed here.
+        let mut request = PinnedRequest {
+            address: allowed.local_addr().unwrap(),
+            authority: "does-not-resolve.invalid".into(),
+            tls: false,
+            path: "/".into(),
+            method: "GET".into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            deadline: Instant::now() + Duration::from_secs(1),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let stream = request.connect().unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), allowed.local_addr().unwrap());
+        let _ = allowed.accept().unwrap();
+        assert_eq!(
+            forbidden.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        allowed.set_nonblocking(true).unwrap();
+        request.cancelled.store(true, Ordering::Release);
+        assert_eq!(request.connect().unwrap_err(), HostError::Cancelled);
+        request.cancelled.store(false, Ordering::Release);
+        request.deadline = Instant::now();
+        assert_eq!(request.connect().unwrap_err(), HostError::Timeout);
+        assert_eq!(
+            allowed.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
 }

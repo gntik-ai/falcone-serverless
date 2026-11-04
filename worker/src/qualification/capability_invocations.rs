@@ -414,7 +414,7 @@ pub fn process_budget_probe() {
             self.peak.fetch_max(live, Ordering::SeqCst);
             let (lock, wake) = &self.release;
             let _ = wake
-                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(2), |released| {
+                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |released| {
                     !*released
                 })
                 .unwrap();
@@ -467,6 +467,47 @@ pub fn process_budget_probe() {
         "permits must survive invocation timeout and store drop"
     );
     assert_eq!(binding.peak.load(Ordering::SeqCst), 4);
+    // All four detached calls belong to one stalled binding. A separate healthy
+    // binding must still serve the ADR 0007 starting concurrency of 20 guests.
+    let healthy = Arc::new(Recording::default());
+    let start = Arc::new(std::sync::Barrier::new(21));
+    let guests = (0..20)
+        .map(|_| {
+            let context = Context {
+                grants: Grants {
+                    topics: vec!["orders".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let (mut store, instance) = host::instantiate(
+                &engine,
+                include_str!("fixtures/capability-events.wat"),
+                Host::new(context, healthy.clone()),
+            )
+            .unwrap();
+            let run = instance
+                .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+                .unwrap();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                (0..100)
+                    .map(|_| run.call(&mut store, (0,)).unwrap().0)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    let results = guests
+        .into_iter()
+        .flat_map(|guest| guest.join().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        results.iter().all(|result| *result == 0),
+        "healthy concurrent calls were denied"
+    );
+    assert_eq!(healthy.0.load(Ordering::SeqCst), 2000);
     *binding.release.0.lock().unwrap() = true;
     binding.release.1.notify_all();
     let deadline = Instant::now() + TOLERANCE;
@@ -493,6 +534,83 @@ pub fn process_budget_probe() {
         .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    // Concurrent stalls can occupy the active capacity as well as the reserve,
+    // but may never exceed the process-wide ceiling, even after stores drop.
+    let binding = Arc::new(Stalled {
+        release: (Mutex::new(false), Condvar::new()),
+        live: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let start = Arc::new(std::sync::Barrier::new(33));
+    let guests = (0..32)
+        .map(|_| {
+            let context = Context {
+                grants: Grants {
+                    topics: vec!["orders".into()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut host = Host::new(context, binding.clone());
+            host.set_call_timeout(Duration::from_millis(500));
+            let (mut store, instance) = host::instantiate(
+                &engine,
+                include_str!("fixtures/capability-events.wat"),
+                host,
+            )
+            .unwrap();
+            let run = instance
+                .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+                .unwrap();
+            let start = start.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                run.call(&mut store, (0,)).unwrap().0
+            })
+        })
+        .collect::<Vec<_>>();
+    start.wait();
+    for guest in guests {
+        assert!([2, 3].contains(&guest.join().unwrap()));
+    }
+    assert_eq!(binding.peak.load(Ordering::SeqCst), 24);
+    assert_eq!(binding.live.load(Ordering::SeqCst), 24);
+    assert_eq!(binding.calls.load(Ordering::SeqCst), 24);
+    let healthy = Arc::new(Recording::default());
+    let context = Context {
+        grants: Grants {
+            topics: vec!["orders".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut host = Host::new(context, healthy.clone());
+    host.set_call_timeout(Duration::from_secs(1));
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-events.wat"),
+        host,
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    let start = Instant::now();
+    assert_eq!(
+        run.call(&mut store, (0,)).unwrap(),
+        (2,),
+        "a completely stalled process budget must fail fast"
+    );
+    assert!(start.elapsed() < TOLERANCE);
+    assert_eq!(healthy.0.load(Ordering::SeqCst), 0);
+    *binding.release.0.lock().unwrap() = true;
+    binding.release.1.notify_all();
+    let deadline = Instant::now() + TOLERANCE;
+    while binding.live.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(binding.live.load(Ordering::SeqCst), 0);
     println!("thread-budget-probe passed");
 }
 
@@ -650,4 +768,304 @@ pub fn cancellation_interrupts_a_stalled_binding_without_guest_fuel_or_epoch() {
         std::thread::yield_now();
     }
     assert!(binding.finished.load(Ordering::Acquire));
+}
+
+#[cfg_attr(test, test)]
+pub fn retained_storage_probe() {
+    if std::env::var_os("WAS02_RETAINED_PROBE").is_none() {
+        return;
+    }
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(Recording::default());
+    let context = Context {
+        grants: Grants {
+            prefixes: vec!["objects/".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-handles.wat"),
+        Host::new(context, binding.clone()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32, u32, u32), (u32,)>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, (12, 1, 1)).unwrap(), (0,));
+    let before = high_water_bytes();
+    // Each key fits the per-call ceiling, but retaining 64 copies must not grow
+    // host memory by 64 MiB. The guest has only 2 MiB of linear memory.
+    let result = run.call(&mut store, (1_048_572, 64, 0)).unwrap();
+    let delta = high_water_bytes().saturating_sub(before);
+    assert!(
+        delta <= ALLOCATION_BOUND,
+        "retained host allocation: {delta}"
+    );
+    assert_eq!(result, (2,));
+    assert_eq!(binding.0.load(Ordering::SeqCst), 0);
+    println!("retained-storage-probe passed: {delta}");
+}
+
+#[cfg_attr(test, test)]
+pub fn retained_storage_memory_is_bounded() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["retained_storage_probe", "--nocapture"])
+        .env("WAS02_RETAINED_PROBE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("retained-storage-probe passed:"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg_attr(test, test)]
+pub fn dropped_storage_handles_release_live_capacity() {
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(Recording::default());
+    let context = Context {
+        grants: Grants {
+            prefixes: vec!["objects/".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-handles.wat"),
+        Host::new(context, binding.clone()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32, u32, u32), (u32,)>(&mut store, "run")
+        .unwrap();
+    // The 1 KiB key boundary succeeds, and drops must permit long-lived guests
+    // to open more than 1024 handles over the invocation's lifetime.
+    assert_eq!(run.call(&mut store, (1024, 4096, 1)).unwrap(), (0,));
+    assert_eq!(run.call(&mut store, (1025, 1, 0)).unwrap(), (2,));
+    assert_eq!(run.call(&mut store, (1024, 1024, 0)).unwrap(), (0,));
+    assert_eq!(run.call(&mut store, (12, 1, 0)).unwrap(), (2,));
+    assert_eq!(binding.0.load(Ordering::SeqCst), 0);
+}
+
+#[cfg_attr(test, test)]
+pub fn structured_logging_redacts_guest_credentials_before_binding() {
+    struct Logs(AtomicUsize);
+    impl Bindings for Logs {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            let Operation::Log {
+                message, fields, ..
+            } = operation
+            else {
+                panic!("expected log")
+            };
+            assert!(message.is_empty());
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "Authorization");
+            assert_eq!(fields[0].value, "<REDACTED>");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Reply::Empty)
+        }
+    }
+    let source = include_str!("fixtures/capability-logging.wat")
+        .replacen(
+            "(func (export \"run\")",
+            "(data (i32.const 8192) \"Authorizationguesttoken\")\n    (func (export \"run\")",
+            1,
+        )
+        .replace(
+            "(i32.store (i32.const 4100) (i32.const 0))",
+            r#"
+          (i32.store (i32.const 4100) (i32.const 13))
+          (i32.store (i32.const 4104) (i32.const 8205))
+          (i32.store (i32.const 4108) (i32.const 10))"#,
+        );
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(Logs(AtomicUsize::new(0)));
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        source,
+        Host::new(Context::default(), binding.clone()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    assert_eq!(binding.0.load(Ordering::SeqCst), 1);
+}
+
+#[cfg_attr(test, test)]
+pub fn checkpoints_support_read_write_and_progress_through_the_granted_storage_handle() {
+    struct Checkpoints(AtomicUsize);
+    impl Bindings for Checkpoints {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            match operation {
+                Operation::Read { key, checkpoint } => {
+                    assert!(checkpoint);
+                    assert_eq!(key, "objects/good");
+                    Ok(Reply::Data(vec![42, 43]))
+                }
+                Operation::Write {
+                    key,
+                    checkpoint,
+                    data,
+                } => {
+                    assert!(checkpoint);
+                    assert_eq!(key, "objects/good");
+                    assert_eq!(data, [42, 43]);
+                    Ok(Reply::Empty)
+                }
+                Operation::ProgressCheckpoint { key } => {
+                    assert_eq!(key, "objects/good");
+                    Ok(Reply::Empty)
+                }
+                _ => panic!("unexpected checkpoint operation"),
+            }
+        }
+    }
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(Checkpoints(AtomicUsize::new(0)));
+    let context = Context {
+        grants: Grants {
+            prefixes: vec!["objects/".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-checkpoint.wat"),
+        Host::new(context, binding.clone()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    for mode in 0..3 {
+        assert_eq!(run.call(&mut store, (mode,)).unwrap(), (0,), "mode {mode}");
+    }
+    assert_eq!(binding.0.load(Ordering::SeqCst), 3);
+}
+
+#[cfg_attr(test, test)]
+pub fn binding_drop_probe() {
+    if std::env::var_os("WAS02_DROP_PROBE").is_none() {
+        return;
+    }
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
+    #[derive(Default)]
+    struct State {
+        release_calls: (Mutex<bool>, Condvar),
+        release_drops: (Mutex<bool>, Condvar),
+        calls: AtomicUsize,
+        drops: AtomicUsize,
+    }
+    struct PanickingBinding(Arc<State>);
+    impl Bindings for PanickingBinding {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.0.calls.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &self.0.release_calls;
+            drop(
+                wake.wait_timeout_while(
+                    lock.lock().unwrap(),
+                    Duration::from_secs(10),
+                    |released| !*released,
+                )
+                .unwrap(),
+            );
+            panic!("fixture binding panic");
+        }
+    }
+    impl Drop for PanickingBinding {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+            let (lock, wake) = &self.0.release_drops;
+            drop(
+                wake.wait_timeout_while(
+                    lock.lock().unwrap(),
+                    Duration::from_secs(10),
+                    |released| !*released,
+                )
+                .unwrap(),
+            );
+        }
+    }
+    let engine = wasmtime::Engine::default();
+    let state = Arc::new(State::default());
+    let context = Context {
+        grants: Grants {
+            topics: vec!["orders".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    for _ in 0..24 {
+        let mut host = Host::new(context.clone(), Arc::new(PanickingBinding(state.clone())));
+        host.set_call_timeout(Duration::from_millis(20));
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/capability-events.wat"),
+            host,
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (3,));
+    }
+    assert_eq!(state.calls.load(Ordering::SeqCst), 24);
+    *state.release_calls.0.lock().unwrap() = true;
+    state.release_calls.1.notify_all();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while state.drops.load(Ordering::SeqCst) < 24 && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+    assert_eq!(state.drops.load(Ordering::SeqCst), 24);
+    let healthy = Arc::new(Recording::default());
+    let mut host = Host::new(context, healthy.clone());
+    host.set_call_timeout(Duration::from_millis(20));
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-events.wat"),
+        host,
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    let result = run.call(&mut store, (0,)).unwrap();
+    // Always release the destructor gates before asserting the result.
+    *state.release_drops.0.lock().unwrap() = true;
+    state.release_drops.1.notify_all();
+    assert_eq!(
+        result,
+        (2,),
+        "helpers released their permits before binding destructors exited"
+    );
+    assert_eq!(healthy.0.load(Ordering::SeqCst), 0);
+    println!("binding-drop-probe passed");
+}
+
+#[cfg_attr(test, test)]
+pub fn helper_permits_cover_binding_destructors_even_during_unwinding() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["binding_drop_probe", "--nocapture"])
+        .env("WAS02_DROP_PROBE", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("binding-drop-probe passed"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

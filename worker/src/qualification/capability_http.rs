@@ -121,6 +121,15 @@ pub fn allow_list_resolution_pinning_and_every_redirect_are_enforced() {
         assert_eq!(result, 1);
         assert_eq!(binding.connected.lock().unwrap().len(), 1);
     }
+    let (result, binding) = invoke(
+        0,
+        vec![vec!["8.8.8.8"]; 6],
+        (0..6).map(|_| response(Some("/again"))).collect(),
+        vec![],
+    );
+    assert_eq!(result, 2, "redirect hop limit");
+    assert_eq!(binding.connected.lock().unwrap().len(), 6);
+    assert!(binding.answers.lock().unwrap().is_empty());
 }
 
 #[cfg_attr(test, test)]
@@ -271,4 +280,82 @@ pub fn socket_rebinding_and_redirects_accept_no_forbidden_connections() {
         forbidden.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[cfg_attr(test, test)]
+pub fn redirects_preserve_tls_and_scope_guest_credentials_to_the_origin() {
+    struct Redirect {
+        location: &'static str,
+        headers: Mutex<Vec<Vec<Pair>>>,
+    }
+    impl Bindings for Redirect {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            unreachable!()
+        }
+        fn resolve(&self, _: &str) -> Result<Vec<IpAddr>, HostError> {
+            Ok(vec!["8.8.8.8".parse().unwrap()])
+        }
+        fn http(&self, _: &Context, request: &PinnedRequest) -> Result<Response, HostError> {
+            let mut headers = self.headers.lock().unwrap();
+            headers.push(request.headers().to_vec());
+            Ok(response((headers.len() == 1).then_some(self.location)))
+        }
+    }
+    let source = include_str!("fixtures/capability-http.wat")
+        .replace("http://allowed.test/pathGET", "https://allowed.test/pathGET")
+        .replace("(i32.const 24)", "(i32.const 25)")
+        .replace("(i32.const 1048)", "(i32.const 1049)")
+        .replace("(data (i32.const 1280)", "(data (i32.const 2048) \"AuthorizationtokenCookiesessionX-Traceok\")\n    (data (i32.const 1280)")
+        .replace("(call $request", r#"
+          (local.set $headers (i32.const 3))
+          (i32.store (i32.const 4096) (i32.const 2048)) (i32.store (i32.const 4100) (i32.const 13))
+          (i32.store (i32.const 4104) (i32.const 2061)) (i32.store (i32.const 4108) (i32.const 5))
+          (i32.store (i32.const 4112) (i32.const 2066)) (i32.store (i32.const 4116) (i32.const 6))
+          (i32.store (i32.const 4120) (i32.const 2072)) (i32.store (i32.const 4124) (i32.const 7))
+          (i32.store (i32.const 4128) (i32.const 2079)) (i32.store (i32.const 4132) (i32.const 7))
+          (i32.store (i32.const 4136) (i32.const 2086)) (i32.store (i32.const 4140) (i32.const 2))
+          (call $request"#);
+    let engine = wasmtime::Engine::default();
+    for (location, expected, retained) in [
+        ("http://allowed.test/again", 1, 0),
+        ("https://other.test/again", 0, 1),
+        ("https://allowed.test:444/again", 0, 1),
+        ("https://allowed.test/again", 0, 3),
+    ] {
+        let binding = Arc::new(Redirect {
+            location,
+            headers: Mutex::new(Vec::new()),
+        });
+        let context = Context {
+            grants: Grants {
+                hosts: vec!["allowed.test".into(), "other.test".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) =
+            host::instantiate(&engine, &source, Host::new(context, binding.clone())).unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(
+            run.call(&mut store, (0,)).unwrap(),
+            (expected,),
+            "{location}"
+        );
+        let headers = binding.headers.lock().unwrap();
+        assert_eq!(headers[0].len(), 3);
+        if retained == 0 {
+            assert_eq!(headers.len(), 1);
+        } else {
+            assert_eq!(headers.len(), 2);
+            assert_eq!(headers[1].len(), retained);
+            if retained == 1 {
+                assert_eq!(
+                    (&*headers[1][0].name, &*headers[1][0].value),
+                    ("X-Trace", "ok")
+                );
+            }
+        }
+    }
 }

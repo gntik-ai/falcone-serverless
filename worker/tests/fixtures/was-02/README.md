@@ -42,7 +42,36 @@ Allocation probes re-exec in isolated children, warm up, and compare Linux
 bound is 256 KiB; eager String/Vec controls over the same fixtures must exceed
 32 MiB. Probe markers prevent an accidentally empty subprocess test from passing.
 The stalled-binding probe uses fresh invocations in a separate process and
-verifies the production four-thread cap, fast exhaustion, timeout and recovery.
+verifies that four detached calls to one stalled binding fail fast across fresh
+invocations while 20 concurrent guests still use a different healthy binding
+(2,000 successful calls). The process budget bounds every live helper to 24
+(ADR 0007's qualification concurrency of 20 plus four reserved slots), including
+concurrently stalled calls and binding destructors. A completely detached
+process budget fails fast even for a fresh binding identity. Active contention
+waits within the call deadline; permits stay owned by helpers until their captures
+have been dropped. A panic/unwinding probe holds 24 binding destructors open
+and verifies that no replacement helper starts until those destructors exit.
+The per-binding detached count is process-wide and removed
+only on helper exit, independent of invocation/store lifetime. Binding identity
+uses the trusted shared binding instance, with weak ownership preventing address
+reuse while a ticket remains. Runtime integration must preserve shared binding
+identity and size worker admission to this qualification capacity.
+
+Storage keys are limited to 1 KiB before copying. Combined with the limit of
+1,024 live object/checkpoint/execution handles per invocation, retained storage
+keys cannot exceed 1 MiB. Dropping handles frees capacity; handle numbers remain
+monotonic to avoid reusing a dropped handle. A separate isolated memory regression
+opens repeated near-1 MiB keys from a 2 MiB guest, observes limit-exceeded and
+zero binding calls, and checks growth against the same 256 KiB bound. The prior
+implementation retained about 64 MiB for the 64-key reproduction.
+
+HTTP redirects never downgrade HTTPS to HTTP. Authorization and cookie headers
+supplied by guests stay only on the same origin (host, scheme and port), even
+when the next origin is also allow-listed. Other headers retain their values.
+Checkpoint read/write/progress, structured log redaction, redirect hop limits and
+the pinned connection helper have explicit regression coverage. The public
+instantiation helper is qualification-only: future runtime integration must
+compile tenant sources through the supervised trusted compiler first.
 
 Operator qualification (not run by agents): with the runner's `KUBECONFIG` and
 an operator-built, digest-pinned `FS_TEST_WAS02_IMAGE` already set, run exactly:
