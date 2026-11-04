@@ -198,7 +198,13 @@ impl GitVersion {
             return Err(malformed);
         };
         for tail in [prerelease, build].into_iter().flatten() {
-            if tail.is_empty() || tail.contains('+') {
+            let identifiers_ok = tail.split('.').all(|identifier| {
+                !identifier.is_empty()
+                    && identifier
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            });
+            if !identifiers_ok {
                 return Err(malformed);
             }
         }

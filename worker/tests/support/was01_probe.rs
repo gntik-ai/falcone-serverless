@@ -161,10 +161,15 @@ pub fn run<K: Kubectl + ?Sized>(
 
     match exec(kubectl, namespace, &plan[0])? {
         Some(reply) if reply.code == 0 => {}
-        Some(_) => return Err("WAS-01 evidence: the namespace was not created".into()),
+        Some(_) => {
+            return Err(
+                "WAS-01 evidence: the namespace was not created (FS_TEST_NAMESPACE_MODE=create)"
+                    .into(),
+            );
+        }
         None => {
             return Err(format!(
-                "WAS-01 evidence: creating {} did not complete; check for it and delete it manually",
+                "WAS-01 evidence: creating {} did not complete (FS_TEST_NAMESPACE_MODE=create); check for it and delete it manually",
                 namespace.name()
             ));
         }

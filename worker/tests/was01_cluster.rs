@@ -1721,7 +1721,27 @@ mod evidence {
 
     #[test]
     fn a_missing_malformed_forbidden_or_failed_version_is_unverified_with_its_code() {
-        let cases: [(Result<Reply, String>, Reason); 9] = [
+        let cases: [(Result<Reply, String>, Reason); 14] = [
+            (
+                reply(&version_body("v1.37.2+"), 0),
+                Reason::MalformedVersion,
+            ),
+            (
+                reply(&version_body("v1.37.2+k3s..1"), 0),
+                Reason::MalformedVersion,
+            ),
+            (
+                reply(&version_body("v1.37.2-.rc"), 0),
+                Reason::MalformedVersion,
+            ),
+            (
+                reply(&version_body("v1.37.2-rc.1+"), 0),
+                Reason::MalformedVersion,
+            ),
+            (
+                reply(&version_body("v1.37.2+k3s_1"), 0),
+                Reason::MalformedVersion,
+            ),
             (reply("{}", 0), Reason::MissingVersion),
             (reply("{\"gitVersion\": 137}", 0), Reason::MalformedVersion),
             (reply("not json", 0), Reason::MalformedVersion),
@@ -2040,7 +2060,18 @@ mod evidence {
         let namespace = ns("order");
         let fake = Fake::healthy();
         let report = was01_probe::run(&fake, &namespace, RUN_BUDGET).unwrap();
-        assert_eq!(fake.calls(), was01_plan::build_plan(&namespace));
+        let n = namespace.name();
+        let mut expected = vec![
+            call(&["create", "namespace", n]),
+            call(&["get", "--raw", "/version"]),
+        ];
+        for resource in ["deployments.apps", "services", "leases.coordination.k8s.io"] {
+            for verb in ["get", "create", "update", "delete"] {
+                expected.push(call(&["auth", "can-i", verb, resource, "-n", n]));
+            }
+        }
+        expected.push(call(&["delete", "namespace", n, "--wait"]));
+        assert_eq!(fake.calls(), expected);
         deleted_last(&fake, &namespace);
         let plan = report.item(PLAN_ITEM).unwrap();
         assert_eq!(
@@ -2063,6 +2094,7 @@ mod evidence {
             let fake = Fake::new(move |_| answer.clone());
             let error = was01_probe::run(&fake, &namespace, RUN_BUDGET).unwrap_err();
             assert_eq!(fake.calls(), vec![was01_plan::create_call(&namespace)]);
+            assert!(error.contains("FS_TEST_NAMESPACE_MODE"), "{error}");
             assert!(
                 !error.contains("eyJ") && !error.contains("AlreadyExists"),
                 "{error}"
