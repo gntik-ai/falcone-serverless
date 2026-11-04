@@ -80,6 +80,9 @@ pub enum GateError {
     UngrantedImport(String),
     /// A grant covers the interface but the embedder supplied no binding for it.
     MissingBinding(&'static str),
+    /// A verified invocation-context identifier whose serialized return would exceed the
+    /// host-to-guest ceiling.
+    OversizedContext(&'static str),
     Compile(String),
     Instantiate(String),
     Call(String),
@@ -91,6 +94,12 @@ impl fmt::Display for GateError {
             Self::UndeclaredImport(name) => write!(f, "undeclared import `{name}`"),
             Self::UngrantedImport(name) => write!(f, "import `{name}` is not covered by a grant"),
             Self::MissingBinding(name) => write!(f, "no binding for granted interface `{name}`"),
+            Self::OversizedContext(name) => {
+                write!(
+                    f,
+                    "invocation-context `{name}` exceeds the host-to-guest ceiling"
+                )
+            }
             Self::Compile(reason) => write!(f, "compile failed: {reason}"),
             Self::Instantiate(reason) => write!(f, "instantiation failed: {reason}"),
             Self::Call(reason) => write!(f, "call failed: {reason}"),
@@ -682,6 +691,20 @@ impl Gate {
         component: &Component,
         context: InvocationContext,
     ) -> Result<Guest, GateError> {
+        let identifiers = [
+            ("invocation-key", &context.invocation_key),
+            ("attempt-id", &context.attempt_id),
+            ("idempotency-key", &context.idempotency_key),
+        ];
+        for (name, value) in identifiers {
+            if self
+                .limits
+                .check_response(string_bytes(value.len()))
+                .is_err()
+            {
+                return Err(GateError::OversizedContext(name));
+            }
+        }
         let mut linker: Linker<HostState> = Linker::new(&self.engine);
         let link =
             |result: engine::Result<()>| result.map_err(|e| GateError::Instantiate(e.to_string()));
