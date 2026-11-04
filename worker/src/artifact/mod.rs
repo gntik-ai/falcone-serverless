@@ -1,4 +1,4 @@
-//! Unwired artifact intake primitives; no native cache is loaded or persisted.
+//! Unwired raw artifact intake and bounded trusted compilation primitives.
 pub mod transfer;
 
 #[derive(Debug, PartialEq, Eq)]

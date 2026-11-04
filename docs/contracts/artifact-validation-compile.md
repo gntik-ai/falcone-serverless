@@ -1,11 +1,12 @@
 # Artifact validation and bounded compilation
 
 Contract: ctr-artifact-validation-compile
-Version: 2
+Version: 3
 
 This versioned contract separates raw Wasm validation, bounded trusted compilation
-and verified native cache loading. Version 2 adds the unwired WAS-02.t5 component validator and Linux compile child.
-It implements neither guest execution nor native cache loading or publication.
+and verified native cache loading. Version 3 adds bounded output capture and the
+unwired WAS-02.t6 process-owned, pod-local native cache. It implements no guest
+execution and wires no runtime consumer. Version 2's compile-only API remains compatible.
 
 ## Input fields
 
@@ -13,6 +14,7 @@ All fields are required. References must be immutable, digest-pinned and authori
 
 | Field | Meaning |
 | --- | --- |
+| `contract_version` | Must be 3; unsupported versions fail before validation, spawning or cache loading. |
 | `raw_wasm_ref` | Authorized reference to raw Wasm module or component bytes; never a native cache. |
 | `profile` | Qualified language/runtime profile selecting allowed imports, features and guest resource ceilings. |
 | `engine_version` | Exact qualified engine version. |
@@ -44,17 +46,22 @@ Every result contains the following fields. Failure yields `rejected`, never a u
 - `AVC-R5`: Validation rejects any declared memory maximum above the profile guest limit (`guest_memory_maximum`). Every declared memory is checked; unsupported memory declarations fail closed under the profile. Compiler memory and guest memory budgets are distinct.
 - `AVC-R6`: Guest/host `buffer_limits` belong to `ctr-wit-capability-host` (falcone-serverless:WAS-02.t1), currently `worker/wit/README.md`; this contract does not redefine them.
 
-Numeric defaults and qualification evidence belong to WAS-01 and the selected profile; this contract defines no new ceilings.
+Numeric production defaults and qualification evidence belong to WAS-01 and the
+selected profile. Version 3 adds only the native-output ceiling defined below;
+the qualification control budgets are not production defaults.
 
-### Version 2 enforcement
+### Version 3 enforcement
 
 The parent pipes stdin and applies RLIMIT_CPU and RLIMIT_AS with
 `rustix::process::prlimit(Pid::from_child)` before sending any bytes. Missing,
 zero or unenforceable budgets fail closed. The child reads stdin to EOF before
-creating the engine; it writes no files, persists no output and spawns no
+creating the engine; it writes no files, sends native output only to stdout and spawns no
 subprocesses. Thus its process tree consists of the child alone. Core dumps are
-disabled by the parent. The child compiles through the component API and discards
-the result. This is compile evidence, not a usable or published cache entry.
+disabled by the parent. The child compiles through the component API. The parent
+reads stdout concurrently with stdin transfer and process monitoring, so output
+backpressure cannot disable deadline or cancellation enforcement. Only a zero
+exit with bounded, nonempty output can produce a new entry. The legacy
+compile-only method still accepts status-only harnesses but cannot publish entries.
 
 | Limit | Measured quantity | Mechanism | Code | Fixture test (`artifact_validation.rs`) |
 | --- | --- | --- | --- | --- |
@@ -127,6 +134,60 @@ Diagnostics identify the failed element and use these stable codes. Diagnostic p
 | `buffer_limit_exceeded` | Aggregate guest/host transfer exceeds the capability-host ceiling; destination is unchanged. |
 | `compile_failed` | Trusted compiler failed, a required budget could not be applied, or an unknown child exit occurred. |
 | `cache_key_mismatch` | An entry's key is incomplete or differs from the expected key. |
+
+## Version 3 outcomes and native cache
+
+The `contract_version` input must equal 3. Both successful paths have no diagnostic;
+every error yields a rejected verdict and its diagnostic, never a usable component.
+
+| Outcome | Verdict | Diagnostic |
+| --- | --- | --- |
+| `compiled` | `accepted` | none |
+| `cache_hit` | `accepted` | none |
+| `validation` | `rejected` | `invalid_module` |
+| `precompiled` | `rejected` | `precompiled_rejected` |
+| `cpu` | `rejected` | `compile_cpu_limit_exceeded` |
+| `memory` | `rejected` | `compile_memory_limit_exceeded` |
+| `unsupported_version` | `rejected` | `unsupported_feature` |
+
+`MAX_COMPILED_OUTPUT_BYTES` is 67,108,864 bytes (64 MiB). Empty or over-cap stdout
+is `compile_failed`. All failure paths terminate and reap the child, discard
+output, leave no temporary file and publish no entry. The loader also bounds the
+manifest to 16 KiB and the complete entry to four bytes plus that bound plus the
+native-output ceiling.
+
+Construct the process-owned cache once at startup with a trusted compiler binary
+path and a caller-supplied pod-local directory. Generate its HMAC-SHA256 key with
+ring 0.17.14 `Key::generate` and `SystemRandom`; hold it only in memory. A new
+owner (including a restart) cannot reuse the old owner's entries. This is not a
+persistent/shared cache or a signing-key lifecycle.
+
+Each entry is one file named `<cache-key>.cache`: a four-byte big-endian JSON
+manifest length, that manifest, then native bytes. The manifest contains `key`,
+`bytes_sha256`, `provenance` (engine version, config hash, module hash) and `mac`.
+The MAC message is the JSON tuple of domain `falcone-native-cache-v3`, key,
+native SHA-256 and provenance. Only successful output from this owner's trusted
+child can mint a manifest. Native-cache source is never a request input.
+
+The sole audited loader, `worker/src/cache/load.rs`, opens with O_NOFOLLOW and
+O_NONBLOCK, verifies a bounded regular file and reads it into memory. It then
+checks the complete expected key, provenance, SHA-256 and constant-time
+`hmac::verify`, in that order, before loading that same buffer. No path is reopened
+and no file-based native-load API is allowed. Fresh child output passes exactly
+the same manifest gate. Any file/read/manifest/key/provenance/integrity/MAC/load
+failure is a miss; compile afresh or reject, never load unverified bytes.
+
+Publish one complete verified entry by atomic rename from a create-new, mode
+0600 temporary file in the same directory, only after successful completion,
+verification and the final cancellation/deadline check. Errors remove the staged
+file. No entry survives a process restart as trusted.
+
+Qualification uses CPU failure budgets of 1 s CPU, 1 GiB address space, 300 s
+deadline and memory failure budgets of 60 s CPU, 128 MiB address space, 300 s
+deadline. Both successful controls use 120 s CPU, 4 GiB address space and 300 s
+deadline. RLIMIT_AS is address space, not RSS; a non-parent SIGKILL is still
+classified as CPU, so a cgroup OOM kill can be misclassified. These tests do not
+add compiler confinement or certify production budgets.
 
 ## Design basis
 

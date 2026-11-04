@@ -557,6 +557,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "rand",
+ "ring",
  "rustix",
  "serde",
  "serde_json",

@@ -131,7 +131,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     let bin = path == Path::new("bin/qualification_runner.rs");
     let outcome = path == Path::new("qualification/outcome.rs");
     let runner = path == Path::new("qualification/runner.rs");
-    !source.contains("deserialize")
+    (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
         && (!source.contains("wasmtime::") || engine || bin)
         && (!source.contains("Status::Passed") || outcome)
         && (!(runner || bin) || (!source.contains("env::args") && !source.contains("Engine::new")))
@@ -174,5 +174,22 @@ fn qualification_sources_obey_boundaries() {
         ("bin/qualification_runner.rs", "Engine::new()"),
     ] {
         assert!(!source_valid(Path::new(path), source), "{path}: {source}");
+    }
+}
+
+#[test]
+fn native_load_exception_is_exactly_one_source_path() {
+    assert!(source_valid(Path::new("cache/load.rs"), "deserialize"));
+    for sibling in [
+        "cache/other.rs",
+        "cache/nested/load.rs",
+        "artifact/load.rs",
+        "qualification/load.rs",
+        "cache/load.rs.bak",
+    ] {
+        assert!(
+            !source_valid(Path::new(sibling), "deserialize"),
+            "{sibling}"
+        );
     }
 }
