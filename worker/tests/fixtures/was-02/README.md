@@ -86,12 +86,14 @@ Operator qualification (not run by agents): with the runner's `KUBECONFIG` and
 an operator-built, digest-pinned `FS_TEST_WAS02_IMAGE` already set, run exactly:
 
 ```sh
-FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_capability_gates -- --nocapture
+FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_capability_gates -- --ignored --nocapture
 ```
 
-Unset `FS_TEST_CLUSTER` reports `not run: FS_TEST_CLUSTER unset`, skips client
-construction, and keeps workspace CI green. Any set value other than `1`, or
-missing/invalid inputs when opted in, fails closed. The pod uses RuntimeDefault
+The live test is ignored by default with the visible reason
+`not run: FS_TEST_CLUSTER unset`, skips client construction, and keeps workspace
+CI green. The operator command explicitly selects it with `--ignored` and sets
+`FS_TEST_CLUSTER=1`. Any set value other than `1`, or missing/invalid inputs when
+opted in, fails closed. The pod uses RuntimeDefault
 seccomp, a read-only root, an arbitrary non-root UID and no service-account
 token. Namespace create/cleanup and labelled shared-mode cleanup reuse the
 existing namespace guard and `FS_TEST_NAMESPACE_MODE`/`FS_TEST_NAMESPACE` rules.

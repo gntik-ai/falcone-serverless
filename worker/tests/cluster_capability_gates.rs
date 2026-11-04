@@ -1,5 +1,5 @@
 //! Operator qualification: FS_TEST_CLUSTER=1 FS_TEST_WAS02_IMAGE=<repo>@sha256:<digest>
-//! cargo test --locked -p falcone-serverless-worker --test cluster_capability_gates -- --nocapture
+//! cargo test --locked -p falcone-serverless-worker --test cluster_capability_gates -- --ignored --nocapture
 //! The image is built and pinned by the operator; evidence belongs on #52.
 #![cfg(target_os = "linux")]
 
@@ -399,6 +399,24 @@ impl Cluster for RealCluster {
 }
 
 #[test]
+fn live_qualification_reports_ignored_when_cluster_unset() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cluster_capability_gates"])
+        .env_remove("FS_TEST_CLUSTER")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout
+            .contains("test cluster_capability_gates ... ignored, not run: FS_TEST_CLUSTER unset"),
+        "live qualification must visibly report its skip reason: {stdout}"
+    );
+    assert!(stdout.contains("0 passed; 0 failed; 1 ignored"), "{stdout}");
+}
+
+#[test]
+#[ignore = "not run: FS_TEST_CLUSTER unset"]
 fn cluster_capability_gates() -> Result<(), String> {
     opt_in(
         std::env::var("FS_TEST_CLUSTER").ok().as_deref(),
