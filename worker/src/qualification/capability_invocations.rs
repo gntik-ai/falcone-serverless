@@ -340,22 +340,48 @@ pub fn event_scope_and_oversized_lazy_arguments_are_checked_before_binding() {
 const ALLOCATION_BOUND: usize = 256 * 1024;
 const CONTROL_MINIMUM: usize = 32 * 1024 * 1024;
 
-fn high_water_bytes() -> usize {
-    std::fs::read_to_string("/proc/self/status")
-        .unwrap()
-        .lines()
-        .find_map(|line| {
-            line.strip_prefix("VmHWM:").map(|value| {
-                value
-                    .split_whitespace()
-                    .next()
-                    .unwrap()
-                    .parse::<usize>()
-                    .unwrap()
-                    * 1024
+/// Peak and file-backed/shared resident memory from `/proc/self/status`, in bytes.
+#[derive(Clone, Copy, Debug)]
+struct MemorySample {
+    peak: usize,
+    file: usize,
+    shmem: usize,
+}
+
+fn memory_sample() -> MemorySample {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let field = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(name).map(|value| {
+                    value
+                        .split_whitespace()
+                        .next()
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        * 1024
+                })
             })
-        })
-        .unwrap()
+            .unwrap()
+    };
+    MemorySample {
+        peak: field("VmHWM:"),
+        file: field("RssFile:"),
+        shmem: field("RssShmem:"),
+    }
+}
+
+/// Growth of the peak resident set across a call, less file-backed and shared pages first touched
+/// during it: code and data pages of the binary are resident memory but not host allocation, and
+/// how many of them a cold path faults in depends on the machine.
+fn host_growth(before: MemorySample, after: MemorySample) -> usize {
+    after
+        .peak
+        .saturating_sub(before.peak)
+        .saturating_sub(after.file.saturating_sub(before.file))
+        .saturating_sub(after.shmem.saturating_sub(before.shmem))
 }
 
 #[cfg_attr(test, test)]
@@ -374,7 +400,7 @@ pub fn allocation_probe() {
     } else {
         include_str!("fixtures/capability-events.wat")
     };
-    let delta = if eager == "eager" {
+    let (before, after) = if eager == "eager" {
         use wasmtime::component::{Component, Linker};
         let component = Component::new(&engine, source).unwrap();
         let mut linker = Linker::<()>::new(&engine);
@@ -419,9 +445,9 @@ pub fn allocation_probe() {
             .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
             .unwrap();
         assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
-        let before = high_water_bytes();
+        let before = memory_sample();
         assert_eq!(run.call(&mut store, (mode,)).unwrap(), (2,));
-        high_water_bytes().saturating_sub(before)
+        (before, memory_sample())
     } else {
         let context = Context {
             grants: Grants {
@@ -437,21 +463,22 @@ pub fn allocation_probe() {
             .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
             .unwrap();
         assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
-        let before = high_water_bytes();
+        let before = memory_sample();
         assert_eq!(run.call(&mut store, (mode,)).unwrap(), (2,));
-        let delta = high_water_bytes().saturating_sub(before);
+        let after = memory_sample();
         assert_eq!(binding.0.load(Ordering::SeqCst), 1);
-        delta
+        (before, after)
     };
+    let delta = host_growth(before, after);
     if eager == "eager" {
         assert!(
             delta >= CONTROL_MINIMUM,
-            "negative control missed eager lift: {delta}"
+            "negative control missed eager lift: {delta} ({before:?} -> {after:?})"
         );
     } else {
         assert!(
             delta <= ALLOCATION_BOUND,
-            "host allocated {delta} bytes (bound {ALLOCATION_BOUND})"
+            "host allocated {delta} bytes (bound {ALLOCATION_BOUND}; {before:?} -> {after:?})"
         );
     }
     println!("allocation-probe passed: {mode} {record} {eager} {delta}");
@@ -888,14 +915,15 @@ pub fn retained_storage_probe() {
         .get_typed_func::<(u32, u32, u32), (u32,)>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, (12, 1, 1)).unwrap(), (0,));
-    let before = high_water_bytes();
+    let before = memory_sample();
     // Each key fits the per-call ceiling, but retaining 64 copies must not grow
     // host memory by 64 MiB. The guest has only 2 MiB of linear memory.
     let result = run.call(&mut store, (1_048_572, 64, 0)).unwrap();
-    let delta = high_water_bytes().saturating_sub(before);
+    let after = memory_sample();
+    let delta = host_growth(before, after);
     assert!(
         delta <= ALLOCATION_BOUND,
-        "retained host allocation: {delta}"
+        "retained host allocation: {delta} ({before:?} -> {after:?})"
     );
     assert_eq!(result, (2,));
     assert_eq!(binding.0.load(Ordering::SeqCst), 0);
