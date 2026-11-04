@@ -157,6 +157,8 @@ pub fn storage_keys_cannot_escape_the_verified_binding_and_buffers_are_bounded()
         (2, false, 1, 0),
         (3, false, 1, 0),
         (4, false, 2, 0),
+        (5, false, 1, 0),
+        (6, false, 1, 0),
         (0, true, 2, 1),
     ] {
         let binding = Arc::new(Storage {

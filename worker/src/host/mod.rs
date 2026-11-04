@@ -143,12 +143,13 @@ impl Grants {
     pub fn allows_key(&self, key: &str) -> bool {
         relative_key(key)
             && self.prefixes.iter().any(|prefix| {
-                let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
-                relative_key(prefix)
-                    && !prefix.contains('*')
+                let path = prefix.strip_suffix('/').unwrap_or(prefix);
+                relative_key(path)
+                    && !path.contains('*')
+                    // A slash-terminated grant covers descendants only.
                     && (key == prefix
                         || key
-                            .strip_prefix(prefix)
+                            .strip_prefix(path)
                             .is_some_and(|tail| tail.starts_with('/')))
             })
     }

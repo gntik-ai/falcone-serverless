@@ -83,6 +83,7 @@ fn storage_prefixes_have_path_boundaries_and_no_escape_syntax() {
         assert!(grants.allows_key(key), "{key}");
     }
     for key in [
+        "objects",
         "other/good",
         "objectsevil/good",
         "../objects/good",
@@ -95,6 +96,13 @@ fn storage_prefixes_have_path_boundaries_and_no_escape_syntax() {
     ] {
         assert!(!grants.allows_key(key), "{key}");
     }
+    let grants = Grants {
+        prefixes: vec!["objects".into()],
+        ..Default::default()
+    };
+    assert!(grants.allows_key("objects"));
+    assert!(grants.allows_key("objects/good"));
+    assert!(!grants.allows_key("objectsevil/good"));
 }
 
 #[test]
