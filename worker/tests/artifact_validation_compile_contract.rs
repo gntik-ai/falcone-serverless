@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-const HEADER: &[&str] = &["Contract: ctr-artifact-validation-compile", "Version: 2"];
+const HEADER: &[&str] = &["Contract: ctr-artifact-validation-compile", "Version: 3"];
 
 struct Section {
     heading: &'static str,
@@ -15,6 +15,7 @@ const SECTIONS: &[Section] = &[
     Section {
         heading: "Input fields",
         tokens: &[
+            "contract_version",
             "raw_wasm_ref",
             "profile",
             "engine_version",
@@ -197,6 +198,48 @@ const SECTIONS: &[Section] = &[
             "buffer_limit_exceeded",
         ],
         statements: &[],
+    },
+    Section {
+        heading: "Version 3 outcomes and native cache",
+        tokens: &[
+            "MAX_COMPILED_OUTPUT_BYTES",
+            "contract_version",
+            "compiled",
+            "cache_hit",
+            "validation",
+            "precompiled",
+            "cpu",
+            "memory",
+            "unsupported_version",
+        ],
+        statements: &[
+            ("compiled", "| `compiled` | `accepted` | none |"),
+            ("cache_hit", "| `cache_hit` | `accepted` | none |"),
+            (
+                "validation",
+                "| `validation` | `rejected` | `invalid_module` |",
+            ),
+            (
+                "precompiled",
+                "| `precompiled` | `rejected` | `precompiled_rejected` |",
+            ),
+            (
+                "cpu",
+                "| `cpu` | `rejected` | `compile_cpu_limit_exceeded` |",
+            ),
+            (
+                "memory",
+                "| `memory` | `rejected` | `compile_memory_limit_exceeded` |",
+            ),
+            (
+                "unsupported_version",
+                "| `unsupported_version` | `rejected` | `unsupported_feature` |",
+            ),
+            (
+                "MAX_COMPILED_OUTPUT_BYTES",
+                "`MAX_COMPILED_OUTPUT_BYTES` is 67,108,864 bytes (64 MiB).",
+            ),
+        ],
     },
     Section {
         heading: "Design basis",

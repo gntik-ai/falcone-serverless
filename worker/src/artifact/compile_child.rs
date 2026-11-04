@@ -1,5 +1,5 @@
 //! Trusted compile-only executable. The parent sets OS limits before sending stdin.
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::process::ExitCode;
 
 // The fixed WAS-01 source guard requires all engine use here through a crate alias.
@@ -14,10 +14,13 @@ fn main() -> ExitCode {
     let mut config = engine::Config::new();
     // Keep in sync with cache_key::ENGINE_CONFIG; all other options are pinned defaults.
     config.consume_fuel(true).epoch_interruption(true);
-    let result = engine::Engine::new(&config)
-        .and_then(|engine| engine.precompile_component(&input).map(|_| ()));
+    let result =
+        engine::Engine::new(&config).and_then(|engine| engine.precompile_component(&input));
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(bytes) => match io::stdout().lock().write_all(&bytes) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::from(65),
+        },
         Err(error) => {
             let message = format!("{error:#}").to_ascii_lowercase();
             if [
