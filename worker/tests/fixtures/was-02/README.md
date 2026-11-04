@@ -51,6 +51,11 @@ process budget fails fast even for a fresh binding identity. Active contention
 waits within the call deadline; permits stay owned by helpers until their captures
 have been dropped. A panic/unwinding probe holds 24 binding destructors open
 and verifies that no replacement helper starts until those destructors exit.
+Probe stages poll helper entry and exit for up to 10 s instead of assuming that
+a call timeout schedules its helper. Stalled bindings stay gated until explicitly
+released. Fail-fast checks allow 2 s against a 30 s call deadline; the ordinary
+20 ms timeout checks allow a 2 s scheduling tolerance. The concurrent saturation
+stage cancels guests only after all 24 helpers have entered the binding.
 The per-binding detached count is process-wide and removed
 only on helper exit, independent of invocation/store lifetime. Binding identity
 uses the trusted shared binding instance, with weak ownership preventing address
@@ -72,6 +77,10 @@ Checkpoint read/write/progress, structured log redaction, redirect hop limits an
 the pinned connection helper have explicit regression coverage. The public
 instantiation helper is qualification-only: future runtime integration must
 compile tenant sources through the supervised trusted compiler first.
+Its store limiter also caps each of at most four guest tables to 65,536 elements,
+independently of the linear-memory cap. Workflow start reserves handle capacity
+before calling the binding, so exhaustion cannot start untracked workflows.
+Mixed public/private DNS answers are denied in either order, also on redirects.
 
 Operator qualification (not run by agents): with the runner's `KUBECONFIG` and
 an operator-built, digest-pinned `FS_TEST_WAS02_IMAGE` already set, run exactly:

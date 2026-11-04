@@ -111,6 +111,20 @@ pub fn allow_list_resolution_pinning_and_every_redirect_are_enforced() {
     let (result, binding) = invoke(1, vec![], vec![], vec![]);
     assert_eq!(result, 1);
     assert!(binding.connected.lock().unwrap().is_empty());
+    // Every address in an answer must be public, including on a redirect hop.
+    for mixed in [vec!["8.8.8.8", "10.0.0.1"], vec!["10.0.0.1", "8.8.8.8"]] {
+        let (result, binding) = invoke(0, vec![mixed.clone()], vec![response(None)], vec![]);
+        assert_eq!(result, 1);
+        assert!(binding.connected.lock().unwrap().is_empty());
+        let (result, binding) = invoke(
+            0,
+            vec![vec!["8.8.8.8"], mixed],
+            vec![response(Some("/redirect")), response(None)],
+            vec![],
+        );
+        assert_eq!(result, 1);
+        assert_eq!(binding.connected.lock().unwrap().len(), 1);
+    }
     for location in ["http://unlisted.test/", "http://allowed.test/redirect"] {
         let (result, binding) = invoke(
             0,

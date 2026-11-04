@@ -19,6 +19,9 @@ use wasmtime::{Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
 pub const BUFFER_BYTES: usize = 1_048_576;
 pub const GUEST_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+// Tables allocate host memory separately from guest linear memory. Bound each
+// of the four permitted tables, including growth after instantiation.
+const GUEST_TABLE_ELEMENTS: usize = 65_536;
 // Retained storage metadata is outside guest linear memory. With at most 1024
 // live handles, this bounds retained keys to 1 MiB, independently of call count.
 const STORAGE_KEY_BYTES: usize = 1024;
@@ -314,6 +317,7 @@ impl Host {
                 .memory_size(GUEST_MEMORY_BYTES)
                 .memories(1)
                 .tables(4)
+                .table_elements(GUEST_TABLE_ELEMENTS)
                 .build(),
             call_timeout: Duration::from_secs(30),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -646,6 +650,9 @@ pub fn instantiate(
                     {
                         return Err(HostError::Denied);
                     }
+                    // Reserve capacity before starting an external workflow so
+                    // a full handle table cannot leave an untracked execution.
+                    let rep = store.data_mut().handle()?;
                     let Reply::Execution(execution) = store.data().call(Operation::Start {
                         workflow: workflow.clone(),
                         input,
@@ -654,7 +661,6 @@ pub fn instantiate(
                         return Err(HostError::Denied);
                     };
                     Bytes::default().add(execution.len())?;
-                    let rep = store.data_mut().handle()?;
                     store
                         .data_mut()
                         .executions

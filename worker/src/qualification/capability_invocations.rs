@@ -14,6 +14,67 @@ impl Bindings for Recording {
 }
 
 #[cfg_attr(test, test)]
+pub fn guest_table_growth_is_bounded_independently_of_linear_memory() {
+    let _case = crate::capability_support::serial_case();
+    let engine = wasmtime::Engine::default();
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-table.wat"),
+        Host::new(Context::default(), Arc::new(Recording::default())),
+    )
+    .unwrap();
+    let grow = instance
+        .get_typed_func::<(u32,), (i32,)>(&mut store, "grow")
+        .unwrap();
+    assert_eq!(grow.call(&mut store, (1,)).unwrap(), (1,));
+    assert_eq!(grow.call(&mut store, (65_536,)).unwrap(), (-1,));
+    assert_eq!(grow.call(&mut store, (1,)).unwrap(), (2,));
+}
+
+#[cfg_attr(test, test)]
+pub fn exhausted_execution_handles_do_not_start_untracked_workflows() {
+    let _case = crate::capability_support::serial_case();
+    struct Workflows(AtomicUsize);
+    impl Bindings for Workflows {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            match operation {
+                Operation::Start { .. } => {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                    Ok(Reply::Execution("binding-id".into()))
+                }
+                Operation::Signal { .. } => Ok(Reply::Empty),
+                _ => panic!("unexpected workflow operation"),
+            }
+        }
+    }
+    let engine = wasmtime::Engine::default();
+    let binding = Arc::new(Workflows(AtomicUsize::new(0)));
+    let context = Context {
+        grants: Grants {
+            targets: vec!["invoice".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-workflows.wat"),
+        Host::new(context, binding.clone()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    for _ in 0..1024 {
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    }
+    for _ in 0..3 {
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (2,));
+    }
+    assert_eq!(binding.0.load(Ordering::SeqCst), 1024);
+}
+
+#[cfg_attr(test, test)]
 pub fn logging_is_ungated_and_record_lists_are_lifted_lazily() {
     let _case = crate::capability_support::serial_case();
     let engine = wasmtime::Engine::default();
@@ -393,6 +454,32 @@ pub fn oversized_utf8_and_byte_list_have_bounded_host_allocation() {
     }
 }
 
+// Exercise the event capability through the same guest/host seam in every
+// budget stage, without reaching into the process-wide limiter's internals.
+fn event_guest(
+    engine: &wasmtime::Engine,
+    host: Host,
+) -> (
+    wasmtime::Store<Host>,
+    wasmtime::component::TypedFunc<(u32,), (u32,)>,
+) {
+    let (mut store, instance) =
+        host::instantiate(engine, include_str!("fixtures/capability-events.wat"), host).unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    (store, run)
+}
+
+fn wait_for(label: &str, mut ready: impl FnMut() -> bool) {
+    const SETTLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + SETTLE_TIMEOUT;
+    while !ready() {
+        assert!(std::time::Instant::now() < deadline, "waiting for {label}");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
 #[cfg_attr(test, test)]
 pub fn process_budget_probe() {
     let _case = crate::capability_support::serial_case();
@@ -413,11 +500,10 @@ pub fn process_budget_probe() {
             let live = self.live.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak.fetch_max(live, Ordering::SeqCst);
             let (lock, wake) = &self.release;
-            let _ = wake
-                .wait_timeout_while(lock.lock().unwrap(), Duration::from_secs(10), |released| {
-                    !*released
-                })
-                .unwrap();
+            drop(
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
             self.live.fetch_sub(1, Ordering::SeqCst);
             Ok(Reply::Empty)
         }
@@ -430,7 +516,8 @@ pub fn process_budget_probe() {
     });
     let engine = wasmtime::Engine::default();
     const DEADLINE: Duration = Duration::from_millis(20);
-    const TOLERANCE: Duration = Duration::from_millis(200);
+    const TOLERANCE: Duration = Duration::from_secs(2);
+    const FAIL_FAST_TIMEOUT: Duration = Duration::from_secs(30);
     for invocation in 0..12 {
         let context = Context {
             grants: Grants {
@@ -440,26 +527,29 @@ pub fn process_budget_probe() {
             ..Default::default()
         };
         let mut host = Host::new(context, binding.clone());
-        host.set_call_timeout(DEADLINE);
-        let (mut store, instance) = host::instantiate(
-            &engine,
-            include_str!("fixtures/capability-events.wat"),
-            host,
-        )
-        .unwrap();
-        let run = instance
-            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-            .unwrap();
+        host.set_call_timeout(if invocation < 4 {
+            DEADLINE
+        } else {
+            FAIL_FAST_TIMEOUT
+        });
+        let (mut store, run) = event_guest(&engine, host);
         let start = Instant::now();
         assert_eq!(
             run.call(&mut store, (0,)).unwrap(),
             (if invocation < 4 { 3 } else { 2 },)
         );
-        assert!(start.elapsed() <= DEADLINE + TOLERANCE);
-        if invocation >= 4 {
-            assert!(start.elapsed() < DEADLINE);
+        if invocation < 4 {
+            assert!(start.elapsed() <= DEADLINE + TOLERANCE);
+        } else {
+            assert!(
+                start.elapsed() < TOLERANCE,
+                "exhaustion must not wait for the 30 s deadline"
+            );
         }
     }
+    wait_for("the four admitted helpers to enter the binding", || {
+        binding.live.load(Ordering::SeqCst) == 4 && binding.peak.load(Ordering::SeqCst) == 4
+    });
     assert_eq!(binding.calls.load(Ordering::SeqCst), 4);
     assert_eq!(
         binding.live.load(Ordering::SeqCst),
@@ -480,15 +570,7 @@ pub fn process_budget_probe() {
                 },
                 ..Default::default()
             };
-            let (mut store, instance) = host::instantiate(
-                &engine,
-                include_str!("fixtures/capability-events.wat"),
-                Host::new(context, healthy.clone()),
-            )
-            .unwrap();
-            let run = instance
-                .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-                .unwrap();
+            let (mut store, run) = event_guest(&engine, Host::new(context, healthy.clone()));
             let start = start.clone();
             std::thread::spawn(move || {
                 start.wait();
@@ -510,13 +592,10 @@ pub fn process_budget_probe() {
     assert_eq!(healthy.0.load(Ordering::SeqCst), 2000);
     *binding.release.0.lock().unwrap() = true;
     binding.release.1.notify_all();
-    let deadline = Instant::now() + TOLERANCE;
-    while binding.live.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert_eq!(binding.live.load(Ordering::SeqCst), 0);
+    wait_for("stalled helpers to leave the binding", || {
+        binding.live.load(Ordering::SeqCst) == 0
+    });
     // A permit becomes available after the helper actually exits.
-    std::thread::sleep(Duration::from_millis(10));
     let context = Context {
         grants: Grants {
             topics: vec!["orders".into()],
@@ -524,16 +603,14 @@ pub fn process_budget_probe() {
         },
         ..Default::default()
     };
-    let (mut store, instance) = host::instantiate(
-        &engine,
-        include_str!("fixtures/capability-events.wat"),
-        Host::new(context, binding.clone()),
-    )
-    .unwrap();
-    let run = instance
-        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-        .unwrap();
-    assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
+    let (mut store, run) = event_guest(&engine, Host::new(context, binding.clone()));
+    wait_for("an exited helper to release its permit", || {
+        match run.call(&mut store, (0,)).unwrap().0 {
+            0 => true,
+            2 => false,
+            result => panic!("unexpected recovery result {result}"),
+        }
+    });
     // Concurrent stalls can occupy the active capacity as well as the reserve,
     // but may never exceed the process-wide ceiling, even after stores drop.
     let binding = Arc::new(Stalled {
@@ -543,6 +620,7 @@ pub fn process_budget_probe() {
         calls: AtomicUsize::new(0),
     });
     let start = Arc::new(std::sync::Barrier::new(33));
+    let mut cancellations = Vec::new();
     let guests = (0..32)
         .map(|_| {
             let context = Context {
@@ -553,16 +631,9 @@ pub fn process_budget_probe() {
                 ..Default::default()
             };
             let mut host = Host::new(context, binding.clone());
-            host.set_call_timeout(Duration::from_millis(500));
-            let (mut store, instance) = host::instantiate(
-                &engine,
-                include_str!("fixtures/capability-events.wat"),
-                host,
-            )
-            .unwrap();
-            let run = instance
-                .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-                .unwrap();
+            host.set_call_timeout(FAIL_FAST_TIMEOUT);
+            cancellations.push(host.cancellation());
+            let (mut store, run) = event_guest(&engine, host);
             let start = start.clone();
             std::thread::spawn(move || {
                 start.wait();
@@ -571,8 +642,15 @@ pub fn process_budget_probe() {
         })
         .collect::<Vec<_>>();
     start.wait();
+    // Cancel only after every available helper slot is observably in use.
+    wait_for("all 24 helpers to enter the binding", || {
+        binding.live.load(Ordering::SeqCst) == 24 && binding.peak.load(Ordering::SeqCst) == 24
+    });
+    for cancelled in cancellations {
+        cancelled.store(true, Ordering::Release);
+    }
     for guest in guests {
-        assert!([2, 3].contains(&guest.join().unwrap()));
+        assert!([2, 4].contains(&guest.join().unwrap()));
     }
     assert_eq!(binding.peak.load(Ordering::SeqCst), 24);
     assert_eq!(binding.live.load(Ordering::SeqCst), 24);
@@ -586,16 +664,8 @@ pub fn process_budget_probe() {
         ..Default::default()
     };
     let mut host = Host::new(context, healthy.clone());
-    host.set_call_timeout(Duration::from_secs(1));
-    let (mut store, instance) = host::instantiate(
-        &engine,
-        include_str!("fixtures/capability-events.wat"),
-        host,
-    )
-    .unwrap();
-    let run = instance
-        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-        .unwrap();
+    host.set_call_timeout(FAIL_FAST_TIMEOUT);
+    let (mut store, run) = event_guest(&engine, host);
     let start = Instant::now();
     assert_eq!(
         run.call(&mut store, (0,)).unwrap(),
@@ -606,11 +676,9 @@ pub fn process_budget_probe() {
     assert_eq!(healthy.0.load(Ordering::SeqCst), 0);
     *binding.release.0.lock().unwrap() = true;
     binding.release.1.notify_all();
-    let deadline = Instant::now() + TOLERANCE;
-    while binding.live.load(Ordering::SeqCst) != 0 && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert_eq!(binding.live.load(Ordering::SeqCst), 0);
+    wait_for("stalled helpers to leave the binding", || {
+        binding.live.load(Ordering::SeqCst) == 0
+    });
     println!("thread-budget-probe passed");
 }
 
@@ -974,12 +1042,8 @@ pub fn binding_drop_probe() {
             self.0.calls.fetch_add(1, Ordering::SeqCst);
             let (lock, wake) = &self.0.release_calls;
             drop(
-                wake.wait_timeout_while(
-                    lock.lock().unwrap(),
-                    Duration::from_secs(10),
-                    |released| !*released,
-                )
-                .unwrap(),
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
             );
             panic!("fixture binding panic");
         }
@@ -989,12 +1053,8 @@ pub fn binding_drop_probe() {
             self.0.drops.fetch_add(1, Ordering::SeqCst);
             let (lock, wake) = &self.0.release_drops;
             drop(
-                wake.wait_timeout_while(
-                    lock.lock().unwrap(),
-                    Duration::from_secs(10),
-                    |released| !*released,
-                )
-                .unwrap(),
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
             );
         }
     }
@@ -1010,38 +1070,25 @@ pub fn binding_drop_probe() {
     for _ in 0..24 {
         let mut host = Host::new(context.clone(), Arc::new(PanickingBinding(state.clone())));
         host.set_call_timeout(Duration::from_millis(20));
-        let (mut store, instance) = host::instantiate(
-            &engine,
-            include_str!("fixtures/capability-events.wat"),
-            host,
-        )
-        .unwrap();
-        let run = instance
-            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-            .unwrap();
+        let (mut store, run) = event_guest(&engine, host);
         assert_eq!(run.call(&mut store, (0,)).unwrap(), (3,));
     }
-    assert_eq!(state.calls.load(Ordering::SeqCst), 24);
+    wait_for(
+        "all admitted helpers to enter before releasing calls",
+        || state.calls.load(Ordering::SeqCst) == 24,
+    );
     *state.release_calls.0.lock().unwrap() = true;
     state.release_calls.1.notify_all();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while state.drops.load(Ordering::SeqCst) < 24 && Instant::now() < deadline {
-        std::thread::yield_now();
-    }
-    assert_eq!(state.drops.load(Ordering::SeqCst), 24);
+    wait_for("all binding destructors to enter", || {
+        state.drops.load(Ordering::SeqCst) == 24
+    });
     let healthy = Arc::new(Recording::default());
     let mut host = Host::new(context, healthy.clone());
-    host.set_call_timeout(Duration::from_millis(20));
-    let (mut store, instance) = host::instantiate(
-        &engine,
-        include_str!("fixtures/capability-events.wat"),
-        host,
-    )
-    .unwrap();
-    let run = instance
-        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
-        .unwrap();
+    host.set_call_timeout(Duration::from_secs(30));
+    let (mut store, run) = event_guest(&engine, host);
+    let start = Instant::now();
     let result = run.call(&mut store, (0,)).unwrap();
+    let elapsed = start.elapsed();
     // Always release the destructor gates before asserting the result.
     *state.release_drops.0.lock().unwrap() = true;
     state.release_drops.1.notify_all();
@@ -1049,6 +1096,10 @@ pub fn binding_drop_probe() {
         result,
         (2,),
         "helpers released their permits before binding destructors exited"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "exhaustion waited for the call deadline"
     );
     assert_eq!(healthy.0.load(Ordering::SeqCst), 0);
     println!("binding-drop-probe passed");
