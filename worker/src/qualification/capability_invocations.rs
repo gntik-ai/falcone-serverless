@@ -257,7 +257,11 @@ pub fn workflows_authorize_targets_and_signal_only_host_issued_handles() {
         } else {
             &[]
         };
-        assert_eq!(*binding.starts.lock().unwrap(), expected_starts, "mode {mode}");
+        assert_eq!(
+            *binding.starts.lock().unwrap(),
+            expected_starts,
+            "mode {mode}"
+        );
         let expected_signals: &[(&str, &str)] = if mode == 0 {
             &[("binding-id", "tick")]
         } else {

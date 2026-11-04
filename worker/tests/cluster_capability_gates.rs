@@ -444,7 +444,10 @@ fn cluster_capability_gates() -> Result<(), String> {
     if ran {
         Ok(())
     } else {
-        Err("UNVERIFIED: cluster_capability_gates was requested but FS_TEST_CLUSTER is unset".into())
+        Err(
+            "UNVERIFIED: cluster_capability_gates was requested but FS_TEST_CLUSTER is unset"
+                .into(),
+        )
     }
 }
 
@@ -498,9 +501,15 @@ fn run_self(args: &[&str], env: &[(&str, &str)]) -> (bool, String) {
 fn gate_set_with_invalid_inputs_fails_the_default_run() {
     let (passed, output) = run_self(
         &["--exact", "cluster_gate_inputs_fail_closed_when_set"],
-        &[("FS_TEST_CLUSTER", "1"), ("FS_TEST_WAS02_IMAGE", "not-pinned")],
+        &[
+            ("FS_TEST_CLUSTER", "1"),
+            ("FS_TEST_WAS02_IMAGE", "not-pinned"),
+        ],
     );
-    assert!(!passed, "an invalid opt-in must fail the default run: {output}");
+    assert!(
+        !passed,
+        "an invalid opt-in must fail the default run: {output}"
+    );
     assert!(
         output.contains("UNVERIFIED: FS_TEST_WAS02_IMAGE must be <repo>@sha256:<digest>"),
         "{output}"

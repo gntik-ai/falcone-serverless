@@ -39,7 +39,10 @@ impl Bindings for Script {
         self.connected.lock().unwrap().push(request.address().ip());
         let response = self.responses.lock().unwrap().pop_front();
         response.ok_or_else(|| {
-            self.unexpected.lock().unwrap().push("unexpected connection");
+            self.unexpected
+                .lock()
+                .unwrap()
+                .push("unexpected connection");
             HostError::Timeout
         })
     }
