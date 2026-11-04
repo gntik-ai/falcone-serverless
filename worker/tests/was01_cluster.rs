@@ -1488,3 +1488,1187 @@ fn the_runner_container_state_is_read_from_the_pod_status() {
     assert_eq!(conditions.len(), 1);
     assert_eq!(view, crashed(2));
 }
+
+// ---- WAS-01 ac1/ac3: version and namespaced-permission evidence report -----------------
+
+mod evidence {
+    use super::support::cluster_evidence::{
+        self as model, ITEM_IDS, ModelError, PLAN_ITEM, RESOURCES, Reason, Report, Target, VERBS,
+        VERSION_ITEM, Verdict,
+    };
+    use super::support::was01_deps;
+    use super::support::was01_plan::{self, Call};
+    use super::support::was01_probe::{
+        self, CanI, Gate, Kubectl, ProcessKubectl, RUN_BUDGET, Reply,
+    };
+    use super::{Kubeconfigs, Namespace, kubeconfig_text, scratch};
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+    use std::time::Duration;
+
+    const ENV_VARS: [&str; 4] = [
+        "FS_WAS01_CLUSTER",
+        "KUBECONFIG",
+        "FS_TEST_NAMESPACE_MODE",
+        "FS_TEST_NAMESPACE",
+    ];
+    const README: &str = include_str!("../../docs/qualification/was-01/README.md");
+
+    fn ns(suffix: &str) -> Namespace {
+        was01_plan::checked_namespace(&format!("fs-test-was01-{suffix}")).unwrap()
+    }
+
+    fn call(parts: &[&str]) -> Call {
+        parts.iter().map(|part| (*part).to_owned()).collect()
+    }
+
+    fn reply(stdout: &str, code: i32) -> Result<Reply, String> {
+        Ok(Reply {
+            stdout: stdout.to_owned(),
+            code,
+        })
+    }
+
+    fn version_body(git_version: &str) -> String {
+        serde_json::json!({"major": "1", "minor": "37", "gitVersion": git_version}).to_string()
+    }
+
+    // ---- a fake kubectl at the system boundary ------------------------------------------
+
+    type Responder = Box<dyn Fn(&[&str]) -> Result<Reply, String>>;
+
+    struct Fake {
+        calls: RefCell<Vec<Vec<String>>>,
+        responder: Responder,
+        panic_on: Option<&'static str>,
+        count: Cell<usize>,
+    }
+
+    impl Fake {
+        fn new(responder: impl Fn(&[&str]) -> Result<Reply, String> + 'static) -> Self {
+            Self {
+                calls: RefCell::default(),
+                responder: Box::new(responder),
+                panic_on: None,
+                count: Cell::new(0),
+            }
+        }
+
+        /// A cluster that is a healthy 1.37 and answers every probe `yes`.
+        fn healthy() -> Self {
+            Self::new(|args| match args {
+                ["get", "--raw", "/version"] => reply(&version_body("v1.37.2"), 0),
+                ["auth", "can-i", ..] => reply("yes\n", 0),
+                _ => reply("", 0),
+            })
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Kubectl for Fake {
+        fn call(&self, args: &[&str]) -> Result<Reply, String> {
+            self.count.set(self.count.get() + 1);
+            self.calls
+                .borrow_mut()
+                .push(args.iter().map(|a| (*a).to_owned()).collect());
+            if self.panic_on == Some(args[0]) {
+                panic!("exercise unwinding");
+            }
+            (self.responder)(args)
+        }
+    }
+
+    fn deleted_last(fake: &Fake, namespace: &Namespace) {
+        let calls = fake.calls();
+        assert_eq!(calls.last().unwrap(), &was01_plan::delete_call(namespace));
+        assert_eq!(
+            calls.last().unwrap(),
+            &call(&["delete", "namespace", namespace.name(), "--wait"])
+        );
+        assert_eq!(
+            calls.iter().filter(|c| c[0] == "delete").count(),
+            1,
+            "exactly one delete"
+        );
+    }
+
+    // ---- the model ----------------------------------------------------------------------
+
+    #[test]
+    fn a_new_item_is_unverified_and_passed_needs_evidence() {
+        let mut report = Report::new();
+        for id in ITEM_IDS {
+            assert_eq!(
+                report.item(id).unwrap().verdict,
+                Verdict::Unverified,
+                "{id}"
+            );
+        }
+        assert_eq!(
+            report.set_passed(VERSION_ITEM, ""),
+            Err(ModelError::InvalidEvidence)
+        );
+        assert_eq!(
+            report.set_passed("can-i-get-services", "no"),
+            Err(ModelError::InvalidEvidence)
+        );
+        assert_eq!(
+            report.set_passed("can-i-get-services", ""),
+            Err(ModelError::InvalidEvidence)
+        );
+        assert_eq!(
+            report.set_passed(PLAN_ITEM, "ok"),
+            Err(ModelError::InvalidEvidence)
+        );
+        assert_eq!(
+            report.set_passed("can-i-get-pods", "yes"),
+            Err(ModelError::UnknownItem)
+        );
+        assert_eq!(
+            report.set_unverified("nope", Reason::NotProbed),
+            Err(ModelError::UnknownItem)
+        );
+        assert_eq!(
+            report.set_failed("", Reason::CheckFailed),
+            Err(ModelError::UnknownItem)
+        );
+        assert_eq!(report, Report::new(), "rejected sets change nothing");
+        report.set_passed("can-i-get-services", "yes").unwrap();
+        assert_eq!(
+            report.item("can-i-get-services").unwrap().verdict,
+            Verdict::Passed
+        );
+    }
+
+    #[test]
+    fn a_cell_is_failed_passed_or_unverified_from_its_ac3_items() {
+        let mut report = Report::new();
+        report.set_passed(VERSION_ITEM, "v1.37.2").unwrap();
+        assert_eq!(report.target(), Some(Target::K8s137));
+        let cell = report.cell(Target::K8s137);
+        assert_eq!(
+            (cell.verdict, cell.reason),
+            (Verdict::Unverified, Some(Reason::ItemUnverified))
+        );
+        for verb in VERBS {
+            for resource in RESOURCES {
+                let id = model::can_i_item(verb, resource).unwrap();
+                report.set_passed(id, "yes").unwrap();
+            }
+        }
+        let cell = report.cell(Target::K8s137);
+        assert_eq!((cell.verdict, cell.reason), (Verdict::Passed, None));
+        // The other line has no server behind it.
+        let other = report.cell(Target::K8s136);
+        assert_eq!(
+            (other.verdict, other.reason),
+            (Verdict::Unverified, Some(Reason::NoMatchingServer))
+        );
+        report
+            .set_failed("can-i-delete-services", Reason::CheckFailed)
+            .unwrap();
+        let cell = report.cell(Target::K8s137);
+        assert_eq!(
+            (cell.verdict, cell.reason),
+            (Verdict::Failed, Some(Reason::ItemFailed))
+        );
+        // One unverified item keeps a cell from passing.
+        report
+            .set_unverified("can-i-delete-services", Reason::Denied)
+            .unwrap();
+        assert_eq!(report.cell(Target::K8s137).verdict, Verdict::Unverified);
+    }
+
+    #[test]
+    fn versions_are_recorded_verbatim_and_map_to_their_cell() {
+        for (version, target) in [
+            ("v1.37.2", Target::K8s137),
+            ("v1.36.4+k3s1", Target::K8s136),
+        ] {
+            let mut report = Report::new();
+            assert_eq!(
+                was01_probe::parse_version(&version_body(version)).as_deref(),
+                Ok(version)
+            );
+            report.set_passed(VERSION_ITEM, version).unwrap();
+            assert_eq!(
+                report.item(VERSION_ITEM).unwrap().evidence.as_deref(),
+                Some(version)
+            );
+            assert_eq!(report.target(), Some(target));
+            assert!(
+                report
+                    .to_text()
+                    .contains(&format!("item kubernetes-version passed - {version}\n"))
+            );
+        }
+        assert_eq!(Target::K8s137.code(), "k8s-1.37");
+        assert_eq!(Target::K8s136.code(), "k8s-1.36");
+        // Valid versions of no cell: another line, a bigger number, a pre-release.
+        for version in ["v1.35.0", "v1.370.1", "v1.37.0-rc.1", "v2.37.0", "v1.38.0"] {
+            let mut report = Report::new();
+            assert_eq!(
+                report.set_passed(VERSION_ITEM, version),
+                Err(ModelError::InvalidEvidence),
+                "{version}"
+            );
+            assert_eq!(report.target(), None);
+        }
+    }
+
+    #[test]
+    fn a_missing_malformed_forbidden_or_failed_version_is_unverified_with_its_code() {
+        let cases: [(Result<Reply, String>, Reason); 9] = [
+            (reply("{}", 0), Reason::MissingVersion),
+            (reply("{\"gitVersion\": 137}", 0), Reason::MalformedVersion),
+            (reply("not json", 0), Reason::MalformedVersion),
+            (reply(&version_body("1.37.2"), 0), Reason::MalformedVersion),
+            (reply(&version_body("v1.37"), 0), Reason::MalformedVersion),
+            (
+                reply(&version_body("v1.37.2\nx"), 0),
+                Reason::MalformedVersion,
+            ),
+            (
+                reply(&version_body("v1.35.0"), 0),
+                Reason::UnsupportedVersion,
+            ),
+            (
+                reply("Error from server (Forbidden): nope", 1),
+                Reason::Forbidden,
+            ),
+            (Err("boom".into()), Reason::ProbeError),
+        ];
+        for (answer, reason) in cases {
+            let fake = Fake::new(move |args| match args {
+                ["get", ..] => answer.clone(),
+                _ => reply("yes\n", 0),
+            });
+            let report = was01_probe::run(&fake, &ns("v"), RUN_BUDGET).unwrap();
+            let item = report.item(VERSION_ITEM).unwrap();
+            assert_eq!(
+                (item.verdict, item.reason, item.evidence.as_deref()),
+                (Verdict::Unverified, Some(reason), None)
+            );
+            assert_eq!(report.target(), None);
+        }
+        let fake = Fake::new(|args| match args {
+            ["get", ..] => reply("garbage", 1),
+            _ => reply("yes\n", 0),
+        });
+        let report = was01_probe::run(&fake, &ns("v"), RUN_BUDGET).unwrap();
+        assert_eq!(
+            report.item(VERSION_ITEM).unwrap().reason,
+            Some(Reason::ProbeError)
+        );
+    }
+
+    #[test]
+    fn can_i_passes_only_on_an_exact_yes() {
+        let answers = [
+            (reply("yes\n", 0), CanI::Yes),
+            (reply("yes", 0), CanI::Yes),
+            (reply("no\n", 1), CanI::No),
+            (reply("no\n", 0), CanI::No),
+            (reply("yes\n", 1), CanI::Error),
+            (reply("Yes\n", 0), CanI::Error),
+            (reply("yes please\n", 0), CanI::Error),
+            (reply("yes\nyes\n", 0), CanI::Error),
+            (reply("", 1), CanI::Error),
+            (reply("no\n", 2), CanI::Error),
+            (reply("no, but\n", 1), CanI::Error),
+        ];
+        for (answer, expected) in answers {
+            assert_eq!(was01_probe::parse_can_i(&answer.unwrap()), expected);
+        }
+        // Per resource and verb, through the run.
+        let healthy = Fake::healthy();
+        let report = was01_probe::run(&healthy, &ns("yes"), RUN_BUDGET).unwrap();
+        for verb in VERBS {
+            for resource in RESOURCES {
+                let item = report
+                    .item(model::can_i_item(verb, resource).unwrap())
+                    .unwrap();
+                assert_eq!(
+                    (item.verdict, item.evidence.as_deref()),
+                    (Verdict::Passed, Some("yes"))
+                );
+            }
+        }
+        assert_eq!(report.cell(Target::K8s137).verdict, Verdict::Passed);
+        for (answer, reason) in [
+            (reply("no\n", 1), Reason::Denied),
+            (reply("no\n", 0), Reason::Denied),
+            (reply("maybe\n", 0), Reason::ProbeError),
+            (reply("", 1), Reason::ProbeError),
+            (Err("runner exploded".into()), Reason::ProbeError),
+        ] {
+            let fake = Fake::new(move |args| match args {
+                ["get", ..] => reply(&version_body("v1.36.4+k3s1"), 0),
+                ["auth", ..] => answer.clone(),
+                _ => reply("", 0),
+            });
+            let report = was01_probe::run(&fake, &ns("no"), RUN_BUDGET).unwrap();
+            for verb in VERBS {
+                for resource in RESOURCES {
+                    let item = report
+                        .item(model::can_i_item(verb, resource).unwrap())
+                        .unwrap();
+                    assert_eq!(
+                        (item.verdict, item.reason, item.evidence.as_deref()),
+                        (Verdict::Unverified, Some(reason), None)
+                    );
+                }
+            }
+            let cell = report.cell(Target::K8s136);
+            assert_eq!(
+                (cell.verdict, cell.reason),
+                (Verdict::Unverified, Some(Reason::ItemUnverified))
+            );
+        }
+    }
+
+    // ---- the plan -----------------------------------------------------------------------
+
+    #[test]
+    fn the_run_namespace_is_an_fs_test_was01_dns_label() {
+        for _ in 0..20 {
+            let namespace = was01_plan::run_namespace().unwrap();
+            let name = namespace.name();
+            assert!(name.starts_with("fs-test-was01-"), "{name}");
+            assert!(name.len() <= 63, "{name}");
+            assert!(
+                name.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            );
+            assert!(name.as_bytes().last().unwrap().is_ascii_alphanumeric());
+        }
+        for bad in [
+            "fs-test-other-1",
+            "fs-test-was01",
+            "default",
+            "in-falcone-staging",
+            "fs-test-was01-UPPER",
+            "fs-test-was01-x-",
+            &format!("fs-test-was01-{}", "a".repeat(50)),
+        ] {
+            assert!(was01_plan::checked_namespace(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_built_plan_including_version_is_namespaced_only() {
+        let namespace = ns("plan");
+        let plan = was01_plan::build_plan(&namespace);
+        assert_eq!(plan.len(), 2 + 12 + 1);
+        assert_eq!(plan[0], call(&["create", "namespace", namespace.name()]));
+        assert_eq!(plan[1], call(&["get", "--raw", "/version"]));
+        assert_eq!(
+            plan[2],
+            call(&[
+                "auth",
+                "can-i",
+                "get",
+                "deployments.apps",
+                "-n",
+                namespace.name()
+            ])
+        );
+        assert_eq!(
+            plan.last().unwrap(),
+            &call(&["delete", "namespace", namespace.name(), "--wait"])
+        );
+        assert_eq!(was01_plan::plan_namespaced_only(&namespace, &plan), Ok(()));
+        assert!(was01_plan::plan_namespaced_only(&namespace, &[]).is_err());
+    }
+
+    #[test]
+    fn plan_namespaced_only_fails_each_out_of_namespace_call() {
+        let namespace = ns("guard");
+        let name = namespace.name();
+        let other = "fs-test-was01-other";
+        let fixtures: Vec<(&str, Call)> = vec![
+            (
+                "-n default",
+                call(&["auth", "can-i", "get", "services", "-n", "default"]),
+            ),
+            (
+                "-n in-falcone-staging",
+                call(&[
+                    "auth",
+                    "can-i",
+                    "get",
+                    "services",
+                    "-n",
+                    "in-falcone-staging",
+                ]),
+            ),
+            ("-A", call(&["auth", "can-i", "get", "services", "-A"])),
+            (
+                "--all-namespaces",
+                call(&["get", "services", "--all-namespaces"]),
+            ),
+            ("get without -n", call(&["get", "services"])),
+            ("get nodes", call(&["get", "nodes"])),
+            ("-n <run> get nodes", call(&["-n", name, "get", "nodes"])),
+            ("get nodes -n <run>", call(&["get", "nodes", "-n", name])),
+            ("clusterversion", call(&["get", "clusterversion"])),
+            ("clusterrole write", call(&["create", "clusterrole", "x"])),
+            (
+                "clusterrolebinding write",
+                call(&["create", "clusterrolebinding", "x"]),
+            ),
+            (
+                "crd write",
+                call(&["create", "customresourcedefinition", "x"]),
+            ),
+            ("runtimeclass write", call(&["create", "runtimeclass", "x"])),
+            (
+                "scc write",
+                call(&["create", "securitycontextconstraints", "x"]),
+            ),
+            (
+                "runtimeClassName",
+                call(&[
+                    "run",
+                    "p",
+                    "--overrides",
+                    "{\"spec\":{\"runtimeClassName\":\"x\"}}",
+                ]),
+            ),
+            (
+                "--namespace=other",
+                call(&[
+                    "auth",
+                    "can-i",
+                    "get",
+                    "services",
+                    &format!("--namespace={other}"),
+                ]),
+            ),
+            (
+                "--namespace=<run> form",
+                call(&[
+                    "auth",
+                    "can-i",
+                    "get",
+                    "services",
+                    &format!("--namespace={name}"),
+                ]),
+            ),
+            (
+                "repeated -n",
+                call(&[
+                    "auth", "can-i", "get", "services", "-n", name, "-n", "default",
+                ]),
+            ),
+            (
+                "repeated -n, other first",
+                call(&[
+                    "auth", "can-i", "get", "services", "-n", "default", "-n", name,
+                ]),
+            ),
+            ("raw other path", call(&["get", "--raw", "/api/v1/nodes"])),
+            (
+                "raw other path with -n",
+                call(&["get", "--raw", "/api/v1/nodes", "-n", name]),
+            ),
+            (
+                "raw /version with extra",
+                call(&["get", "--raw", "/version", "-n", "default"]),
+            ),
+            (
+                "delete other namespace",
+                call(&["delete", "namespace", other, "--wait"]),
+            ),
+            (
+                "delete default",
+                call(&["delete", "namespace", "default", "--wait"]),
+            ),
+            ("delete without wait", call(&["delete", "namespace", name])),
+            (
+                "delete all namespaces",
+                call(&["delete", "namespace", "--all", "--wait"]),
+            ),
+            (
+                "create other namespace",
+                call(&["create", "namespace", other]),
+            ),
+            ("apply -f", call(&["apply", "-f", "-"])),
+            ("apply -f with -n", call(&["apply", "-f", "-", "-n", name])),
+            (
+                "unlisted verb",
+                call(&["auth", "can-i", "patch", "services", "-n", name]),
+            ),
+            (
+                "unlisted resource",
+                call(&["auth", "can-i", "get", "nodes", "-n", name]),
+            ),
+            (
+                "unlisted resource secrets",
+                call(&["auth", "can-i", "get", "secrets", "-n", name]),
+            ),
+            (
+                "trailing flag",
+                call(&["auth", "can-i", "get", "services", "-n", name, "--as=x"]),
+            ),
+            ("empty", call(&[])),
+        ];
+        for (label, bad) in fixtures {
+            assert!(!was01_plan::call_allowed(&namespace, &bad), "{label}");
+            let mut plan = was01_plan::build_plan(&namespace);
+            assert!(was01_plan::plan_namespaced_only(&namespace, &plan).is_ok());
+            plan.insert(3, bad);
+            assert!(
+                was01_plan::plan_namespaced_only(&namespace, &plan).is_err(),
+                "{label}"
+            );
+        }
+        // A namespace outside the harness prefix is refused whatever the calls say.
+        let foreign = Namespace::new("fs-test-other-x").unwrap();
+        assert!(
+            was01_plan::plan_namespaced_only(&foreign, &was01_plan::build_plan(&foreign)).is_err()
+        );
+    }
+
+    // ---- create, cleanup ------------------------------------------------------------------
+
+    #[test]
+    fn a_healthy_run_creates_probes_and_deletes_in_order() {
+        let namespace = ns("order");
+        let fake = Fake::healthy();
+        let report = was01_probe::run(&fake, &namespace, RUN_BUDGET).unwrap();
+        assert_eq!(fake.calls(), was01_plan::build_plan(&namespace));
+        deleted_last(&fake, &namespace);
+        let plan = report.item(PLAN_ITEM).unwrap();
+        assert_eq!(
+            (plan.verdict, plan.evidence.as_deref()),
+            (Verdict::Passed, Some("calls=15"))
+        );
+    }
+
+    #[test]
+    fn a_failed_create_including_already_exists_deletes_nothing_and_errors() {
+        for answer in [
+            reply("", 1),
+            reply(
+                "Error from server (AlreadyExists): namespaces \"x\" already exists",
+                1,
+            ),
+            Err("Bearer eyJhbGciOi.token-like-secret".into()),
+        ] {
+            let namespace = ns("exists");
+            let fake = Fake::new(move |_| answer.clone());
+            let error = was01_probe::run(&fake, &namespace, RUN_BUDGET).unwrap_err();
+            assert_eq!(fake.calls(), vec![was01_plan::create_call(&namespace)]);
+            assert!(
+                !error.contains("eyJ") && !error.contains("AlreadyExists"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_after_create_deletes_once_as_the_last_call() {
+        let namespace = ns("late");
+        // Failure: the time budget runs out after the create.
+        let fake = Fake::healthy();
+        let error = was01_probe::run(&fake, &namespace, Duration::ZERO).unwrap_err();
+        assert!(error.contains("budget"), "{error}");
+        assert_eq!(fake.calls().len(), 2);
+        deleted_last(&fake, &namespace);
+        // Panic in a probe.
+        let mut fake = Fake::healthy();
+        fake.panic_on = Some("get");
+        let namespace = ns("panic");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = was01_probe::run(&fake, &namespace, RUN_BUDGET);
+        }));
+        assert!(outcome.is_err());
+        let calls = fake.calls();
+        assert_eq!(calls[0], was01_plan::create_call(&namespace));
+        deleted_last(&fake, &namespace);
+    }
+
+    #[test]
+    fn a_failed_delete_makes_the_run_fail() {
+        for failure in [reply("", 1), Err("token-like-stderr".into())] {
+            let namespace = ns("delete");
+            let fake = Fake::new(move |args| match args {
+                ["delete", ..] => failure.clone(),
+                ["get", ..] => reply(&version_body("v1.37.2"), 0),
+                ["auth", ..] => reply("yes\n", 0),
+                _ => reply("", 0),
+            });
+            let error = was01_probe::run(&fake, &namespace, RUN_BUDGET).unwrap_err();
+            assert!(error.contains(namespace.name()), "{error}");
+            assert!(!error.contains("token-like"), "{error}");
+            deleted_last(&fake, &namespace);
+        }
+    }
+
+    // ---- the gate -----------------------------------------------------------------------
+
+    fn counting_fake() -> Fake {
+        Fake::healthy()
+    }
+
+    #[test]
+    fn offline_makes_no_runner_call_and_writes_an_all_unverified_report() {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("was01-offline");
+        for flag in [
+            None,
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some(" 1"),
+            Some(""),
+        ] {
+            // Not even a bad KUBECONFIG or shared mode matters while the gate is off.
+            let gate = was01_probe::gate(flag, Some(":"), Some("shared"), None).unwrap();
+            let made = Cell::new(0);
+            let path = was01_probe::execute(gate, &dir, |_| {
+                made.set(made.get() + 1);
+                counting_fake()
+            })
+            .unwrap();
+            assert_eq!(made.get(), 0, "the runner is never built offline");
+            assert!(path.starts_with(env!("CARGO_TARGET_TMPDIR")));
+            let report = Report::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(report, Report::new());
+            for id in ITEM_IDS {
+                let item = report.item(id).unwrap();
+                assert_eq!(item.verdict, Verdict::Unverified, "{id}");
+            }
+            for verb in VERBS {
+                for resource in RESOURCES {
+                    let item = report
+                        .item(model::can_i_item(verb, resource).unwrap())
+                        .unwrap();
+                    assert_eq!(item.reason, Some(Reason::NotProbed));
+                }
+            }
+            assert_eq!(
+                report.item(VERSION_ITEM).unwrap().reason,
+                Some(Reason::NotProbed)
+            );
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_gate_on_refuses_shared_mode_and_an_unusable_kubeconfig_before_any_call() {
+        let dir = scratch("evidence-gate");
+        let file = dir.join("config");
+        std::fs::write(&file, kubeconfig_text("https://127.0.0.1:1", "u")).unwrap();
+        let file = file.to_str().unwrap();
+        let shared = ("shared", Some("fs-test-shared"));
+        for (kubeconfig, mode) in [
+            (Some(file), Some(shared)),
+            (Some(file), Some(("shared", None))),
+            (Some(file), Some(("bogus", None))),
+            (None, None),
+            (Some(""), None),
+            (Some(":"), None),
+            (Some("/nonexistent/kubeconfig"), None),
+        ] {
+            let result = was01_probe::gate(
+                Some("1"),
+                kubeconfig,
+                mode.map(|m| m.0),
+                mode.and_then(|m| m.1),
+            );
+            assert!(result.is_err());
+        }
+        assert!(matches!(
+            was01_probe::gate(Some("1"), Some(file), None, None).unwrap(),
+            Gate::Cluster { .. }
+        ));
+        assert!(matches!(
+            was01_probe::gate(Some("1"), Some(file), Some("create"), None).unwrap(),
+            Gate::Cluster { .. }
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_gate_on_runs_through_the_runner_and_writes_a_report() {
+        let dir = scratch("evidence-run");
+        let file = dir.join("config");
+        std::fs::write(&file, kubeconfig_text("https://127.0.0.1:1", "u")).unwrap();
+        let gate = was01_probe::gate(Some("1"), Some(file.to_str().unwrap()), None, None).unwrap();
+        let out = dir.join("out");
+        let fake = std::rc::Rc::new(Fake::healthy());
+        struct Shared(std::rc::Rc<Fake>);
+        impl Kubectl for Shared {
+            fn call(&self, args: &[&str]) -> Result<Reply, String> {
+                self.0.call(args)
+            }
+        }
+        let handle = fake.clone();
+        let path = was01_probe::execute(gate, &out, move |_| Shared(handle)).unwrap();
+        let report = Report::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(report.cell(Target::K8s137).verdict, Verdict::Passed);
+        let calls = fake.calls();
+        assert_eq!(calls.len(), 15);
+        assert!(calls[0][2].starts_with("fs-test-was01-"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn report_file_names_are_unique() {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("was01-names");
+        let paths: Vec<_> = (0..5)
+            .map(|_| was01_probe::write_report(&dir, &Report::new()).unwrap())
+            .collect();
+        let mut sorted = paths.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 5);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ---- fixed items and the summary ------------------------------------------------------
+
+    #[test]
+    fn openshift_pins_and_guest_items_are_fixed_and_the_summary_is_never_go() {
+        let fixed = [
+            ("openshift-4.20", Reason::OpenshiftNotAvailable),
+            ("pin-engine", Reason::NoPinSelected),
+            ("pin-architecture", Reason::NoPinSelected),
+            ("pin-wasi", Reason::NoPinSelected),
+            ("pin-compiler", Reason::NoPinSelected),
+            ("guest-install", Reason::NotCollected),
+            ("guest-execute", Reason::NotCollected),
+            ("guest-interrupt", Reason::NotCollected),
+        ];
+        let healthy = Fake::healthy();
+        let mut reports = vec![
+            Report::new(),
+            was01_probe::run(&healthy, &ns("fixed"), RUN_BUDGET).unwrap(),
+        ];
+        let mut tried = Report::new();
+        for (id, _) in fixed {
+            assert_eq!(tried.set_passed(id, "yes"), Err(ModelError::FixedItem));
+            assert_eq!(
+                tried.set_failed(id, Reason::CheckFailed),
+                Err(ModelError::FixedItem)
+            );
+            assert_eq!(
+                tried.set_unverified(id, Reason::NotProbed),
+                Err(ModelError::FixedItem)
+            );
+        }
+        reports.push(tried);
+        for report in reports {
+            for (id, reason) in fixed {
+                let item = report.item(id).unwrap();
+                assert_eq!(
+                    (item.verdict, item.reason),
+                    (Verdict::Unverified, Some(reason)),
+                    "{id}"
+                );
+                assert!(report.non_passed().contains(&id));
+            }
+            let text = report.to_text();
+            let summary = text.lines().last().unwrap();
+            assert!(
+                summary.starts_with("summary not-go non-passed="),
+                "{summary}"
+            );
+            assert!(!text.contains("summary go"));
+            for id in report.non_passed() {
+                assert!(summary.contains(id), "{id}");
+            }
+            let listed = summary.strip_prefix("summary not-go non-passed=").unwrap();
+            assert_eq!(listed.split(',').count(), report.non_passed().len());
+        }
+        // A fully healthy 1.37 still lists the eight items it cannot know.
+        let report = was01_probe::run(&Fake::healthy(), &ns("fixed2"), RUN_BUDGET).unwrap();
+        assert_eq!(report.non_passed().len(), 8);
+    }
+
+    // ---- the report text ------------------------------------------------------------------
+
+    #[test]
+    fn a_report_round_trips_and_malformed_input_is_rejected() {
+        let healthy = Fake::healthy();
+        let mut reports = vec![
+            Report::new(),
+            was01_probe::run(&healthy, &ns("round"), RUN_BUDGET).unwrap(),
+        ];
+        let mut mixed = Report::new();
+        mixed.set_passed(VERSION_ITEM, "v1.36.4+k3s1").unwrap();
+        mixed.set_passed("can-i-get-services", "yes").unwrap();
+        mixed
+            .set_failed("can-i-create-services", Reason::CheckFailed)
+            .unwrap();
+        mixed
+            .set_unverified("can-i-update-services", Reason::Denied)
+            .unwrap();
+        mixed.set_failed(PLAN_ITEM, Reason::PlanViolation).unwrap();
+        reports.push(mixed);
+        for report in reports {
+            let text = report.to_text();
+            assert_eq!(Report::parse(&text), Ok(report.clone()));
+            assert_eq!(Report::parse(&text).unwrap().to_text(), text);
+        }
+        let good = Report::new().to_text();
+        let first_item = "item kubernetes-version unverified not-probed -";
+        let bad: Vec<(&str, String)> = vec![
+            ("empty", String::new()),
+            ("no trailing newline", good.trim_end().to_owned()),
+            ("crlf", good.replace('\n', "\r\n")),
+            (
+                "wrong header",
+                good.replacen("was01-cluster-evidence 1", "was01-cluster-evidence 2", 1),
+            ),
+            (
+                "missing item",
+                good.replacen(&format!("{first_item}\n"), "", 1),
+            ),
+            (
+                "duplicate item",
+                good.replacen(first_item, &format!("{first_item}\n{first_item}"), 1),
+            ),
+            ("extra line", format!("{good}extra line\n")),
+            ("blank line", format!("{good}\n")),
+            (
+                "extra field",
+                good.replacen(first_item, &format!("{first_item} x"), 1),
+            ),
+            (
+                "missing field",
+                good.replacen(
+                    first_item,
+                    "item kubernetes-version unverified not-probed",
+                    1,
+                ),
+            ),
+            (
+                "double space",
+                good.replacen(
+                    first_item,
+                    "item  kubernetes-version unverified not-probed -",
+                    1,
+                ),
+            ),
+            (
+                "unknown verdict",
+                good.replacen("unverified not-probed", "go not-probed", 1),
+            ),
+            ("unknown reason", good.replacen("not-probed", "because", 1)),
+            (
+                "passed without evidence",
+                good.replacen(first_item, "item kubernetes-version passed - -", 1),
+            ),
+            (
+                "passed with a reason",
+                good.replacen(
+                    first_item,
+                    "item kubernetes-version passed not-probed v1.37.2",
+                    1,
+                ),
+            ),
+            (
+                "passed with an unsupported version",
+                good.replacen(first_item, "item kubernetes-version passed - v1.35.0", 1),
+            ),
+            (
+                "unverified with evidence",
+                good.replacen(
+                    first_item,
+                    "item kubernetes-version unverified not-probed v1.37.2",
+                    1,
+                ),
+            ),
+            (
+                "passed fixed item",
+                good.replacen(
+                    "item pin-wasi unverified no-pin-selected -",
+                    "item pin-wasi passed - yes",
+                    1,
+                ),
+            ),
+            (
+                "fixed item with another reason",
+                good.replacen(
+                    "item pin-wasi unverified no-pin-selected -",
+                    "item pin-wasi unverified not-probed -",
+                    1,
+                ),
+            ),
+            (
+                "reason not allowed for the item",
+                good.replacen(first_item, "item kubernetes-version unverified denied -", 1),
+            ),
+            (
+                "items out of order",
+                good.replacen("item pin-wasi", "item pin-engine", 1),
+            ),
+            (
+                "tag",
+                good.replacen(
+                    first_item,
+                    "items kubernetes-version unverified not-probed -",
+                    1,
+                ),
+            ),
+            ("go summary", good.replace("summary not-go", "summary go")),
+            ("short summary", good.replace(",guest-interrupt", "")),
+            (
+                "forged cell",
+                good.replace(
+                    "cell k8s-1.37 unverified no-matching-server",
+                    "cell k8s-1.37 passed -",
+                ),
+            ),
+        ];
+        for (label, text) in bad {
+            assert!(Report::parse(&text).is_err(), "{label}");
+        }
+        let unknown = good.replacen(
+            first_item,
+            "item kubernetes-versioon unverified not-probed -",
+            1,
+        );
+        assert_eq!(Report::parse(&unknown), Err(ModelError::UnknownItem));
+        let hostile = good.replacen(first_item, "item rm-rf-$(id) unverified not-probed -", 1);
+        let error = Report::parse(&hostile).unwrap_err();
+        assert!(!error.to_string().contains("rm-rf"));
+    }
+
+    #[test]
+    fn a_failed_item_is_not_forgeable_into_a_passed_cell_by_editing_the_text() {
+        let mut report = Report::new();
+        report.set_passed(VERSION_ITEM, "v1.37.2").unwrap();
+        for verb in VERBS {
+            for resource in RESOURCES {
+                report
+                    .set_passed(model::can_i_item(verb, resource).unwrap(), "yes")
+                    .unwrap();
+            }
+        }
+        let text = report.to_text();
+        assert!(text.contains("cell k8s-1.37 passed -"));
+        let edited = text.replace(
+            "item can-i-get-services passed - yes",
+            "item can-i-get-services unverified denied -",
+        );
+        assert_eq!(Report::parse(&edited), Err(ModelError::Inconsistent));
+    }
+
+    #[test]
+    fn runner_output_never_reaches_the_report_or_an_error() {
+        let secret = "Bearer eyJhbGciOiJSUzI1NiJ9.SECRET-TOKEN";
+        let hostile = format!("v1.37.2\n{secret}");
+        let fake = Fake::new(move |args| match args {
+            ["get", ..] => reply(&version_body(&hostile), 0),
+            ["auth", "can-i", "get", ..] => Err(secret.to_owned()),
+            ["auth", ..] => reply(&format!("no\n{secret}"), 1),
+            _ => reply("", 0),
+        });
+        let report = was01_probe::run(&fake, &ns("leak"), RUN_BUDGET).unwrap();
+        let text = report.to_text();
+        assert!(!text.contains("SECRET") && !text.contains("eyJ") && !text.contains("Bearer"));
+        assert_eq!(
+            report.item(VERSION_ITEM).unwrap().reason,
+            Some(Reason::MalformedVersion)
+        );
+        // The stdout of a failed create or delete is not echoed either.
+        let fake = Fake::new(move |_| reply(secret, 1));
+        let error = was01_probe::run(&fake, &ns("leak2"), RUN_BUDGET).unwrap_err();
+        assert!(!error.contains("SECRET"), "{error}");
+        assert!(was01_probe::parse_version(&version_body(&format!("v1.37.2\n{secret}"))).is_err());
+    }
+
+    // ---- the real runner ------------------------------------------------------------------
+
+    fn process(script: &str, limit: Duration, dir: &Path) -> ProcessKubectl {
+        let config = dir.join("config");
+        std::fs::write(&config, kubeconfig_text("https://127.0.0.1:1", "u")).unwrap();
+        let kubeconfigs = Kubeconfigs::parse(config.to_str()).unwrap();
+        let script_file = dir.join("fake-kubectl.sh");
+        std::fs::write(&script_file, script).unwrap();
+        ProcessKubectl::with_command(
+            &["/bin/sh", script_file.to_str().unwrap()],
+            kubeconfigs,
+            limit,
+            limit,
+        )
+    }
+
+    #[test]
+    fn the_process_runner_returns_stdout_and_status_and_drops_stderr() {
+        let dir = scratch("evidence-process");
+        let kubectl = process(
+            "echo \"$@\" >&2; echo token-in-stderr >&2; echo no; exit 1\n",
+            Duration::from_secs(20),
+            &dir,
+        );
+        let answer = kubectl.call(&["auth", "can-i", "get", "services"]).unwrap();
+        assert_eq!(
+            answer,
+            Reply {
+                stdout: "no\n".into(),
+                code: 1
+            }
+        );
+        let kubectl = process(
+            "for a in \"$@\"; do echo \"$a\"; done\n",
+            Duration::from_secs(20),
+            &dir,
+        );
+        let answer = kubectl.call(&["get", "--raw", "/version"]).unwrap();
+        let lines: Vec<&str> = answer.stdout.lines().collect();
+        assert!(lines[0].starts_with("--kubeconfig="), "{lines:?}");
+        assert!(!lines[0].contains("fs-test-was01"));
+        assert_eq!(lines[1], "--request-timeout=15s");
+        assert_eq!(&lines[2..], ["get", "--raw", "/version"]);
+        let answer = kubectl
+            .call(&["delete", "namespace", "x", "--wait"])
+            .unwrap();
+        assert!(answer.stdout.contains("--request-timeout=60s"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_process_runner_kills_a_hung_kubectl_at_the_deadline() {
+        let dir = scratch("evidence-hang");
+        let kubectl = process("sleep 30\n", Duration::from_millis(300), &dir);
+        let started = std::time::Instant::now();
+        let error = kubectl.call(&["get", "--raw", "/version"]).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(!error.contains("sleep"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ---- README -------------------------------------------------------------------------
+
+    #[test]
+    fn the_readme_names_every_item_reason_target_and_env_var() {
+        for id in ITEM_IDS {
+            assert!(README.contains(id), "{id}");
+        }
+        for reason in Reason::ALL {
+            assert!(README.contains(reason.code()), "{}", reason.code());
+        }
+        for target in Target::ALL {
+            assert!(README.contains(target.code()), "{}", target.code());
+        }
+        for var in ENV_VARS {
+            assert!(README.contains(var), "{var}");
+        }
+        assert!(README.contains("49.0.5"));
+        assert!(README.contains("not a selected pin"));
+    }
+
+    // ---- model and dependency guards --------------------------------------------------------
+
+    #[test]
+    fn the_model_imports_only_std() {
+        let source = include_str!("../src/qualification/cluster_evidence.rs");
+        let mut uses = 0;
+        for line in source.lines().map(str::trim_start) {
+            if let Some(path) = line.strip_prefix("use ") {
+                uses += 1;
+                assert!(path.starts_with("std::"), "{line}");
+            }
+            assert!(!line.starts_with("extern crate"), "{line}");
+        }
+        assert!(uses > 0);
+        for banned in [
+            "serde",
+            "kube::",
+            "tokio",
+            "wasmtime",
+            "crate::",
+            "super::",
+            "Status::Passed",
+        ] {
+            assert!(!source.contains(banned), "{banned}");
+        }
+    }
+
+    const MANIFEST: &str = include_str!("../Cargo.toml");
+    const LOCK: &str = include_str!("../../Cargo.lock");
+
+    #[test]
+    fn the_dependency_guard_passes_on_the_real_manifests() {
+        assert_eq!(
+            was01_deps::check(was01_deps::BASELINE, MANIFEST, LOCK),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn the_dependency_guard_fails_on_an_added_entry_or_package() {
+        let check =
+            |manifest: &str, lock: &str| was01_deps::check(was01_deps::BASELINE, manifest, lock);
+        for fixture in [
+            MANIFEST.replacen("[dependencies]\n", "[dependencies]\nextra = \"1\"\n", 1),
+            MANIFEST.replacen(
+                "[dev-dependencies]\n",
+                "[dev-dependencies]\nextra = \"1\"\n",
+                1,
+            ),
+            format!("{MANIFEST}\n[build-dependencies]\nextra = \"1\"\n"),
+            format!("{MANIFEST}\n[target.'cfg(unix)'.dependencies]\nextra = \"1\"\n"),
+        ] {
+            assert_ne!(fixture, MANIFEST);
+            let error = check(&fixture, LOCK).unwrap_err();
+            assert!(error.contains("extra"), "{error}");
+            assert!(error.contains("was01_dependency_baseline.txt"), "{error}");
+            assert!(error.contains("--ignored"), "{error}");
+        }
+        let lock = format!("{LOCK}\n[[package]]\nname = \"extra\"\nversion = \"1.0.0\"\n");
+        let error = check(MANIFEST, &lock).unwrap_err();
+        assert!(error.contains("package extra 1.0.0"), "{error}");
+        // A package that vanished, or a changed version, differs from the baseline as well.
+        let lock = LOCK.replacen(
+            "name = \"sha2\"\nversion = \"0.10.9\"",
+            "name = \"sha2\"\nversion = \"0.10.8\"",
+            1,
+        );
+        assert_ne!(lock, LOCK);
+        assert!(check(MANIFEST, &lock).is_err());
+        assert!(check("not = [toml", LOCK).is_err());
+        assert!(check(MANIFEST, "").is_err());
+    }
+
+    /// Prints the baseline for the current manifests; see the failure message of the guard.
+    #[test]
+    #[ignore = "prints the dependency baseline; run on purpose"]
+    fn print_dependency_baseline() {
+        print!("{}", was01_deps::render(MANIFEST, LOCK).unwrap());
+    }
+
+    /// The real offline-by-default evidence run. Operator-only with FS_WAS01_CLUSTER=1 and
+    /// KUBECONFIG: it creates fs-test-was01-<random>, probes, deletes it and writes the report
+    /// under the target directory. The report is never committed.
+    #[test]
+    fn was01_cluster_evidence() -> Result<(), String> {
+        let env = |key: &str| std::env::var(key).ok();
+        let gate = was01_probe::gate(
+            env("FS_WAS01_CLUSTER").as_deref(),
+            env("KUBECONFIG").as_deref(),
+            env("FS_TEST_NAMESPACE_MODE").as_deref(),
+            env("FS_TEST_NAMESPACE").as_deref(),
+        )?;
+        let online = matches!(gate, Gate::Cluster { .. });
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("was01-evidence");
+        let path = was01_probe::execute(gate, &dir, ProcessKubectl::new)?;
+        if online {
+            println!("WAS-01 evidence report: {}", path.display());
+            println!(
+                "{}",
+                std::fs::read_to_string(&path).map_err(|_| "cannot read the report")?
+            );
+        } else {
+            println!("UNVERIFIED: FS_WAS01_CLUSTER=1 is not set; no cluster was contacted");
+        }
+        Ok(())
+    }
+}
