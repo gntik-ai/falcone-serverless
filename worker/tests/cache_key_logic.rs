@@ -113,6 +113,11 @@ fn untrusted_entries_are_misses_before_any_native_load() {
         ("flipped", "integrity"),
         ("truncated", "integrity"),
         ("missing_manifest", "manifest"),
+        ("truncated_manifest", "manifest"),
+        ("oversized_manifest", "manifest"),
+        ("missing_key", "manifest"),
+        ("missing_digest", "manifest"),
+        ("missing_provenance", "manifest"),
         ("missing_mac", "manifest"),
         ("wrong_mac", "mac"),
         ("rehashed_tampering", "mac"),
@@ -152,6 +157,26 @@ fn untrusted_entries_are_misses_before_any_native_load() {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
                 entry.drain(..4 + size);
             }
+            "truncated_manifest" => {
+                let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+                entry.truncate(4 + size - 1);
+            }
+            "oversized_manifest" => {
+                // Version 3 permits at most 16 KiB, independently of the entry cap.
+                // Supply complete JSON so the length check is the only failing gate.
+                let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
+                entry.splice(4 + size..4 + size, vec![b' '; 16_385 - size]);
+                entry[..4].copy_from_slice(&16_385_u32.to_be_bytes());
+            }
+            "missing_key" => rewrite_manifest(&mut entry, |m| {
+                m.as_object_mut().unwrap().remove("key");
+            }),
+            "missing_digest" => rewrite_manifest(&mut entry, |m| {
+                m.as_object_mut().unwrap().remove("bytes_sha256");
+            }),
+            "missing_provenance" => rewrite_manifest(&mut entry, |m| {
+                m.as_object_mut().unwrap().remove("provenance");
+            }),
             "missing_mac" => rewrite_manifest(&mut entry, |m| {
                 m.as_object_mut().unwrap().remove("mac");
             }),
