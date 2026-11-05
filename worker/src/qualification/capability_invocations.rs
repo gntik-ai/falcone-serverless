@@ -407,48 +407,30 @@ pub fn event_scope_and_oversized_lazy_arguments_are_checked_before_binding() {
 const ALLOCATION_BOUND: usize = 256 * 1024;
 const CONTROL_MINIMUM: usize = 32 * 1024 * 1024;
 
-/// Peak and file-backed/shared resident memory from `/proc/self/status`, in bytes.
+/// Live and peak heap bytes from the process-wide counting allocator. Freed memory
+/// that the system allocator reuses is counted again, unlike resident memory.
 #[derive(Clone, Copy, Debug)]
 struct MemorySample {
+    live: usize,
     peak: usize,
-    file: usize,
-    shmem: usize,
 }
 
 fn memory_sample() -> MemorySample {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap();
-    let field = |name: &str| {
-        status
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix(name).map(|value| {
-                    value
-                        .split_whitespace()
-                        .next()
-                        .unwrap()
-                        .parse::<usize>()
-                        .unwrap()
-                        * 1024
-                })
-            })
-            .unwrap()
-    };
     MemorySample {
-        peak: field("VmHWM:"),
-        file: field("RssFile:"),
-        shmem: field("RssShmem:"),
+        live: crate::counting_alloc::live(),
+        peak: crate::counting_alloc::peak(),
     }
 }
 
-/// Growth of the peak resident set across a call, less file-backed and shared pages first touched
-/// during it: code and data pages of the binary are resident memory but not host allocation, and
-/// how many of them a cold path faults in depends on the machine.
+/// Starts a measurement: earlier peaks, such as compilation and warm-up, are discarded.
+fn reset_sample() -> MemorySample {
+    let live = crate::counting_alloc::reset_peak();
+    MemorySample { live, peak: live }
+}
+
+/// Peak heap allocation above the live heap at the start of the measurement.
 fn host_growth(before: MemorySample, after: MemorySample) -> usize {
-    after
-        .peak
-        .saturating_sub(before.peak)
-        .saturating_sub(after.file.saturating_sub(before.file))
-        .saturating_sub(after.shmem.saturating_sub(before.shmem))
+    after.peak.saturating_sub(before.live)
 }
 
 #[cfg_attr(test, test)]
@@ -458,6 +440,22 @@ pub fn allocation_probe() {
         return;
     };
     let (mode, eager) = probe.split_once(':').unwrap();
+    if eager == "control" {
+        // Sensitivity at the bound: freed warm-up memory the system allocator can
+        // reuse must not hide a later allocation just above the bound.
+        drop(std::hint::black_box(vec![1u8; 16 * 1024 * 1024]));
+        let before = reset_sample();
+        drop(std::hint::black_box(vec![1u8; 2 * ALLOCATION_BOUND]));
+        let after = memory_sample();
+        let delta = host_growth(before, after);
+        assert!(
+            delta > ALLOCATION_BOUND,
+            "instrumentation missed a {} byte allocation: {delta} ({before:?} -> {after:?})",
+            2 * ALLOCATION_BOUND
+        );
+        println!("allocation-probe passed: control {delta}");
+        return;
+    }
     let mode: u32 = mode.parse().unwrap();
     let record = mode >= 4;
     let mode = if record { mode - 3 } else { mode };
@@ -512,7 +510,7 @@ pub fn allocation_probe() {
             .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
             .unwrap();
         assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
-        let before = memory_sample();
+        let before = reset_sample();
         assert_eq!(run.call(&mut store, (mode,)).unwrap(), (2,));
         (before, memory_sample())
     } else {
@@ -530,7 +528,7 @@ pub fn allocation_probe() {
             .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
             .unwrap();
         assert_eq!(run.call(&mut store, (0,)).unwrap(), (0,));
-        let before = memory_sample();
+        let before = reset_sample();
         assert_eq!(run.call(&mut store, (mode,)).unwrap(), (2,));
         let after = memory_sample();
         assert_eq!(binding.0.load(Ordering::SeqCst), 1);
@@ -572,6 +570,23 @@ pub fn oversized_utf8_and_byte_list_have_bounded_host_allocation() {
             );
         }
     }
+}
+
+#[cfg_attr(test, test)]
+pub fn allocation_instrumentation_reports_an_allocation_above_the_bound() {
+    let _case = crate::capability_support::serial_case();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["allocation_probe", "--nocapture"])
+        .env("WAS02_ALLOCATION_PROBE", "0:control")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).contains("allocation-probe passed: control"),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 // Exercise the event capability through the same guest/host seam in every
@@ -982,7 +997,7 @@ pub fn retained_storage_probe() {
         .get_typed_func::<(u32, u32, u32), (u32,)>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, (12, 1, 1)).unwrap(), (0,));
-    let before = memory_sample();
+    let before = reset_sample();
     // Each key fits the per-call ceiling, but retaining 64 copies must not grow
     // host memory by 64 MiB. The guest has only 2 MiB of linear memory.
     let result = run.call(&mut store, (1_048_572, 64, 0)).unwrap();

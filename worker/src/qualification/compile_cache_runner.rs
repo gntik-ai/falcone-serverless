@@ -7,6 +7,7 @@ mod capability_http;
 mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
+mod counting_alloc;
 pub use falcone_serverless_worker::host;
 
 use artifact::supervisor::CompileLimits;
@@ -162,6 +163,7 @@ fn main() -> std::process::ExitCode {
             capability_invocations::ungated_context_progress_and_cancellation_follow_the_world_contract();
             capability_invocations::utf16_decoding_is_bounded_by_the_configured_guest_memory();
             capability_invocations::cancellation_interrupts_a_stalled_binding_without_guest_fuel_or_epoch();
+            capability_invocations::allocation_instrumentation_reports_an_allocation_above_the_bound();
             capability_invocations::oversized_utf8_and_byte_list_have_bounded_host_allocation();
             capability_invocations::helper_cap_holds_across_fresh_invocations();
             capability_invocations::helper_permits_cover_binding_destructors_even_during_unwinding(

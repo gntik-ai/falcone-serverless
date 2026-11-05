@@ -3,13 +3,21 @@ use std::path::Path;
 fn audited(path: &Path) -> bool {
     path == Path::new("compiler/src/isolate/fd_hygiene.rs")
         || path == Path::new("worker/src/cache/load.rs")
+        || path == Path::new("worker/src/qualification/counting_alloc.rs")
 }
 
 #[test]
 fn audited_exceptions_are_exact_paths() {
     assert!(audited(Path::new("compiler/src/isolate/fd_hygiene.rs")));
     assert!(audited(Path::new("worker/src/cache/load.rs")));
+    assert!(audited(Path::new(
+        "worker/src/qualification/counting_alloc.rs"
+    )));
     for path in [
+        "worker/src/qualification/capability_invocations.rs",
+        "worker/src/qualification/counting_alloc.rs.bak",
+        "worker/src/qualification/nested/counting_alloc.rs",
+        "worker/tests/counting_alloc.rs",
         "worker/src/cache/sibling.rs",
         "worker/src/cache/nested/load.rs",
         "worker/src/artifact/load.rs",
@@ -20,7 +28,7 @@ fn audited_exceptions_are_exact_paths() {
 }
 
 #[test]
-fn only_the_two_audited_boundaries_are_exceptions() {
+fn only_the_three_audited_boundaries_are_exceptions() {
     fn check(root: &Path, repository: &Path) {
         for entry in std::fs::read_dir(root).unwrap() {
             let path = entry.unwrap().path();
