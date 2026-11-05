@@ -1488,3 +1488,30 @@ fn the_runner_container_state_is_read_from_the_pod_status() {
     assert_eq!(conditions.len(), 1);
     assert_eq!(view, crashed(2));
 }
+
+/// ac3 is independently gated and never uses the ac1/ac2 runner image.
+#[test]
+fn was01_ac3_report() -> Result<(), String> {
+    use support::was01_report::{ProcessKubectl, ReportGate};
+    let env = |key: &str| std::env::var(key).ok();
+    let gate = support::was01_report::gate(
+        env("FS_WAS01_CLUSTER").as_deref(),
+        env("FS_TEST_CLUSTER").as_deref(),
+        env("FS_TEST_NAMESPACE_MODE").as_deref(),
+        env("KUBECONFIG").as_deref(),
+    )?;
+    let runner = match &gate {
+        ReportGate::Offline => None,
+        ReportGate::Cluster(configs) => Some(
+            ProcessKubectl::new(
+                Path::new("kubectl"),
+                configs,
+                std::time::Duration::from_secs(10),
+            )
+            .map_err(|reason| reason.code().to_owned())?,
+        ),
+    };
+    let path = support::was01_report::run(&runner, &gate, Path::new(env!("CARGO_TARGET_TMPDIR")))?;
+    println!("WAS-01 evidence report: {}", path.display());
+    Ok(())
+}
