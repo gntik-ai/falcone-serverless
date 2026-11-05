@@ -11,6 +11,8 @@ For example, `v1.35.0`, `v1.370.0` and `v2.37.0` are recorded but fill no target
 The shared cluster is k3s, a stand-in only; it supplies no OpenShift evidence.
 Each matching Kubernetes cell is failed if any ac3 item failed, passed only when
 all ac3 items passed, and otherwise unverified. Unmatched cells stay unverified.
+Without a recorded version, any ac3 failure marks both Kubernetes cells failed;
+the OpenShift cell stays unverified.
 
 ## Item inventory
 
@@ -36,7 +38,7 @@ Only a version, `yes`, or `allow-listed-plan` can be evidence; diagnostics are n
 | `not-probed` | No cluster observation was made. |
 | `recorded` | A valid exact gitVersion was recorded. |
 | `allowed` | can-i returned yes with exit zero. |
-| `denied` | can-i returned no with exit zero or one. |
+| `denied` | can-i returned `no` or `no - <reason>` with exit zero or one; the reason text is discarded. |
 | `probe-error` | Execution, timeout, oversized output or an unrecognized response. |
 | `forbidden` | A line-anchored kubectl Forbidden diagnostic on stderr. |
 | `invalid-version` | Missing or malformed gitVersion; nothing is recorded. |
@@ -65,8 +67,8 @@ identity in the supplied kubeconfig, not a tenant or a different service account
 `KUBECONFIG` is required and uses the existing explicit list/merge validator. Every
 kubectl invocation uses `Kubeconfigs::kubectl_flags`; there is no ambient config fallback.
 An invalid list fails before any runner call. The process runner has a 10-second
-timeout for probes and creation, and a separate 90-second deadline for namespace
-cleanup with --wait. It uses no image, pod, guest or existing WAS-01 ac1/ac2 interface.
+timeout for every call, including namespace cleanup with --wait.
+It uses no image, pod, guest or existing WAS-01 ac1/ac2 interface.
 The existing separate ac1/ac2 cluster test retains its own image requirement.
 
 `FS_TEST_NAMESPACE_MODE` must be unset or `create`. `shared` is refused before
@@ -82,6 +84,8 @@ Any extra argument or different form is refused. No resource is created inside t
 namespace, no permissions are granted, and no cluster-scoped resource is read.
 This report is an exception to the root README's test_namespace(suite) preflight:
 that preflight's unnamespaced command is outside this report's allow-list.
+Its exact create command also omits the restricted-enforcement namespace label;
+the report creates no pods or namespaced workloads.
 The only cluster-scoped write is this harness identity creating its own namespace.
 
 Ownership begins only when create succeeds. Creation failures, including AlreadyExists,

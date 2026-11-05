@@ -1,5 +1,11 @@
 use super::evidence::{Reason, Report, Verdict};
-use super::was01_report::{plan, plan_safe};
+use super::was01_report::{
+    Output, ProcessKubectl, ReportGate, Runner, gate, plan, plan_safe, probe_permissions,
+    probe_version, run,
+};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 #[test]
 fn plan_accepts_only_the_explicit_allow_list() {
@@ -40,6 +46,28 @@ fn plan_accepts_only_the_explicit_allow_list() {
             .collect();
         assert!(!plan_safe(&namespace, &[command]), "{bad}");
     }
+}
+
+#[test]
+fn rejected_plans_record_failed_evidence_before_returning_an_error() {
+    let namespace = super::Namespace::new("fs-test-was01-rejected").unwrap();
+    let commands = vec![vec!["get".into(), "nodes".into()]];
+    let mut report = Report::new();
+    assert_eq!(
+        super::was01_report::check_plan(&mut report, &namespace, &commands),
+        Err("plan-rejected")
+    );
+    let item = report.item("plan-namespaced-only").unwrap();
+    assert_eq!(
+        (item.verdict, item.reason),
+        (Verdict::Failed, Reason::RejectedPlan)
+    );
+    assert_eq!(Report::parse(&report.render()).unwrap(), report);
+    assert!(super::was01_report::check_plan(&mut report, &namespace, &plan(&namespace)).is_ok());
+    assert_eq!(
+        report.item("plan-namespaced-only").unwrap().verdict,
+        Verdict::Passed
+    );
 }
 
 #[test]
@@ -125,6 +153,35 @@ fn items_require_evidence_and_known_ids() {
             .as_deref(),
         Some("v1.37.2")
     );
+}
+
+#[test]
+fn ac3_failures_remain_visible_without_a_recorded_version() {
+    let mut report = Report::new();
+    report
+        .record(
+            "can-get-services",
+            Verdict::Failed,
+            Reason::ProbeError,
+            None,
+        )
+        .unwrap();
+    for target in ["k8s-1.37", "k8s-1.36"] {
+        assert_eq!(report.cell(target).unwrap(), Verdict::Failed);
+    }
+    assert_eq!(report.cell("openshift-4.20").unwrap(), Verdict::Unverified);
+    assert_eq!(Report::parse(&report.render()).unwrap(), report);
+    report
+        .record(
+            "kubernetes-version",
+            Verdict::Passed,
+            Reason::Recorded,
+            Some("v1.35.0"),
+        )
+        .unwrap();
+    for target in super::evidence::TARGETS {
+        assert_eq!(report.cell(target).unwrap(), Verdict::Unverified);
+    }
 }
 
 #[test]
@@ -263,10 +320,6 @@ fn valid_unmatched_versions_remain_recorded_without_qualifying_any_cell() {
     }
 }
 
-use super::was01_report::{Output, ProcessKubectl, Runner, probe_permissions, probe_version};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
-
 struct PrivateDir(PathBuf);
 impl PrivateDir {
     fn new() -> Self {
@@ -308,6 +361,23 @@ impl Drop for PrivateDir {
 }
 fn process(dir: &PrivateDir, script: &Path, timeout: Duration) -> ProcessKubectl {
     ProcessKubectl::new(script, &dir.config(), timeout).unwrap()
+}
+
+#[test]
+fn process_retains_the_explicit_kubeconfig_for_its_lifetime() {
+    let dir = PrivateDir::new();
+    let script = dir.script("test -f \"${1#--kubeconfig=}\" || exit 98; echo yes");
+    // process() drops its temporary Kubeconfigs before the command is run.
+    let runner = process(&dir, &script, Duration::from_secs(3));
+    let namespace = super::Namespace::new("fs-test-was01-config-lifetime").unwrap();
+    let mut report = Report::new();
+    probe_permissions(&mut report, &runner, &namespace).unwrap();
+    for id in Report::ac3_ids()
+        .into_iter()
+        .filter(|id| id != "kubernetes-version")
+    {
+        assert_eq!(report.item(&id).unwrap().reason, Reason::Allowed);
+    }
 }
 
 #[test]
@@ -354,6 +424,9 @@ fn process_controls_never_turn_diagnostics_into_permission_evidence() {
         ),
         ("echo yes; exit 1", Reason::ProbeError),
         ("echo no; exit 1", Reason::Denied),
+        ("echo 'no - RBAC: x'; exit 1", Reason::Denied),
+        ("echo nope; exit 1", Reason::ProbeError),
+        ("echo no-op; exit 1", Reason::ProbeError),
         ("echo yes", Reason::Allowed),
         (
             "echo yes; echo 'Error from server (Forbidden): x' >&2",
@@ -389,11 +462,12 @@ fn process_controls_never_turn_diagnostics_into_permission_evidence() {
             );
         }
         assert!(!report.render().contains("unrelated"));
+        assert!(!report.render().contains("RBAC: x"));
     }
 }
 
 #[test]
-fn process_cleanup_has_its_own_deadline_while_probes_keep_the_call_timeout() {
+fn process_cleanup_and_probes_respect_the_configured_call_timeout() {
     let dir = PrivateDir::new();
     let script = dir.script("sleep 1; exit 0");
     let runner = process(&dir, &script, Duration::from_millis(200));
@@ -401,10 +475,11 @@ fn process_cleanup_has_its_own_deadline_while_probes_keep_the_call_timeout() {
     let commands = plan(&namespace);
     let start = Instant::now();
     assert_eq!(
-        runner.run(commands.last().unwrap()).unwrap().exit_code,
-        Some(0)
+        runner.run(commands.last().unwrap()).unwrap_err(),
+        Reason::ProbeError
     );
-    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert!(start.elapsed() >= Duration::from_millis(200));
+    assert!(start.elapsed() < Duration::from_secs(1));
     assert_eq!(runner.run(&commands[1]).unwrap_err(), Reason::ProbeError);
 }
 
@@ -414,7 +489,12 @@ fn process_drains_overflow_and_kills_a_hung_child_at_the_deadline() {
     let script = dir.script("head -c 1048576 /dev/zero | tr '\\000' x >&2; echo '\nError from server (Forbidden): token=SECRET_TOKEN_abc' >&2; exit 1");
     let runner = process(&dir, &script, Duration::from_secs(3));
     let mut report = Report::new();
+    let started = Instant::now();
     probe_version(&mut report, &runner).unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "finite stderr flood must drain before the 3-second deadline"
+    );
     assert_eq!(
         report.item("kubernetes-version").unwrap().reason,
         Reason::ProbeError
@@ -452,8 +532,6 @@ fn process_drains_overflow_and_kills_a_hung_child_at_the_deadline() {
     );
 }
 
-use super::was01_report::{ReportGate, gate, run};
-use std::cell::RefCell;
 struct FakeRunner {
     calls: RefCell<Vec<Vec<String>>>,
     scenario: &'static str,
@@ -971,6 +1049,47 @@ fn process_records_valid_versions_and_rejects_malformed_probe_and_report_values(
 }
 
 #[test]
+fn report_parser_rejects_reasons_inconsistent_with_the_item_or_verdict() {
+    for (id, verdict, valid, invalid) in [
+        (
+            "can-get-services",
+            Verdict::Failed,
+            Reason::ProbeError,
+            "not-probed",
+        ),
+        (
+            "can-get-services",
+            Verdict::Unverified,
+            Reason::NotProbed,
+            "plan-rejected",
+        ),
+        (
+            "plan-namespaced-only",
+            Verdict::Failed,
+            Reason::RejectedPlan,
+            "invalid-version",
+        ),
+        (
+            "kubernetes-version",
+            Verdict::Unverified,
+            Reason::InvalidVersion,
+            "denied",
+        ),
+    ] {
+        let mut report = Report::new();
+        report.record(id, verdict, valid, None).unwrap();
+        let text = report.render();
+        assert_eq!(Report::parse(&text).unwrap(), report);
+        let corrupted = text.replace(
+            &format!("{id}\t{}\t{}\t-\n", verdict.code(), valid.code()),
+            &format!("{id}\t{}\t{invalid}\t-\n", verdict.code()),
+        );
+        assert_ne!(corrupted, text);
+        assert!(Report::parse(&corrupted).is_err(), "{id}: {invalid}");
+    }
+}
+
+#[test]
 fn report_parser_rejects_unknown_duplicate_missing_and_inconsistent_items() {
     let report = Report::new();
     let text = report.render();
@@ -979,10 +1098,18 @@ fn report_parser_rejects_unknown_duplicate_missing_and_inconsistent_items() {
         text.replace("can-get-services\tunverified\tnot-probed\t-\n", ""),
         text.replace("not-probed", "arbitrary-reason"),
         text.replace("unverified", "passed"),
-        text.replace("can-get-services\tunverified\tnot-probed\t-\n", "can-get-services\tunverified\tnot-probed\t-\ncan-get-services\tunverified\tnot-probed\t-\n"),
+        text.replace(
+            "can-get-services\tunverified\tnot-probed\t-\n",
+            concat!(
+                "can-get-services\tunverified\tnot-probed\t-\n",
+                "can-get-services\tunverified\tnot-probed\t-\n",
+            ),
+        ),
         text.replace("cell\tk8s-1.37\tunverified", "cell\tk8s-1.37\tpassed"),
         text.replace("never-go", "go"),
-    ] { assert!(Report::parse(&corrupted).is_err()); }
+    ] {
+        assert!(Report::parse(&corrupted).is_err());
+    }
     let mut report = report;
     assert!(
         report

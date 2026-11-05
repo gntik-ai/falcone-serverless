@@ -1,6 +1,11 @@
 //! WAS-01 ac3 harness. The command plan is allow-listed before namespace creation.
+use super::Kubeconfigs;
 use super::Namespace;
-use super::evidence::{RESOURCES, VERBS};
+use super::evidence::{RESOURCES, Reason, Report, VERBS, Verdict};
+use std::io::{ErrorKind, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 fn words(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_owned()).collect()
@@ -46,12 +51,27 @@ pub fn plan_safe(namespace: &Namespace, commands: &[Vec<String>]) -> bool {
         })
 }
 
-use super::Kubeconfigs;
-use super::evidence::{Reason, Report, Verdict};
-use std::io::{ErrorKind, Read};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+pub fn check_plan(
+    report: &mut Report,
+    namespace: &Namespace,
+    commands: &[Vec<String>],
+) -> Result<(), &'static str> {
+    if !plan_safe(namespace, commands) {
+        report.record(
+            "plan-namespaced-only",
+            Verdict::Failed,
+            Reason::RejectedPlan,
+            None,
+        )?;
+        return Err("plan-rejected");
+    }
+    report.record(
+        "plan-namespaced-only",
+        Verdict::Passed,
+        Reason::PlanSafe,
+        Some("allow-listed-plan"),
+    )
+}
 
 #[derive(Debug)]
 pub struct Output {
@@ -66,6 +86,8 @@ pub trait Runner {
 pub struct ProcessKubectl {
     program: PathBuf,
     flags: Vec<String>,
+    // Keep the private merged file alive even when the caller drops its copy.
+    _configs: Kubeconfigs,
     timeout: Duration,
 }
 impl ProcessKubectl {
@@ -73,6 +95,7 @@ impl ProcessKubectl {
         Ok(Self {
             program: program.into(),
             flags: configs.kubectl_flags().map_err(|_| Reason::ProbeError)?,
+            _configs: configs.clone(),
             timeout,
         })
     }
@@ -147,17 +170,6 @@ impl Drop for ChildGuard {
 impl Runner for ProcessKubectl {
     fn run(&self, args: &[String]) -> Result<Output, Reason> {
         use std::os::unix::process::CommandExt;
-        // Namespace finalization can outlast a probe. Match only the cleanup
-        // grammar, and retain the short call timeout for every other operation.
-        let timeout = if args.len() == 4
-            && args[0] == "delete"
-            && args[1] == "namespace"
-            && args[3] == "--wait"
-        {
-            Duration::from_secs(90)
-        } else {
-            self.timeout
-        };
         let started = Instant::now();
         let child = Command::new(&self.program)
             .args(&self.flags)
@@ -193,7 +205,7 @@ impl Runner for ProcessKubectl {
                     stderr: classify_stderr(&err.bytes),
                 });
             }
-            if started.elapsed() >= timeout {
+            if started.elapsed() >= self.timeout {
                 return Err(Reason::ProbeError);
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -259,7 +271,7 @@ pub fn probe_permissions(
                     ("yes", Some(0)) => {
                         report.record(&id, Verdict::Passed, Reason::Allowed, Some("yes"))?
                     }
-                    ("no", Some(0 | 1)) => {
+                    (answer, Some(0 | 1)) if answer == "no" || answer.starts_with("no - ") => {
                         report.record(&id, Verdict::Unverified, Reason::Denied, None)?
                     }
                     _ => report.record(&id, Verdict::Unverified, Reason::ProbeError, None)?,
@@ -339,18 +351,11 @@ pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<
     let namespace = Namespace::new(&super::namespace::namespace_name("was01"))?;
     let commands = plan(&namespace);
     let mut report = Report::new();
-    if !plan_safe(&namespace, &commands) {
-        return Err("plan-rejected".into());
-    }
-    report.record(
-        "plan-namespaced-only",
-        Verdict::Passed,
-        Reason::PlanSafe,
-        Some("allow-listed-plan"),
-    )?;
+    let checked = check_plan(&mut report, &namespace, &commands);
     std::fs::create_dir_all(directory).map_err(|_| "cannot create WAS-01 report directory")?;
     let path = directory.join(format!("{}.report", namespace.name()));
     save(&report, &path)?;
+    checked?;
     if matches!(gate, ReportGate::Offline) {
         return Ok(path);
     }

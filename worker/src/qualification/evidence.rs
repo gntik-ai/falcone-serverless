@@ -198,18 +198,22 @@ impl Report {
             if !valid {
                 return Err("invalid-evidence");
             }
-        } else if evidence.is_some()
-            || !matches!(
-                reason,
-                Reason::NotProbed
-                    | Reason::Denied
-                    | Reason::ProbeError
-                    | Reason::Forbidden
-                    | Reason::InvalidVersion
-                    | Reason::RejectedPlan
-            )
-        {
-            return Err("invalid-evidence");
+        } else {
+            let valid = match (verdict, reason) {
+                (Verdict::Unverified, Reason::NotProbed) => true,
+                (Verdict::Failed, Reason::RejectedPlan) => id == "plan-namespaced-only",
+                (Verdict::Unverified, Reason::Denied) => id.starts_with("can-"),
+                (Verdict::Unverified | Verdict::Failed, Reason::ProbeError | Reason::Forbidden) => {
+                    id != "plan-namespaced-only"
+                }
+                (Verdict::Unverified | Verdict::Failed, Reason::InvalidVersion) => {
+                    id == "kubernetes-version"
+                }
+                _ => false,
+            };
+            if evidence.is_some() || !valid {
+                return Err("invalid-evidence");
+            }
         }
         self.items.insert(
             id.into(),
@@ -225,19 +229,21 @@ impl Report {
         if !TARGETS.contains(&target) {
             return Err("unknown-target");
         }
-        if self
-            .item("kubernetes-version")?
-            .evidence
+        let version = &self.item("kubernetes-version")?.evidence;
+        let verdicts: Vec<_> = Self::ac3_ids()
+            .iter()
+            .map(|id| self.items[id].verdict)
+            .collect();
+        if target != "openshift-4.20" && version.is_none() && verdicts.contains(&Verdict::Failed) {
+            return Ok(Verdict::Failed);
+        }
+        if version
             .as_deref()
             .and_then(|v| version_target(v).ok().flatten())
             != Some(target)
         {
             return Ok(Verdict::Unverified);
         }
-        let verdicts: Vec<_> = Self::ac3_ids()
-            .iter()
-            .map(|id| self.items[id].verdict)
-            .collect();
         Ok(if verdicts.contains(&Verdict::Failed) {
             Verdict::Failed
         } else if verdicts.iter().all(|v| *v == Verdict::Passed) {
