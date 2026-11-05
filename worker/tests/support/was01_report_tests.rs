@@ -599,6 +599,28 @@ fn process_cleanup_and_probes_respect_the_configured_call_timeout() {
 }
 
 #[test]
+fn process_enforces_the_deadline_while_stderr_is_continuously_flooded() {
+    let dir = PrivateDir::new();
+    let script = dir.script(
+        "while :; do printf '%s\\n' 'Error from server (Forbidden): token=SECRET_TOKEN_abc' >&2; done",
+    );
+    let runner = process(&dir, &script, Duration::from_millis(200));
+    let started = Instant::now();
+    let mut report = Report::new();
+    probe_version(&mut report, &runner).unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(200));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let item = report.item("kubernetes-version").unwrap();
+    assert_eq!(
+        (item.verdict, item.reason, item.evidence.as_deref()),
+        (Verdict::Unverified, Reason::ProbeError, None)
+    );
+    for text in [report.render(), format!("{report:?}")] {
+        assert!(!text.contains("SECRET_TOKEN_abc"));
+    }
+}
+
+#[test]
 fn process_drains_overflow_and_kills_a_hung_child_at_the_deadline() {
     let dir = PrivateDir::new();
     let script = dir.script("head -c 1048576 /dev/zero | tr '\\000' x >&2; echo '\nError from server (Forbidden): token=SECRET_TOKEN_abc' >&2; exit 1");
