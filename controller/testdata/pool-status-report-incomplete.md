@@ -138,6 +138,7 @@ Outcomes are `applied`, `replay_noop`, `refused` and `conflict_refused`. Keys ar
 | G6 | (5,2,10) | (5,2,9) | different | 5 | refused | same epoch, lower seq |
 | G7 | (5,2,10) | (5,3,1) | different | 5 | applied | higher epoch, lower seq |
 | G8 | (5,2,10) | (7,2,1) | different | 6 | refused | generation above desired |
+| G9 | (5,2,10) | (6,1,1) | different | 6 | refused | lower epoch, higher generation |
 
 ## Repair conditions
 

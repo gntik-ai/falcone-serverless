@@ -115,16 +115,19 @@ rules and never changes stored state.
 Falcone compares a report's key `(observedGeneration, reporterEpoch,
 observationSeq)` with the stored key lexicographically: generation first, then
 epoch, then sequence. A report with `observedGeneration` above Falcone's current
-desired generation is refused before any key comparison. Otherwise:
+desired generation is refused before any key comparison. A report whose
+`reporterEpoch` is below the stored epoch comes from a fenced reporter: it is
+refused, state unchanged, whatever its generation or sequence. Otherwise:
 
 - Lower key: refused, state unchanged.
 - Equal key and identical payload: a replay, accepted as a no-op.
 - Equal key and different payload: refused as a conflict.
 - Higher key: applied, even if `readyReplicas` falls.
 
-Because generation is compared before epoch, a higher generation from a reporter
-with a lower epoch is applied. Rows cover the cases below; the conformance test
-checks every outcome against a reference comparator.
+The epoch guard keeps a reporter from an older Lease epoch from overwriting the
+observation of the newer leader, even when it has applied a higher generation
+(DEP-03 ac1: stale updates cannot overwrite newer state). Rows cover the cases
+below; the conformance test checks every outcome against a reference comparator.
 
 Outcomes are `applied`, `replay_noop`, `refused` and `conflict_refused`. Keys are
 `(generation,epoch,seq)`.
@@ -139,6 +142,7 @@ Outcomes are `applied`, `replay_noop`, `refused` and `conflict_refused`. Keys ar
 | G6 | (5,2,10) | (5,2,9) | different | 5 | refused | same epoch, lower seq |
 | G7 | (5,2,10) | (5,3,1) | different | 5 | applied | higher epoch, lower seq |
 | G8 | (5,2,10) | (7,2,1) | different | 6 | refused | generation above desired |
+| G9 | (5,2,10) | (6,1,1) | different | 6 | refused | lower epoch, higher generation |
 
 ## Repair conditions
 

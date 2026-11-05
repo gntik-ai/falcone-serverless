@@ -64,7 +64,7 @@ var (
 	poolStatusStatuses  = []string{"disabled", "unavailable", "deploying", "active", "deletion_pending"}
 	poolStatusOCIConds  = []string{"ImagePullFailed", "ContainerStartFailed", "ContractProbeFailed", "Dematerialized"}
 	poolStatusOutcomes  = []string{"applied", "replay_noop", "refused", "conflict_refused"}
-	poolStatusCases     = []string{"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8"}
+	poolStatusCases     = []string{"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"}
 
 	tenantReasonFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	tenantReasonBanned = []string{"registry", "pod", "node"}
@@ -239,9 +239,10 @@ func parseReportKey(s string) (reportKey, bool) {
 }
 
 // referenceOutcome is the test-only reference comparator for the ordering rule.
-// A generation above Falcone's desired generation is refused before keys compare.
+// A generation above Falcone's desired generation, and an epoch below the stored
+// epoch (a fenced reporter), are refused before keys compare.
 func referenceOutcome(stored, report reportKey, payloadSame bool, desiredGeneration int) string {
-	if report.generation > desiredGeneration {
+	if report.generation > desiredGeneration || report.epoch < stored.epoch {
 		return "refused"
 	}
 	switch c := report.compare(stored); {
@@ -290,6 +291,10 @@ var orderingScenarios = map[string]orderingScenario{
 		}},
 	"G8": {"report generation above desired generation", "", "refused",
 		func(s, r reportKey, d int) bool { return r.generation > d }},
+	"G9": {"lower epoch with higher generation", "", "refused",
+		func(s, r reportKey, d int) bool {
+			return r.epoch < s.epoch && r.generation > s.generation && r.generation <= d
+		}},
 }
 
 func checkPoolStatusReport(doc string) []string {
@@ -737,7 +742,7 @@ func TestPoolStatusReportRejectsMissingOrderingRow(t *testing.T) {
 		})
 	}
 	t.Run("extra case", func(t *testing.T) {
-		wantError(t, checkPoolStatusReport(duplicateRow(t, doc, "G8", "G9")), `unexpected case "G9"`)
+		wantError(t, checkPoolStatusReport(duplicateRow(t, doc, "G9", "G10")), `unexpected case "G10"`)
 	})
 }
 
@@ -787,6 +792,9 @@ func TestPoolStatusReportRejectsReplacedOrderingScenario(t *testing.T) {
 		{"G6 as higher seq", "G6", "(5,2,10)", "(5,2,11)", "different", "5", "applied", "ordering case G6: keys must exercise"},
 		{"G7 as same epoch", "G7", "(5,2,10)", "(5,2,9)", "different", "5", "refused", "ordering case G7: keys must exercise"},
 		{"G8 within desired", "G8", "(5,2,10)", "(6,2,1)", "different", "6", "applied", "ordering case G8: keys must exercise"},
+		{"G9 as equal epoch", "G9", "(5,2,10)", "(6,2,1)", "different", "6", "applied", "ordering case G9: keys must exercise"},
+		{"G9 as higher epoch", "G9", "(5,2,10)", "(6,3,1)", "different", "6", "applied", "ordering case G9: keys must exercise"},
+		{"G9 as lower epoch, same generation", "G9", "(5,2,10)", "(5,1,1)", "different", "5", "refused", "ordering case G9: keys must exercise"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -895,7 +903,10 @@ func TestPoolStatusReportReferenceComparator(t *testing.T) {
 		{"lower epoch same generation", reportKey{5, 3, 1}, reportKey{5, 2, 99}, false, 5, "refused"},
 		{"generation above desired", reportKey{5, 2, 10}, reportKey{7, 2, 1}, false, 6, "refused"},
 		{"above desired beats equal key", reportKey{7, 2, 1}, reportKey{7, 2, 1}, true, 6, "refused"},
-		{"generation outranks epoch", reportKey{5, 2, 10}, reportKey{6, 1, 1}, false, 6, "applied"},
+		{"lower epoch with higher generation is fenced", reportKey{5, 2, 10}, reportKey{6, 1, 1}, false, 6, "refused"},
+		{"lower epoch with higher seq is fenced", reportKey{5, 2, 10}, reportKey{5, 1, 99}, false, 5, "refused"},
+		{"higher generation and higher epoch", reportKey{5, 2, 10}, reportKey{6, 3, 1}, false, 6, "applied"},
+		{"higher generation and equal epoch", reportKey{5, 2, 10}, reportKey{6, 2, 1}, false, 6, "applied"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
