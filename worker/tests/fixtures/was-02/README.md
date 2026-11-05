@@ -37,10 +37,13 @@ Wasmtime's finite hostcall accounting is sized for lazy cursors relative to the
 Latin-1 decoding inside `to_str` allocates in proportion to capped guest memory;
 UTF-8 validation still reads the guest range and consumes CPU.
 
-Allocation probes re-exec in isolated children, warm up, and compare Linux
-`VmHWM`. Oversized input remains on untouched zero pages. The fixed host growth
-bound is 256 KiB; eager String/Vec controls over the same fixtures must exceed
-32 MiB. Probe markers prevent an accidentally empty subprocess test from passing.
+Allocation probes re-exec in isolated children, warm up, reset the peak of the
+measurement-only counting allocator (`worker/src/qualification/counting_alloc.rs`,
+ADR 0014) and read the peak host heap allocation across the call. Guest linear
+memory is not host allocation and is not counted; oversized input remains on
+untouched zero pages. The fixed host allocation bound is 256 KiB; eager
+String/Vec controls over the same fixtures must exceed 32 MiB, and a sensitivity
+test proves a 512 KiB host allocation reads above the bound. Probe markers prevent an accidentally empty subprocess test from passing.
 The stalled-binding probe uses fresh invocations in a separate process and
 verifies that four detached calls to one stalled binding fail fast across fresh
 invocations while 20 concurrent guests still use a different healthy binding
