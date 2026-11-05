@@ -88,15 +88,22 @@ pub struct ProcessKubectl {
     flags: Vec<String>,
     // Keep the private merged file alive even when the caller drops its copy.
     _configs: Kubeconfigs,
-    timeout: Duration,
+    call_timeout: Duration,
+    cleanup_timeout: Duration,
 }
 impl ProcessKubectl {
-    pub fn new(program: &Path, configs: &Kubeconfigs, timeout: Duration) -> Result<Self, Reason> {
+    pub fn new(
+        program: &Path,
+        configs: &Kubeconfigs,
+        call_timeout: Duration,
+        cleanup_timeout: Duration,
+    ) -> Result<Self, Reason> {
         Ok(Self {
             program: program.into(),
             flags: configs.kubectl_flags().map_err(|_| Reason::ProbeError)?,
             _configs: configs.clone(),
-            timeout,
+            call_timeout,
+            cleanup_timeout,
         })
     }
 }
@@ -170,6 +177,15 @@ impl Drop for ChildGuard {
 impl Runner for ProcessKubectl {
     fn run(&self, args: &[String]) -> Result<Output, Reason> {
         use std::os::unix::process::CommandExt;
+        // Cleanup has a fresh allowance, independent of any probe's deadline.
+        let timeout = match args {
+            [verb, resource, _, wait]
+                if verb == "delete" && resource == "namespace" && wait == "--wait" =>
+            {
+                self.cleanup_timeout
+            }
+            _ => self.call_timeout,
+        };
         let started = Instant::now();
         let child = Command::new(&self.program)
             .args(&self.flags)
@@ -205,7 +221,7 @@ impl Runner for ProcessKubectl {
                     stderr: classify_stderr(&err.bytes),
                 });
             }
-            if started.elapsed() >= self.timeout {
+            if started.elapsed() >= timeout {
                 return Err(Reason::ProbeError);
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -213,18 +229,20 @@ impl Runner for ProcessKubectl {
     }
 }
 
-fn probe_error(output: &Result<Output, Reason>) -> Option<Reason> {
-    match output {
-        Err(_) => Some(Reason::ProbeError),
-        Ok(output) => output.stderr,
+fn probe_output(output: Result<Output, Reason>) -> Result<Output, Reason> {
+    let output = output.map_err(|_| Reason::ProbeError)?;
+    match output.stderr {
+        Some(reason) => Err(reason),
+        None => Ok(output),
     }
 }
 pub fn probe_version(report: &mut Report, runner: &impl Runner) -> Result<(), &'static str> {
-    let output = runner.run(&version_command());
-    if let Some(reason) = probe_error(&output) {
-        return report.record("kubernetes-version", Verdict::Unverified, reason, None);
-    }
-    let output = output.map_err(|_| "probe-error")?;
+    let output = match probe_output(runner.run(&version_command())) {
+        Ok(output) => output,
+        Err(reason) => {
+            return report.record("kubernetes-version", Verdict::Unverified, reason, None);
+        }
+    };
     if output.exit_code != Some(0) {
         return report.record(
             "kubernetes-version",
@@ -261,13 +279,11 @@ pub fn probe_permissions(
 ) -> Result<(), &'static str> {
     for resource in RESOURCES {
         for verb in VERBS {
-            let output = runner.run(&permission_command(namespace, verb, resource));
+            let output = probe_output(runner.run(&permission_command(namespace, verb, resource)));
             let id = format!("can-{verb}-{resource}");
-            if let Some(reason) = probe_error(&output) {
-                report.record(&id, Verdict::Unverified, reason, None)?;
-            } else {
-                let output = output.map_err(|_| "probe-error")?;
-                match (output.stdout.trim(), output.exit_code) {
+            match output {
+                Err(reason) => report.record(&id, Verdict::Unverified, reason, None)?,
+                Ok(output) => match (output.stdout.trim(), output.exit_code) {
                     ("yes", Some(0)) => {
                         report.record(&id, Verdict::Passed, Reason::Allowed, Some("yes"))?
                     }
@@ -275,7 +291,7 @@ pub fn probe_permissions(
                         report.record(&id, Verdict::Unverified, Reason::Denied, None)?
                     }
                     _ => report.record(&id, Verdict::Unverified, Reason::ProbeError, None)?,
-                }
+                },
             }
         }
     }
@@ -301,11 +317,6 @@ pub fn gate(
         return Err("FS_TEST_NAMESPACE_MODE must be create for the WAS-01 ac3 report; shared is unsupported".into());
     }
     Ok(ReportGate::Cluster(Kubeconfigs::parse(kubeconfig)?))
-}
-impl Runner for Option<ProcessKubectl> {
-    fn run(&self, args: &[String]) -> Result<Output, Reason> {
-        self.as_ref().ok_or(Reason::ProbeError)?.run(args)
-    }
 }
 struct OwnedNamespace<'a, R: Runner> {
     runner: &'a R,
@@ -347,7 +358,11 @@ fn save(report: &Report, path: &Path) -> Result<(), String> {
         .map_err(|_| format!("cannot write WAS-01 report {}", path.display()))
 }
 
-pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<PathBuf, String> {
+pub fn run(
+    runner: Option<&impl Runner>,
+    gate: &ReportGate,
+    directory: &Path,
+) -> Result<PathBuf, String> {
     let namespace = Namespace::new(&super::namespace::namespace_name("was01"))?;
     let commands = plan(&namespace);
     let mut report = Report::new();
@@ -359,6 +374,7 @@ pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<
     if matches!(gate, ReportGate::Offline) {
         return Ok(path);
     }
+    let runner = runner.ok_or("WAS-01 cluster runner missing")?;
     match runner.run(&commands[0]) {
         Ok(output) if output.exit_code == Some(0) => (),
         _ => {

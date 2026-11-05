@@ -360,7 +360,7 @@ impl Drop for PrivateDir {
     }
 }
 fn process(dir: &PrivateDir, script: &Path, timeout: Duration) -> ProcessKubectl {
-    ProcessKubectl::new(script, &dir.config(), timeout).unwrap()
+    ProcessKubectl::new(script, &dir.config(), timeout, timeout).unwrap()
 }
 
 #[test]
@@ -463,6 +463,121 @@ fn process_controls_never_turn_diagnostics_into_permission_evidence() {
         }
         assert!(!report.render().contains("unrelated"));
         assert!(!report.render().contains("RBAC: x"));
+    }
+}
+
+#[test]
+fn process_run_allows_cleanup_to_outlast_the_probe_timeout() {
+    for slow_probe in [false, true] {
+        let dir = PrivateDir::new();
+        let get = if slow_probe {
+            "sleep 1; echo '{\"gitVersion\":\"v1.37.2\"}'"
+        } else {
+            "echo '{\"gitVersion\":\"v1.37.2\"}'"
+        };
+        let script = dir.script(&format!(
+            "shift\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\ncase \"$1\" in\ncreate) exit 0 ;;\nget) {get} ;;\nauth) echo yes ;;\ndelete) sleep 1; echo done > \"$0.deleted\" ;;\nesac",
+        ));
+        let configs = dir.config();
+        let runner = ProcessKubectl::new(
+            &script,
+            &configs,
+            Duration::from_millis(200),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let result = run(Some(&runner), &ReportGate::Cluster(configs), &dir.0);
+        if slow_probe {
+            assert!(result.unwrap_err().contains("probe incomplete"));
+        } else {
+            assert!(result.is_ok(), "slow cleanup must finish: {result:?}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(script.with_extension("deleted")).unwrap(),
+            "done\n"
+        );
+        let calls = std::fs::read_to_string(script.with_extension("calls")).unwrap();
+        let namespace = calls
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("create namespace ")
+            .unwrap();
+        assert_eq!(
+            calls.lines().last().unwrap(),
+            format!("delete namespace {namespace} --wait")
+        );
+        let report = Report::parse(
+            &std::fs::read_to_string(dir.0.join(format!("{namespace}.report"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.item("kubernetes-version").unwrap().reason,
+            if slow_probe {
+                Reason::ProbeError
+            } else {
+                Reason::Recorded
+            }
+        );
+    }
+}
+
+#[test]
+fn process_run_never_deletes_after_create_failure_and_reports_delete_failure() {
+    for (create, delete, expected_calls, expected_error) in [
+        (
+            "echo 'Error from server (Forbidden): token=SECRET_TOKEN_abc' >&2; exit 1",
+            "exit 0",
+            1,
+            "creation failed; no namespace is owned",
+        ),
+        (
+            "echo 'Error from server (AlreadyExists): token=SECRET_TOKEN_abc' >&2; exit 1",
+            "exit 0",
+            1,
+            "creation failed; no namespace is owned",
+        ),
+        (
+            "exit 0",
+            "echo 'Error from server (Forbidden): token=SECRET_TOKEN_abc' >&2; exit 1",
+            15,
+            "cleanup failed; manual operator cleanup required",
+        ),
+    ] {
+        let dir = PrivateDir::new();
+        let script = dir.script(&format!(
+            "shift\nprintf '%s\\n' \"$*\" >> \"$0.calls\"\ncase \"$1\" in\ncreate) {create} ;;\nget) echo '{{\"gitVersion\":\"v1.37.2\"}}' ;;\nauth) echo yes ;;\ndelete) {delete} ;;\nesac",
+        ));
+        let configs = dir.config();
+        let runner = ProcessKubectl::new(
+            &script,
+            &configs,
+            Duration::from_secs(3),
+            Duration::from_secs(3),
+        )
+        .unwrap();
+        let error = run(Some(&runner), &ReportGate::Cluster(configs), &dir.0).unwrap_err();
+        assert!(error.contains(expected_error), "{error}");
+        assert!(!error.contains("SECRET_TOKEN_abc"));
+        let calls = std::fs::read_to_string(script.with_extension("calls")).unwrap();
+        let namespace = calls
+            .lines()
+            .next()
+            .unwrap()
+            .strip_prefix("create namespace ")
+            .unwrap();
+        assert_eq!(calls.lines().count(), expected_calls);
+        if expected_calls == 1 {
+            assert!(error.contains("FS_TEST_NAMESPACE_MODE"));
+            assert!(!calls.contains("delete"));
+        } else {
+            assert_eq!(
+                calls.lines().last().unwrap(),
+                format!("delete namespace {namespace} --wait")
+            );
+        }
+        let report = std::fs::read_to_string(dir.0.join(format!("{namespace}.report"))).unwrap();
+        assert!(!report.contains("SECRET_TOKEN_abc"));
     }
 }
 
@@ -641,8 +756,8 @@ fn gate_requires_both_switches_and_rejects_shared_or_invalid_config_before_calls
         (None, None),
     ] {
         let fake = FakeRunner::new("happy");
-        let result =
-            gate(Some("1"), Some("1"), mode, config).and_then(|gate| run(&fake, &gate, &dir.0));
+        let result = gate(Some("1"), Some("1"), mode, config)
+            .and_then(|gate| run(Some(&fake), &gate, &dir.0));
         assert!(result.is_err());
         assert!(fake.calls.borrow().is_empty());
     }
@@ -652,7 +767,7 @@ fn gate_requires_both_switches_and_rejects_shared_or_invalid_config_before_calls
 fn offline_report_has_no_calls_and_keeps_every_missing_item_in_the_summary() {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"));
     let fake = FakeRunner::new("happy");
-    let path = run(&fake, &ReportGate::Offline, dir).unwrap();
+    let path = run(Some(&fake), &ReportGate::Offline, dir).unwrap();
     assert!(path.starts_with(dir));
     assert!(fake.calls.borrow().is_empty());
     let report = Report::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -686,8 +801,9 @@ fn namespace_ownership_and_cleanup_are_fail_closed_including_on_panic() {
         "panic",
     ] {
         let fake = FakeRunner::new(scenario);
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&fake, &gate, &dir.0)));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(Some(&fake), &gate, &dir.0)
+        }));
         let calls = fake.calls.borrow();
         let name = &calls[0][2];
         let deletes: Vec<_> = calls.iter().filter(|args| args[0] == "delete").collect();
@@ -790,7 +906,7 @@ fn cluster_runs_execute_the_checked_plan_and_persist_the_observed_evidence() {
         ),
     ] {
         let fake = FakeRunner::new(scenario);
-        let result = run(&fake, &gate, &dir.0);
+        let result = run(Some(&fake), &gate, &dir.0);
         assert_eq!(result.is_ok(), succeeds, "{scenario}: {result:?}");
         let calls = fake.calls.borrow();
         let namespace = super::Namespace::new(&calls[0][2]).unwrap();
@@ -865,7 +981,7 @@ fn run_failures_identify_the_namespace_and_saved_report_without_diagnostics() {
         "delete-error",
     ] {
         let fake = FakeRunner::new(scenario);
-        let error = run(&fake, &gate, &dir.0).unwrap_err();
+        let error = run(Some(&fake), &gate, &dir.0).unwrap_err();
         let name = fake.calls.borrow()[0][2].clone();
         let path = dir.0.join(format!("{name}.report"));
         assert!(error.contains(&name), "{scenario}: {error}");
@@ -886,7 +1002,7 @@ fn panic_cleanup_failure_logs_the_namespace_and_report() {
         let gate = ReportGate::Cluster(dir.config());
         let fake = FakeRunner::new("panic-delete-error");
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run(&fake, &gate, Path::new(&directory))
+            run(Some(&fake), &gate, Path::new(&directory))
         }));
         assert!(outcome.is_err());
         assert_eq!(fake.calls.borrow().last().unwrap()[0], "delete");

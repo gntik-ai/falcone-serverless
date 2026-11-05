@@ -66,8 +66,10 @@ operator approval. Probe as the deployment identity: permissions describe only t
 identity in the supplied kubeconfig, not a tenant or a different service account.
 `KUBECONFIG` is required and uses the existing explicit list/merge validator. Every
 kubectl invocation uses `Kubeconfigs::kubectl_flags`; there is no ambient config fallback.
-An invalid list fails before any runner call. The process runner has a 10-second
-timeout for every call, including namespace cleanup with --wait.
+An invalid list fails before any runner call. The process runner allows 30 seconds
+per probe or create call and a separate, fresh 90 seconds for namespace cleanup
+with --wait, matching the existing cluster harness. Earlier probe deadlines never
+reduce the cleanup allowance. A child is killed when its call's deadline expires.
 It uses no image, pod, guest or existing WAS-01 ac1/ac2 interface.
 The existing separate ac1/ac2 cluster test retains its own image requirement.
 

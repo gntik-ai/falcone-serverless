@@ -1506,12 +1506,17 @@ fn was01_ac3_report() -> Result<(), String> {
             ProcessKubectl::new(
                 Path::new("kubectl"),
                 configs,
-                std::time::Duration::from_secs(10),
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(90),
             )
             .map_err(|reason| reason.code().to_owned())?,
         ),
     };
-    let path = support::was01_report::run(&runner, &gate, Path::new(env!("CARGO_TARGET_TMPDIR")))?;
+    let path = support::was01_report::run(
+        runner.as_ref(),
+        &gate,
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+    )?;
     println!("WAS-01 evidence report: {}", path.display());
     Ok(())
 }
