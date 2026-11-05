@@ -85,7 +85,21 @@ fn pinned_versions_and_inventory() {
 fn fixture_names_valid(names: &[String]) -> bool {
     let mut names = names.to_vec();
     names.sort();
-    names == ["infinite_loop.wat", "valid.wat"]
+    names
+        == [
+            "capability-checkpoint.wat",
+            "capability-context.wat",
+            "capability-events.wat",
+            "capability-handles.wat",
+            "capability-http.wat",
+            "capability-import.wat",
+            "capability-logging.wat",
+            "capability-storage.wat",
+            "capability-table.wat",
+            "capability-workflows.wat",
+            "infinite_loop.wat",
+            "valid.wat",
+        ]
 }
 
 fn fixture_valid(name: &str, source: &str) -> bool {
@@ -112,6 +126,14 @@ fn embedded_fixtures_are_exact_and_import_free() {
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect::<Vec<_>>();
     assert!(fixture_names_valid(&names));
+    for required in names.iter() {
+        let missing = names
+            .iter()
+            .filter(|name| *name != required)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!fixture_names_valid(&missing), "missing {required}");
+    }
     names.push("extra.wat".into());
     assert!(!fixture_names_valid(&names));
     for name in ["valid.wat", "infinite_loop.wat"] {
@@ -131,9 +153,18 @@ fn source_valid(path: &Path, source: &str) -> bool {
     let bin = path == Path::new("bin/qualification_runner.rs");
     let outcome = path == Path::new("qualification/outcome.rs");
     let runner = path == Path::new("qualification/runner.rs");
+    let capability = [
+        "host/mod.rs",
+        "host/net.rs",
+        "host/runtime.rs",
+        "qualification/capability_http.rs",
+        "qualification/capability_invocations.rs",
+    ]
+    .iter()
+    .any(|allowed| path == Path::new(allowed));
     (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
         && !source.contains("tests/")
-        && (!source.contains("wasmtime::") || engine || bin)
+        && (!source.contains("wasmtime::") || engine || bin || capability)
         && (!source.contains("Status::Passed") || outcome)
         && (!(runner || bin) || (!source.contains("env::args") && !source.contains("Engine::new")))
 }
@@ -170,6 +201,15 @@ fn qualification_sources_obey_boundaries() {
     for (path, source) in [
         ("qualification/engine.rs", "deserialize"),
         ("config.rs", "wasmtime::Engine"),
+        ("host/other.rs", "wasmtime::Engine"),
+        ("host/nested/runtime.rs", "wasmtime::Engine"),
+        ("qualification/capability_other.rs", "wasmtime::Engine"),
+        (
+            "qualification/capability_invocations.rs.bak",
+            "wasmtime::Engine",
+        ),
+        ("host/runtime.rs", "deserialize"),
+        ("host/runtime.rs", "Status::Passed"),
         ("qualification/runner.rs", "Status::Passed"),
         ("qualification/runner.rs", "env::args()"),
         ("bin/qualification_runner.rs", "Engine::new()"),
