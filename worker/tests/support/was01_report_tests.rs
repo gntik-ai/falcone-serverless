@@ -129,6 +129,10 @@ fn items_require_evidence_and_known_ids() {
 
 #[test]
 fn versions_round_trip_and_cells_aggregate_only_matching_evidence() {
+    // The template must parse with a valid version before testing invalid replacements.
+    for version in ["v1.35.0", "v1.37.2", "v1.36.4+k3s1"] {
+        assert!(Report::parse(&version_report_text(version)).is_ok());
+    }
     for (version, target) in [("v1.37.2", "k8s-1.37"), ("v1.36.4+k3s1", "k8s-1.36")] {
         let mut report = Report::new();
         report
@@ -192,11 +196,10 @@ fn versions_round_trip_and_cells_aggregate_only_matching_evidence() {
             "{version:?}"
         );
         assert_eq!(report.item("kubernetes-version").unwrap().evidence, None);
-        let malformed = report.render().replace(
-            "kubernetes-version\tunverified\tnot-probed\t-",
-            &format!("kubernetes-version\tpassed\trecorded\t{version}"),
+        assert!(
+            Report::parse(&version_report_text(version)).is_err(),
+            "{version:?}"
         );
-        assert!(Report::parse(&malformed).is_err(), "{version:?}");
     }
     assert!(
         Report::new()
@@ -212,6 +215,24 @@ fn versions_round_trip_and_cells_aggregate_only_matching_evidence() {
     assert!(Report::parse("broken line\n").is_err());
     assert!(Report::parse("").is_err());
     assert!(Report::new().cell("unknown").is_err());
+}
+
+// Keep cells and summary consistent with a recorded version. Only the evidence field
+// changes, so rejecting a malformed version cannot be caused by a stale summary.
+fn version_report_text(version: &str) -> String {
+    let mut report = Report::new();
+    report
+        .record(
+            "kubernetes-version",
+            Verdict::Passed,
+            Reason::Recorded,
+            Some("v1.35.0"),
+        )
+        .unwrap();
+    report.render().replace(
+        "kubernetes-version\tpassed\trecorded\tv1.35.0\n",
+        &format!("kubernetes-version\tpassed\trecorded\t{version}\n"),
+    )
 }
 
 #[test]
@@ -265,14 +286,18 @@ impl PrivateDir {
     }
     fn script(&self, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
-        let path = self.0.join("kubectl");
+        // Publish a fresh executable only after closing its writer. Never rewrite an
+        // executable that another invocation may still have open.
+        let path = self.0.join(super::namespace::namespace_name("kubectl"));
+        let staging = path.with_extension("writing");
         // Assert explicit kubeconfig selection on every real process invocation.
         std::fs::write(
-            &path,
+            &staging,
             format!("#!/bin/sh\ncase \"$1\" in --kubeconfig=*) ;; *) exit 99 ;; esac\n{body}\n"),
         )
         .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::rename(staging, &path).unwrap();
         path
     }
 }
@@ -368,6 +393,22 @@ fn process_controls_never_turn_diagnostics_into_permission_evidence() {
 }
 
 #[test]
+fn process_cleanup_has_its_own_deadline_while_probes_keep_the_call_timeout() {
+    let dir = PrivateDir::new();
+    let script = dir.script("sleep 1; exit 0");
+    let runner = process(&dir, &script, Duration::from_millis(200));
+    let namespace = super::Namespace::new("fs-test-was01-cleanup").unwrap();
+    let commands = plan(&namespace);
+    let start = Instant::now();
+    assert_eq!(
+        runner.run(commands.last().unwrap()).unwrap().exit_code,
+        Some(0)
+    );
+    assert!(start.elapsed() >= Duration::from_secs(1));
+    assert_eq!(runner.run(&commands[1]).unwrap_err(), Reason::ProbeError);
+}
+
+#[test]
 fn process_drains_overflow_and_kills_a_hung_child_at_the_deadline() {
     let dir = PrivateDir::new();
     let script = dir.script("head -c 1048576 /dev/zero | tr '\\000' x >&2; echo '\nError from server (Forbidden): token=SECRET_TOKEN_abc' >&2; exit 1");
@@ -384,14 +425,24 @@ fn process_drains_overflow_and_kills_a_hung_child_at_the_deadline() {
         "echo $$ > '{}'; exec sleep 30",
         pid_file.display()
     ));
-    let runner = process(&dir, &script, Duration::from_millis(100));
+    let runner = process(&dir, &script, Duration::from_secs(3));
     let start = Instant::now();
-    let error = runner
-        .run(&["get".into(), "--raw".into(), "/version".into()])
-        .unwrap_err();
+    let (pid, error) = std::thread::scope(|scope| {
+        let child = scope.spawn(|| runner.run(&["get".into(), "--raw".into(), "/version".into()]));
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pid_file)
+                && pid.trim().parse::<i32>().is_ok()
+            {
+                break pid;
+            }
+            assert!(!child.is_finished(), "hung child must signal readiness");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        (pid, child.join().unwrap().unwrap_err())
+    });
     assert_eq!(error, Reason::ProbeError);
-    assert!(start.elapsed() < Duration::from_secs(5));
-    let pid = std::fs::read_to_string(pid_file).unwrap();
+    assert!(start.elapsed() >= Duration::from_secs(3));
+    assert!(start.elapsed() < Duration::from_secs(10));
     let pid = rustix::process::Pid::from_raw(pid.trim().parse().unwrap()).unwrap();
     // /proc can belong to the host PID namespace; signal zero uses our child's namespace.
     assert_eq!(
@@ -431,21 +482,56 @@ impl Runner for FakeRunner {
                 stderr: Some(Reason::ProbeError),
             });
         }
-        if first == Some("delete") && self.scenario == "delete-error" {
+        if first == Some("delete")
+            && ["delete-error", "panic-delete-error"].contains(&self.scenario)
+        {
             return Err(Reason::ProbeError);
         }
         if first == Some("get") {
-            if self.scenario == "panic" {
+            if ["panic", "panic-delete-error"].contains(&self.scenario) {
                 panic!("injected step panic");
             }
             if self.scenario == "late-error" {
                 return Err(Reason::ProbeError);
             }
+            if self.scenario == "forbidden" {
+                return Ok(Output {
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: Some(Reason::Forbidden),
+                });
+            }
+            let version = match self.scenario {
+                "k3s" => "v1.36.4+k3s1",
+                "unmatched" => "v1.35.0",
+                "invalid-version" => "1.37.2",
+                _ => "v1.37.2",
+            };
             return Ok(Output {
                 exit_code: Some(0),
-                stdout: "{\"gitVersion\":\"v1.37.2\"}".into(),
+                stdout: serde_json::json!({"gitVersion": version}).to_string(),
                 stderr: None,
             });
+        }
+        if first == Some("auth") {
+            match self.scenario {
+                "permission-error" => return Err(Reason::ProbeError),
+                "forbidden" => {
+                    return Ok(Output {
+                        exit_code: Some(1),
+                        stdout: String::new(),
+                        stderr: Some(Reason::Forbidden),
+                    });
+                }
+                "denied" => {
+                    return Ok(Output {
+                        exit_code: Some(1),
+                        stdout: "no".into(),
+                        stderr: None,
+                    });
+                }
+                _ => (),
+            }
         }
         if self.scenario == "all-errors" {
             return Err(Reason::ProbeError);
@@ -545,6 +631,215 @@ fn namespace_ownership_and_cleanup_are_fail_closed_including_on_panic() {
             }
         }
     }
+}
+
+#[test]
+fn cluster_runs_execute_the_checked_plan_and_persist_the_observed_evidence() {
+    let dir = PrivateDir::new();
+    let gate = ReportGate::Cluster(dir.config());
+    for (scenario, version, version_reason, permission_reason, target, cell, succeeds) in [
+        (
+            "happy",
+            Some("v1.37.2"),
+            Reason::Recorded,
+            Reason::Allowed,
+            "k8s-1.37",
+            Verdict::Passed,
+            true,
+        ),
+        (
+            "k3s",
+            Some("v1.36.4+k3s1"),
+            Reason::Recorded,
+            Reason::Allowed,
+            "k8s-1.36",
+            Verdict::Passed,
+            true,
+        ),
+        (
+            "unmatched",
+            Some("v1.35.0"),
+            Reason::Recorded,
+            Reason::Allowed,
+            "k8s-1.37",
+            Verdict::Unverified,
+            true,
+        ),
+        (
+            "denied",
+            Some("v1.37.2"),
+            Reason::Recorded,
+            Reason::Denied,
+            "k8s-1.37",
+            Verdict::Unverified,
+            true,
+        ),
+        (
+            "forbidden",
+            None,
+            Reason::Forbidden,
+            Reason::Forbidden,
+            "k8s-1.37",
+            Verdict::Unverified,
+            false,
+        ),
+        (
+            "late-error",
+            None,
+            Reason::ProbeError,
+            Reason::Allowed,
+            "k8s-1.37",
+            Verdict::Unverified,
+            false,
+        ),
+        (
+            "invalid-version",
+            None,
+            Reason::InvalidVersion,
+            Reason::Allowed,
+            "k8s-1.37",
+            Verdict::Unverified,
+            false,
+        ),
+        (
+            "permission-error",
+            Some("v1.37.2"),
+            Reason::Recorded,
+            Reason::ProbeError,
+            "k8s-1.37",
+            Verdict::Unverified,
+            false,
+        ),
+    ] {
+        let fake = FakeRunner::new(scenario);
+        let result = run(&fake, &gate, &dir.0);
+        assert_eq!(result.is_ok(), succeeds, "{scenario}: {result:?}");
+        let calls = fake.calls.borrow();
+        let namespace = super::Namespace::new(&calls[0][2]).unwrap();
+        assert_eq!(*calls, plan(&namespace), "{scenario}");
+        let path = dir.0.join(format!("{}.report", namespace.name()));
+        if let Ok(saved) = result {
+            assert_eq!(saved, path);
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        let report = Report::parse(&text).unwrap();
+        let item = report.item("kubernetes-version").unwrap();
+        assert_eq!(item.evidence.as_deref(), version, "{scenario}");
+        assert_eq!(item.reason, version_reason, "{scenario}");
+        assert_eq!(
+            item.verdict,
+            if version.is_some() {
+                Verdict::Passed
+            } else {
+                Verdict::Unverified
+            }
+        );
+        for id in Report::ac3_ids()
+            .into_iter()
+            .filter(|id| id != "kubernetes-version")
+        {
+            let item = report.item(&id).unwrap();
+            assert_eq!(item.reason, permission_reason, "{scenario}: {id}");
+            let allowed = permission_reason == Reason::Allowed;
+            assert_eq!(
+                item.verdict,
+                if allowed {
+                    Verdict::Passed
+                } else {
+                    Verdict::Unverified
+                }
+            );
+            assert_eq!(item.evidence.as_deref(), allowed.then_some("yes"));
+        }
+        assert_eq!(
+            report.item("plan-namespaced-only").unwrap().verdict,
+            Verdict::Passed
+        );
+        for other in super::evidence::TARGETS {
+            assert_eq!(
+                report.cell(other).unwrap(),
+                if other == target {
+                    cell
+                } else {
+                    Verdict::Unverified
+                },
+                "{scenario}: {other}"
+            );
+        }
+        for (id, reason) in super::evidence::FIXED {
+            let item = report.item(id).unwrap();
+            assert_eq!((item.verdict, item.reason), (Verdict::Unverified, reason));
+            assert!(report.summary().contains(id));
+        }
+        assert!(report.summary().starts_with("never-go"));
+        assert!(!text.contains("SECRET_TOKEN_abc"));
+    }
+}
+
+#[test]
+fn run_failures_identify_the_namespace_and_saved_report_without_diagnostics() {
+    let dir = PrivateDir::new();
+    let gate = ReportGate::Cluster(dir.config());
+    for scenario in [
+        "create-failure",
+        "already-exists",
+        "late-error",
+        "delete-error",
+    ] {
+        let fake = FakeRunner::new(scenario);
+        let error = run(&fake, &gate, &dir.0).unwrap_err();
+        let name = fake.calls.borrow()[0][2].clone();
+        let path = dir.0.join(format!("{name}.report"));
+        assert!(error.contains(&name), "{scenario}: {error}");
+        assert!(
+            error.contains(path.to_str().unwrap()),
+            "{scenario}: {error}"
+        );
+        assert!(path.is_file());
+        assert!(!error.contains("SECRET_TOKEN_abc"));
+    }
+}
+
+#[test]
+fn panic_cleanup_failure_logs_the_namespace_and_report() {
+    const CHILD_DIRECTORY: &str = "WAS01_TEST_PANIC_CLEANUP_DIRECTORY";
+    if let Some(directory) = std::env::var_os(CHILD_DIRECTORY) {
+        let dir = PrivateDir::new();
+        let gate = ReportGate::Cluster(dir.config());
+        let fake = FakeRunner::new("panic-delete-error");
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(&fake, &gate, Path::new(&directory))
+        }));
+        assert!(outcome.is_err());
+        assert_eq!(fake.calls.borrow().last().unwrap()[0], "delete");
+        return;
+    }
+    // Capture the actual panic-path diagnostic at the process boundary.
+    let dir = PrivateDir::new();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "support::report_tests::panic_cleanup_failure_logs_the_namespace_and_report",
+            "--nocapture",
+        ])
+        .env(CHILD_DIRECTORY, &dir.0)
+        .env_remove("FS_TEST_CLUSTER")
+        .env_remove("FS_WAS01_CLUSTER")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let path = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let namespace = path.file_stem().unwrap().to_str().unwrap();
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostic.contains("cleanup failed; manual operator cleanup required"));
+    assert!(diagnostic.contains(namespace));
+    assert!(diagnostic.contains(path.to_str().unwrap()));
+    assert!(!diagnostic.contains("SECRET_TOKEN_abc"));
 }
 
 #[test]
@@ -669,11 +964,8 @@ fn process_records_valid_versions_and_rejects_malformed_probe_and_report_values(
             (Verdict::Unverified, Reason::InvalidVersion, None)
         );
         if let Some(version) = value.get("gitVersion").and_then(serde_json::Value::as_str) {
-            let malformed = report.render().replace(
-                "kubernetes-version\tunverified\tinvalid-version\t-",
-                &format!("kubernetes-version\tpassed\trecorded\t{version}"),
-            );
-            assert!(Report::parse(&malformed).is_err());
+            assert!(Report::parse(&version_report_text("v1.35.0")).is_ok());
+            assert!(Report::parse(&version_report_text(version)).is_err());
         }
     }
 }

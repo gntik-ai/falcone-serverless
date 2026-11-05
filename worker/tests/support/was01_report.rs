@@ -1,4 +1,4 @@
-//! WAS-01 ac3 harness. Every operation is checked before a runner call.
+//! WAS-01 ac3 harness. The command plan is allow-listed before namespace creation.
 use super::Namespace;
 use super::evidence::{RESOURCES, VERBS};
 
@@ -6,15 +6,20 @@ fn words(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|s| (*s).to_owned()).collect()
 }
 
+fn version_command() -> Vec<String> {
+    words(&["get", "--raw", "/version"])
+}
+
+fn permission_command(namespace: &Namespace, verb: &str, resource: &str) -> Vec<String> {
+    words(&["auth", "can-i", verb, resource, "-n", namespace.name()])
+}
+
 pub fn plan(namespace: &Namespace) -> Vec<Vec<String>> {
     let name = namespace.name();
-    let mut commands = vec![
-        words(&["create", "namespace", name]),
-        words(&["get", "--raw", "/version"]),
-    ];
+    let mut commands = vec![words(&["create", "namespace", name]), version_command()];
     for resource in RESOURCES {
         for verb in VERBS {
-            commands.push(words(&["auth", "can-i", verb, resource, "-n", name]));
+            commands.push(permission_command(namespace, verb, resource));
         }
     }
     commands.push(words(&["delete", "namespace", name, "--wait"]));
@@ -142,6 +147,17 @@ impl Drop for ChildGuard {
 impl Runner for ProcessKubectl {
     fn run(&self, args: &[String]) -> Result<Output, Reason> {
         use std::os::unix::process::CommandExt;
+        // Namespace finalization can outlast a probe. Match only the cleanup
+        // grammar, and retain the short call timeout for every other operation.
+        let timeout = if args.len() == 4
+            && args[0] == "delete"
+            && args[1] == "namespace"
+            && args[3] == "--wait"
+        {
+            Duration::from_secs(90)
+        } else {
+            self.timeout
+        };
         let started = Instant::now();
         let child = Command::new(&self.program)
             .args(&self.flags)
@@ -177,7 +193,7 @@ impl Runner for ProcessKubectl {
                     stderr: classify_stderr(&err.bytes),
                 });
             }
-            if started.elapsed() >= self.timeout {
+            if started.elapsed() >= timeout {
                 return Err(Reason::ProbeError);
             }
             std::thread::sleep(Duration::from_millis(2));
@@ -192,7 +208,7 @@ fn probe_error(output: &Result<Output, Reason>) -> Option<Reason> {
     }
 }
 pub fn probe_version(report: &mut Report, runner: &impl Runner) -> Result<(), &'static str> {
-    let output = runner.run(&words(&["get", "--raw", "/version"]));
+    let output = runner.run(&version_command());
     if let Some(reason) = probe_error(&output) {
         return report.record("kubernetes-version", Verdict::Unverified, reason, None);
     }
@@ -233,14 +249,7 @@ pub fn probe_permissions(
 ) -> Result<(), &'static str> {
     for resource in RESOURCES {
         for verb in VERBS {
-            let output = runner.run(&words(&[
-                "auth",
-                "can-i",
-                verb,
-                resource,
-                "-n",
-                namespace.name(),
-            ]));
+            let output = runner.run(&permission_command(namespace, verb, resource));
             let id = format!("can-{verb}-{resource}");
             if let Some(reason) = probe_error(&output) {
                 report.record(&id, Verdict::Unverified, reason, None)?;
@@ -289,6 +298,8 @@ impl Runner for Option<ProcessKubectl> {
 struct OwnedNamespace<'a, R: Runner> {
     runner: &'a R,
     delete: Vec<String>,
+    namespace: &'a Namespace,
+    report_path: &'a Path,
     owned: bool,
 }
 impl<R: Runner> OwnedNamespace<'_, R> {
@@ -298,17 +309,30 @@ impl<R: Runner> OwnedNamespace<'_, R> {
         }
         match self.runner.run(&self.delete) {
             Ok(output) if output.exit_code == Some(0) => Ok(()),
-            _ => Err("namespace cleanup failed; manual operator cleanup required".into()),
+            _ => Err(format!(
+                "namespace {} cleanup failed; manual operator cleanup required; report {}",
+                self.namespace.name(),
+                self.report_path.display()
+            )),
         }
     }
 }
 impl<R: Runner> Drop for OwnedNamespace<'_, R> {
     fn drop(&mut self) {
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close()));
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.close())) {
+            Ok(Ok(())) => (),
+            Ok(Err(message)) => eprintln!("{message}"),
+            Err(_) => eprintln!(
+                "namespace {} cleanup panicked; manual operator cleanup required; report {}",
+                self.namespace.name(),
+                self.report_path.display()
+            ),
+        }
     }
 }
 fn save(report: &Report, path: &Path) -> Result<(), String> {
-    std::fs::write(path, report.render()).map_err(|_| "cannot write WAS-01 report".into())
+    std::fs::write(path, report.render())
+        .map_err(|_| format!("cannot write WAS-01 report {}", path.display()))
 }
 
 pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<PathBuf, String> {
@@ -316,12 +340,6 @@ pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<
     let commands = plan(&namespace);
     let mut report = Report::new();
     if !plan_safe(&namespace, &commands) {
-        report.record(
-            "plan-namespaced-only",
-            Verdict::Failed,
-            Reason::RejectedPlan,
-            None,
-        )?;
         return Err("plan-rejected".into());
     }
     report.record(
@@ -339,15 +357,18 @@ pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<
     match runner.run(&commands[0]) {
         Ok(output) if output.exit_code == Some(0) => (),
         _ => {
-            return Err(
-                "FS_TEST_NAMESPACE_MODE=create: namespace creation failed; no namespace is owned"
-                    .into(),
-            );
+            return Err(format!(
+                "FS_TEST_NAMESPACE_MODE=create: namespace {} creation failed; no namespace is owned; report {}",
+                namespace.name(),
+                path.display()
+            ));
         }
     }
     let mut owned = OwnedNamespace {
         runner,
         delete: commands.last().cloned().ok_or("plan-rejected")?,
+        namespace: &namespace,
+        report_path: &path,
         owned: true,
     };
     let result = (|| -> Result<(), String> {
@@ -362,11 +383,16 @@ pub fn run(runner: &impl Runner, gate: &ReportGate, directory: &Path) -> Result<
                 )
             })
         }) {
-            return Err("WAS-01 probe incomplete; see fixed reason codes in report".into());
+            return Err(format!(
+                "WAS-01 probe incomplete in namespace {}; see fixed reason codes in report {}",
+                namespace.name(),
+                path.display()
+            ));
         }
         Ok(())
     })();
     let cleanup = owned.close();
+    drop(owned);
     cleanup?;
     result?;
     Ok(path)

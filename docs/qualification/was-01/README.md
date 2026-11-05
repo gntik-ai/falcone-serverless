@@ -65,7 +65,8 @@ identity in the supplied kubeconfig, not a tenant or a different service account
 `KUBECONFIG` is required and uses the existing explicit list/merge validator. Every
 kubectl invocation uses `Kubeconfigs::kubectl_flags`; there is no ambient config fallback.
 An invalid list fails before any runner call. The process runner has a 10-second
-per-call timeout and uses no image, pod, guest or existing WAS-01 ac1/ac2 interface.
+timeout for probes and creation, and a separate 90-second deadline for namespace
+cleanup with --wait. It uses no image, pod, guest or existing WAS-01 ac1/ac2 interface.
 The existing separate ac1/ac2 cluster test retains its own image requirement.
 
 `FS_TEST_NAMESPACE_MODE` must be unset or `create`. `shared` is refused before
@@ -86,6 +87,8 @@ The only cluster-scoped write is this harness identity creating its own namespac
 Ownership begins only when create succeeds. Creation failures, including AlreadyExists,
 never trigger deletion. After success, cleanup deletes exactly that namespace with
 --wait, including on later failure or panic; failed cleanup returns an error.
+Failures identify the namespace and report path. A cleanup failure during panic
+is logged with those same details so the operator can locate an orphan.
 SIGKILL, machine failure, or an ambiguous create timeout can leave an orphan. An operator
 must inspect and manually clean up orphaned namespaces; later runs never delete them.
 
