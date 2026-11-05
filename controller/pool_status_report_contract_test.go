@@ -256,6 +256,42 @@ func referenceOutcome(stored, report reportKey, payloadSame bool, desiredGenerat
 	}
 }
 
+// orderingScenario pins what each required G case must exercise, independently
+// of the row's own cells, so a row cannot be rewritten into a different case.
+type orderingScenario struct {
+	shape   string                                           // human description for errors
+	payload string                                           // "same", "different" or "" when unconstrained
+	outcome string                                           // required outcome
+	holds   func(stored, report reportKey, desired int) bool // required key relationship
+}
+
+var orderingScenarios = map[string]orderingScenario{
+	"G1": {"report generation below stored generation", "", "refused",
+		func(s, r reportKey, d int) bool { return r.generation < s.generation && r.generation <= d }},
+	"G2": {"report key equal to stored key", "same", "replay_noop",
+		func(s, r reportKey, d int) bool { return r == s && r.generation <= d }},
+	"G3": {"report key equal to stored key", "different", "conflict_refused",
+		func(s, r reportKey, d int) bool { return r == s && r.generation <= d }},
+	"G4": {"same generation and epoch, higher seq", "different", "applied",
+		func(s, r reportKey, d int) bool {
+			return r.generation == s.generation && r.epoch == s.epoch && r.seq > s.seq && r.generation <= d
+		}},
+	"G5": {"same generation and epoch, higher seq", "different", "applied",
+		func(s, r reportKey, d int) bool {
+			return r.generation == s.generation && r.epoch == s.epoch && r.seq > s.seq && r.generation <= d
+		}},
+	"G6": {"same generation and epoch, lower seq", "", "refused",
+		func(s, r reportKey, d int) bool {
+			return r.generation == s.generation && r.epoch == s.epoch && r.seq < s.seq && r.generation <= d
+		}},
+	"G7": {"same generation, higher epoch, lower seq", "", "applied",
+		func(s, r reportKey, d int) bool {
+			return r.generation == s.generation && r.epoch > s.epoch && r.seq < s.seq && r.generation <= d
+		}},
+	"G8": {"report generation above desired generation", "", "refused",
+		func(s, r reportKey, d int) bool { return r.generation > d }},
+}
+
 func checkPoolStatusReport(doc string) []string {
 	var errs []string
 	lines := strings.Split(doc, "\n")
@@ -397,8 +433,19 @@ func checkPoolStatusOrdering(body string) []string {
 		case !slices.Contains(poolStatusOutcomes, outcome):
 			errs = append(errs, fmt.Sprintf("ordering case %s: outcome %q is not one of %v", id, outcome, poolStatusOutcomes))
 		default:
-			if want := referenceOutcome(stored, report, payload == "same", desired); outcome != want {
+			want := referenceOutcome(stored, report, payload == "same", desired)
+			if outcome != want {
 				errs = append(errs, fmt.Sprintf("ordering case %s: outcome %q disagrees with reference comparator %q", id, outcome, want))
+			}
+			sc := orderingScenarios[id]
+			if !sc.holds(stored, report, desired) {
+				errs = append(errs, fmt.Sprintf("ordering case %s: keys must exercise %s", id, sc.shape))
+			}
+			if sc.payload != "" && payload != sc.payload {
+				errs = append(errs, fmt.Sprintf("ordering case %s: payload must be %s", id, sc.payload))
+			}
+			if outcome == want && outcome != sc.outcome {
+				errs = append(errs, fmt.Sprintf("ordering case %s: outcome must be %s", id, sc.outcome))
 			}
 		}
 		notes := map[string]string{"G4": "readyReplicas 0 to 1", "G5": "readyReplicas 1 to 0"}
@@ -595,6 +642,8 @@ func poolStatusDoc(t *testing.T) string {
 // Column positions in the tables of the contract.
 const (
 	colFieldType, colFieldRequired, colFieldVisibility = 1, 2, 3
+	colOrderingStored, colOrderingReport               = 1, 2
+	colOrderingPayload, colOrderingDesired             = 3, 4
 	colOrderingOutcome                                 = 5
 	colAuthOutcome, colAuthState                       = 2, 3
 	colOCIVisibility, colOCIStatus, colOCIReason       = 1, 2, 3
@@ -713,6 +762,37 @@ func TestPoolStatusReportRejectsDisagreeingOrderingOutcome(t *testing.T) {
 	t.Run("unknown outcome", func(t *testing.T) {
 		wantError(t, checkPoolStatusReport(setCell(t, doc, "G4", colOrderingOutcome, "merged")), "ordering case G4", "merged")
 	})
+}
+
+// A row rewritten into a different scenario is consistent with the comparator
+// but no longer exercises the required case.
+func TestPoolStatusReportRejectsReplacedOrderingScenario(t *testing.T) {
+	doc := poolStatusDoc(t)
+	replace := func(t *testing.T, id, stored, report, payload, desired, outcome string) string {
+		return editRow(t, doc, id, func(c []string) []string {
+			c[colOrderingStored], c[colOrderingReport], c[colOrderingPayload] = stored, report, payload
+			c[colOrderingDesired], c[colOrderingOutcome] = desired, outcome
+			return c
+		})
+	}
+	cases := []struct {
+		name, id, stored, report, payload, desired, outcome, want string
+	}{
+		{"G4 as equal-key replay", "G4", "(5,2,10)", "(5,2,10)", "same", "5", "replay_noop", "ordering case G4: keys must exercise"},
+		{"G5 as equal-key replay", "G5", "(5,2,11)", "(5,2,11)", "same", "5", "replay_noop", "ordering case G5: keys must exercise"},
+		{"G4 with same payload", "G4", "(5,2,10)", "(5,2,11)", "same", "5", "replay_noop", "ordering case G4: payload must be different"},
+		{"G1 as higher generation", "G1", "(5,2,10)", "(6,2,11)", "different", "6", "applied", "ordering case G1: keys must exercise"},
+		{"G2 as different payload", "G2", "(5,2,10)", "(5,2,10)", "different", "5", "conflict_refused", "ordering case G2: payload must be same"},
+		{"G3 as same payload", "G3", "(5,2,10)", "(5,2,10)", "same", "5", "replay_noop", "ordering case G3: payload must be different"},
+		{"G6 as higher seq", "G6", "(5,2,10)", "(5,2,11)", "different", "5", "applied", "ordering case G6: keys must exercise"},
+		{"G7 as same epoch", "G7", "(5,2,10)", "(5,2,9)", "different", "5", "refused", "ordering case G7: keys must exercise"},
+		{"G8 within desired", "G8", "(5,2,10)", "(6,2,1)", "different", "6", "applied", "ordering case G8: keys must exercise"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			wantError(t, checkPoolStatusReport(replace(t, c.id, c.stored, c.report, c.payload, c.desired, c.outcome)), c.want)
+		})
+	}
 }
 
 func TestPoolStatusReportRejectsIncompleteMappings(t *testing.T) {
