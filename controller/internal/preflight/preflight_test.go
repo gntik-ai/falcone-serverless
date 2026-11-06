@@ -2,16 +2,25 @@ package preflight_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -342,20 +351,61 @@ func TestNewHTTPClientTrustsOnlyTheGivenCAAndNeverUsesAProxy(t *testing.T) {
 			t.Fatalf("check through the CA-pinned client: %+v", check)
 		}
 	}
-	// A server the CA does not cover is refused.
-	other := httptest.NewTLSServer(http.NotFoundHandler())
-	defer other.Close()
+	// A server whose certificate the CA does not cover is refused, and never sees a request.
+	other := newUntrustedTLSServer(t)
 	c.APIBase = other.URL
 	for _, check := range c.Run(context.Background(), table[:1]) {
 		if check.Result != status.CheckError {
 			t.Fatalf("untrusted certificate accepted: %+v", check)
 		}
 	}
+	if n := other.hits.Load(); n != 0 {
+		t.Fatalf("untrusted server received %d requests", n)
+	}
 	for _, bad := range [][]byte{nil, []byte("not pem")} {
 		if _, err := preflight.NewHTTPClient(bad); err == nil {
 			t.Fatalf("CA %q accepted", bad)
 		}
 	}
+}
+
+type untrustedServer struct {
+	*httptest.Server
+	hits atomic.Int64
+}
+
+// newUntrustedTLSServer answers every request with an allowed review, behind a
+// certificate generated independently of the httptest default one.
+func newUntrustedTLSServer(t *testing.T) *untrustedServer {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(42),
+		Subject:      pkix.Name{CommonName: "untrusted"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &untrustedServer{}
+	s.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.hits.Add(1)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": map[string]any{"allowed": true}})
+	}))
+	s.Config.ErrorLog = log.New(io.Discard, "", 0)
+	s.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}}}
+	s.StartTLS()
+	t.Cleanup(s.Close)
+	return s
 }
 
 func TestClientSendsNoRequestForAnEmptyTable(t *testing.T) {

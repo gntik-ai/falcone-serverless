@@ -102,7 +102,7 @@ func ParseValues(data []byte) (Values, error) {
 // checkNamespaceMode accepts an absent mode (the default) and preprovisioned. The
 // create, shared, blank and unknown modes fail closed: none is implemented.
 func checkNamespaceMode(raw json.RawMessage) error {
-	if len(raw) == 0 || string(raw) == "null" {
+	if len(raw) == 0 {
 		return nil
 	}
 	var mode string

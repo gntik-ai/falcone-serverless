@@ -54,12 +54,12 @@ func TestParseValuesNamespaceMode(t *testing.T) {
 		out, _ := json.Marshal(m)
 		return string(out)
 	}
-	for _, ok := range []string{"<absent>", `"preprovisioned"`, `null`} {
+	for _, ok := range []string{"<absent>", `"preprovisioned"`} {
 		if _, err := preflight.ParseValues([]byte(withMode(ok))); err != nil {
 			t.Errorf("namespaceMode %s rejected: %v", ok, err)
 		}
 	}
-	for _, bad := range []string{`"create"`, `"shared"`, `""`, `"  "`, `"Preprovisioned"`, `"bogus"`, `5`} {
+	for _, bad := range []string{`null`, `"create"`, `"shared"`, `""`, `"  "`, `"Preprovisioned"`, `"bogus"`, `5`} {
 		_, err := preflight.ParseValues([]byte(withMode(bad)))
 		if err == nil || !strings.Contains(err.Error(), "namespaceMode") {
 			t.Errorf("namespaceMode %s: error %v must name namespaceMode", bad, err)

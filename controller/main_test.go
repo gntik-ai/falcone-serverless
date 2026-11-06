@@ -489,6 +489,14 @@ func TestRunNamespaceMode(t *testing.T) {
 	}
 }
 
+func TestRunRejectsANullNamespaceMode(t *testing.T) {
+	e := pfNewEnv(t, pfValues(func(m map[string]any) { m["namespaceMode"] = nil }))
+	r := e.requireFailedBeforeAnyRequest(t, e.run())
+	if !strings.Contains(r.Preflight.ConfigError, "namespaceMode") {
+		t.Fatalf("configError %q must name namespaceMode", r.Preflight.ConfigError)
+	}
+}
+
 func TestRunReportsEachMissingPrerequisiteAndStartsNothing(t *testing.T) {
 	fields := map[string]struct {
 		section, key, kind string
