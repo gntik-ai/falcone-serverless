@@ -6,9 +6,9 @@ import (
 	"math"
 	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
 const contractDir = "../../../../docs/contracts/pool-status/"
@@ -49,7 +49,7 @@ func schemaError(root, s map[string]any, v any) error {
 	fail := func() error { return fmt.Errorf("schema rejected %v", v) }
 	for key := range s {
 		switch key {
-		case "$schema", "$id", "$defs", "title", "description", "$ref", "type", "properties", "required", "additionalProperties", "items", "enum", "const", "minimum", "minLength", "minItems", "maxItems", "format", "allOf", "anyOf", "not", "if", "then", "else", "contains":
+		case "$schema", "$id", "$defs", "title", "description", "$ref", "type", "properties", "required", "additionalProperties", "items", "enum", "const", "minimum", "minLength", "minItems", "maxItems", "format", "pattern", "allOf", "anyOf", "not", "if", "then", "else", "contains":
 		default:
 			return fmt.Errorf("unsupported schema keyword %s", key)
 		}
@@ -144,8 +144,14 @@ func schemaError(root, s map[string]any, v any) error {
 		if min, ok := s["minLength"].(float64); ok && float64(len([]rune(str))) < min {
 			return fail()
 		}
-		if s["format"] == "date-time" {
-			if _, err := time.Parse(time.RFC3339Nano, str); err != nil {
+		// Draft 2020-12 format is an annotation by default. Only assertion
+		// keywords such as pattern can reject a malformed value here.
+		if pattern, ok := s["pattern"].(string); ok {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return err
+			}
+			if !re.MatchString(str) {
 				return fail()
 			}
 		}
@@ -207,7 +213,7 @@ func TestSchemaConformance(t *testing.T) {
 func TestCompatibilityCheck(t *testing.T) {
 	baseline := readJSON(t, "v1/pool-status.schema.json")
 	extended := readJSON(t, "v1.1/pool-status.schema.json")
-	if err := compatible(baseline, extended["$defs"].(map[string]any)["current"].(map[string]any)); err != nil {
+	if err := compatibleSchemas(t, baseline, extended); err != nil {
 		t.Fatal(err)
 	}
 	for _, raw := range readJSON(t, "v1/conformance.json")["valid"].([]any) {
@@ -215,19 +221,58 @@ func TestCompatibilityCheck(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, edit := range []string{"removed", "retyped"} {
+	for _, edit := range []string{"removed", "retyped", "legacy-optional-removed", "legacy-required-removed", "legacy-retyped", "legacy-enum", "legacy-required-added"} {
 		schema := clone(t, extended)
 		current := schema["$defs"].(map[string]any)["current"].(map[string]any)
 		props := current["properties"].(map[string]any)
-		if edit == "removed" {
+		switch edit {
+		case "removed":
 			delete(props, "readyCapacity")
-		} else {
+		case "retyped":
 			props["readyCapacity"] = map[string]any{"type": "string"}
+		default:
+			legacy := schema["$defs"].(map[string]any)["legacy"].(map[string]any)
+			p := legacy["properties"].(map[string]any)
+			switch edit {
+			case "legacy-optional-removed":
+				delete(p, "materialized")
+			case "legacy-required-removed":
+				delete(p, "draining")
+				var required []any
+				for _, key := range legacy["required"].([]any) {
+					if key != "draining" {
+						required = append(required, key)
+					}
+				}
+				legacy["required"] = required
+			case "legacy-retyped":
+				p["materialized"] = map[string]any{"type": "string"}
+			case "legacy-enum":
+				p["runtimeMode"].(map[string]any)["enum"] = []any{"wasm"}
+			case "legacy-required-added":
+				legacy["required"] = append(legacy["required"].([]any), "futureField")
+			}
 		}
-		if err := compatible(baseline, current); err == nil {
-			t.Fatalf("%s field accepted", edit)
+		if err := compatibleSchemas(t, baseline, schema); err == nil {
+			t.Errorf("%s field accepted", edit)
 		}
 	}
+}
+
+func compatibleSchemas(t *testing.T, baseline, extended map[string]any) error {
+	t.Helper()
+	defs := extended["$defs"].(map[string]any)
+	legacy := clone(t, baseline)
+	delete(legacy, "$schema")
+	delete(legacy, "$id")
+	legacy["not"] = map[string]any{"required": []any{"contractRevision"}}
+	// This branch handles every unrevisioned v1 report, including optional fields
+	// and values absent from the finite fixtures. Keep the entire baseline,
+	// including required keys, enums and conditional constraints, unchanged.
+	if !reflect.DeepEqual(legacy, defs["legacy"]) {
+		return fmt.Errorf("legacy branch differs from v1 baseline")
+	}
+	return compatible(baseline, defs["current"].(map[string]any))
 }
 
 // Compare every v1 property recursively, even optional OCI and nested fields that

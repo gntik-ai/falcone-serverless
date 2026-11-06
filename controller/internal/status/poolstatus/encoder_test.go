@@ -3,6 +3,7 @@ package poolstatus_test
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,8 +38,10 @@ func TestEncoderFixturesAndIsolation(t *testing.T) {
 				}
 			}
 			if r.AbsenceVerified {
-				objects = objects[1:]
-			} // No owned object remains in absence reports.
+				objects = slices.DeleteFunc(objects, func(o poolstatus.ObservedObject) bool {
+					return o.Namespace == scope.Namespace && o.Name == scope.Name
+				})
+			} // Neither owned nor mismatching objects remain at the pool name.
 			data, err := poolstatus.Encode(r, scope, objects, poolstatus.Options{})
 			if err != nil {
 				t.Fatal(err)
@@ -106,6 +109,44 @@ func TestEncoderFixturesAndIsolation(t *testing.T) {
 	}
 }
 
+func TestEncoderCanonicalizesObservationLists(t *testing.T) {
+	for _, name := range []string{"ImagePullFailed", "verified-absence-wasm"} {
+		t.Run(name, func(t *testing.T) {
+			var r poolstatus.Report
+			if err := json.Unmarshal(encoded(t, fixtureReport(t, name)), &r); err != nil {
+				t.Fatal(err)
+			}
+			r.Conditions = []poolstatus.Condition{
+				{Type: "ImagePullFailed", Reason: "image_pull_failed", ObjectRef: &poolstatus.ObjectRef{Kind: "Service", Name: "untrusted"}},
+				{Type: "ImagePullFailed", Reason: "image_pull_failed", ObjectRef: &poolstatus.ObjectRef{Kind: "Deployment", Name: "untrusted"}},
+				{Type: "ContainerStartFailed", Reason: "container_start_failed"},
+			}
+			if r.RuntimeMode == "wasm" {
+				r.Revisions = []poolstatus.Revision{{Revision: "rev-b"}, {Revision: "rev-a"}}
+				a := r.VerifiedAbsence[0]
+				a.Generation = 4
+				r.VerifiedAbsence = append(r.VerifiedAbsence, a)
+			}
+			scope := poolstatus.Scope{PoolRef: r.PoolRef, OwnerAnnotation: "own-owner"}
+			before := encoded(t, r)
+			first, err := poolstatus.Encode(r, scope, nil, poolstatus.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, encoded(t, r)) {
+				t.Fatal("encoder mutated caller's observation")
+			}
+			slices.Reverse(r.Conditions)
+			slices.Reverse(r.Revisions)
+			slices.Reverse(r.VerifiedAbsence)
+			second, err := poolstatus.Encode(r, scope, nil, poolstatus.Options{})
+			if err != nil || !bytes.Equal(first, second) {
+				t.Fatal("equivalent observations have different payloads", err)
+			}
+		})
+	}
+}
+
 func TestEncoderRejectsIncompleteScope(t *testing.T) {
 	_, err := poolstatus.Encode(poolstatus.Report{}, poolstatus.Scope{}, nil, poolstatus.Options{})
 	if err == nil || strings.Contains(err.Error(), "uid") {
@@ -168,6 +209,38 @@ func TestEncoderRejectsForeignConditionTextWithKillSwitch(t *testing.T) {
 			if err == nil || len(data) != 0 {
 				t.Fatalf("disable=%v: encoder accepted untrusted condition %s", disable, field)
 			}
+		}
+	}
+}
+
+func TestEncoderRejectsAbsenceAtOccupiedPoolName(t *testing.T) {
+	var report poolstatus.Report
+	for _, raw := range readJSON(t, "v1.1/conformance.json")["valid"].([]any) {
+		f := raw.(map[string]any)
+		if f["name"] == "verified-absence-wasm" {
+			if err := json.Unmarshal(encoded(t, f["report"]), &report); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: `["own-tenant","own-profile"]`}
+	for _, owner := range []string{"", `["other-tenant-owner"]`, scope.OwnerAnnotation} {
+		for _, kind := range []string{"Deployment", "Service", "Lease"} {
+			t.Run(kind+"/"+owner, func(t *testing.T) {
+				observed := []poolstatus.ObservedObject{{OwnedObject: poolstatus.OwnedObject{
+					Kind: kind, Namespace: scope.Namespace, Name: scope.Name, UID: "other-tenant-uid", ResourceVersion: "999",
+				}, OwnerAnnotation: owner}}
+				data, err := poolstatus.Encode(report, scope, observed, poolstatus.Options{})
+				if err == nil || len(data) != 0 {
+					t.Fatal("absence accepted while expected name is occupied")
+				}
+				if strings.Contains(err.Error(), "other-tenant") || strings.Contains(err.Error(), "999") {
+					t.Fatal("error leaked observed identity")
+				}
+				if _, err := poolstatus.Encode(report, scope, observed, poolstatus.Options{DisableExtensions: true}); err != nil {
+					t.Fatal("kill switch must still clear absence evidence", err)
+				}
+			})
 		}
 	}
 }

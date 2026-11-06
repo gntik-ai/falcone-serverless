@@ -30,8 +30,9 @@ contractVersion 1 field table and allows unknown fields for old consumers. The
 contains versioned `conformance.json` examples; Go tests validate both schemas,
 all examples and the encoder, and reject removed or retyped v1 fields.
 No v1 field or condition is removed or renamed. A bare v1 `absenceVerified=true`
-remains valid for compatibility; cleanup consumers must require revision 1.1
-and its verifiedAbsence evidence before completing obligations (TEN-03.t5).
+remains valid for compatibility; cleanup consumers must require revision 1.1,
+`absenceVerified=true` and its verifiedAbsence evidence together before completing
+obligations (TEN-03.t5). Evidence alone is not a completion signal.
 
 ## Fields
 
@@ -128,6 +129,9 @@ trusted Scope (binding, expected name and full owner annotation), ignores input
 ownedObjects, filters fresh ownership-verified observations against that scope,
 and suppresses all owned object identities while a cleanup condition blocks.
 It never sends owner annotations. Scope is not derived from observed objects.
+The wire validator checks ownedObjects namespace/name against poolRef and
+objectRef names against poolRef.name; JSON Schema cannot express those
+cross-field comparisons, so schema validation alone does not replace them.
 
 Revision 1.1 fixes the operator reason codes (these are not tenant text):
 
@@ -159,6 +163,10 @@ With contractRevision present, absenceVerified=true requires at least one
 verifiedAbsence entry and forbids UIDMismatch, ResourceVersionMismatch,
 OwnershipMismatch, MissingPreconditions and TerminationPending. Reports without
 contractRevision remain v1, including their original absenceVerified semantics.
+Either `absenceVerified=true` or a nonempty verifiedAbsence list forbids live
+ownedObjects, those blocking conditions, `materialized=true`, nonzero
+readyReplicas or readyCapacity, and any ready revision. This holds even when
+absenceVerified is false: evidence cannot contradict live pool state.
 
 **Until a reviewed mechanism proves descendant absence, the controller must
 report absenceVerified=false.** This change grants no Pod or ReplicaSet reads,
@@ -166,8 +174,10 @@ widens no RBAC, and implements no proof, deletion logic or emission path.
 TEN-03.t4 must settle descendant proof before any producer asserts it.
 The encoder accepts evidence from its trusted caller; validation checks its
 shape, not whether the caller actually performed fresh reads.
-The encoder refuses to assert verified absence when an ownership-verified
-observation in the same input still identifies a live pool-scoped object.
+The encoder refuses either absence signal when any observation in the same input
+occupies the expected pool namespace and name, including an object whose owner
+annotation is missing or foreign. It refuses without echoing that object's
+identity. A mismatch blocks completion; it is never evidence of absence.
 
 The encoder kill switch is `Options.DisableExtensions`. It emits v1 only,
 omitting contractRevision, ownedObjects, verifiedAbsence, objectRef and
@@ -218,6 +228,9 @@ rules and never changes stored state.
 - A changed `readAt` or `resourceVersion` is a different payload and requires
   a new `observationSeq`. Reusing an equal key for that payload is refused as
   a conflict. Encoding the same observation must be deterministic.
+  The encoder canonicalizes conditions, revisions and verifiedAbsence by their
+  complete encoded entries and ownedObjects by kind, UID and resourceVersion,
+  so input list order does not change the payload. It preserves caller inputs.
 - `observationSeq` rises with each new observation within an epoch. The design has
   no such counter, so it reuses the Lease and fencing patterns: the controller
   keeps it in memory, restarts it when `reporterEpoch` rises, and never reuses a
@@ -261,9 +274,9 @@ Outcomes are `applied`, `replay_noop`, `refused` and `conflict_refused`. Keys ar
 
 These conditions are reported per `ctr-resource-ownership`. Each keeps the
 resource and blocks completion. They are operator-visible only; a tenant sees only
-`deletion_pending`. `absenceVerified=true` is the only completion signal after
-cleanup, and the controller sets it only after it has verified that the resources
-it owned are absent.
+`deletion_pending`. Completion after cleanup requires `absenceVerified=true`
+together with revision 1.1 and verifiedAbsence evidence, and the controller sets
+it only after it has verified that the resources it owned are absent.
 
 | Condition | Effect |
 | --- | --- |

@@ -269,7 +269,20 @@
                   "kind",
                   "name"
                 ],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "not": {
+                  "properties": {
+                    "kind": {
+                      "const": "Lease"
+                    },
+                    "name": {
+                      "enum": [
+                        "falcone-pool-controller-leader",
+                        "falcone-pool-controller-scaler"
+                      ]
+                    }
+                  }
+                }
               },
               "remainingDescendants": {
                 "type": "object",
@@ -541,7 +554,20 @@
               "uid",
               "resourceVersion"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "not": {
+              "properties": {
+                "kind": {
+                  "const": "Lease"
+                },
+                "name": {
+                  "enum": [
+                    "falcone-pool-controller-leader",
+                    "falcone-pool-controller-scaler"
+                  ]
+                }
+              }
+            }
           }
         },
         "verifiedAbsence": {
@@ -558,7 +584,8 @@
               },
               "readAt": {
                 "type": "string",
-                "format": "date-time"
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"
               },
               "absent": {
                 "type": "object",
@@ -705,6 +732,36 @@
             "properties": {
               "verifiedAbsence": {
                 "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "absenceVerified": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "required": [
+                  "verifiedAbsence"
+                ],
+                "properties": {
+                  "verifiedAbsence": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "ownedObjects": {
+                "maxItems": 0
               },
               "conditions": {
                 "not": {
@@ -719,6 +776,24 @@
                           "TerminationPending"
                         ]
                       }
+                    }
+                  }
+                }
+              },
+              "materialized": {
+                "const": false
+              },
+              "readyReplicas": {
+                "const": 0
+              },
+              "readyCapacity": {
+                "const": 0
+              },
+              "revisions": {
+                "items": {
+                  "properties": {
+                    "ready": {
+                      "const": false
                     }
                   }
                 }

@@ -199,6 +199,27 @@ func (f field) check(v any, strict bool) error {
 	return nil
 }
 
+// discardUnknown runs after shape checking. Go's struct decoder also matches
+// JSON tags case-insensitively; remove unknown v1 keys at every depth so those
+// keys cannot override the contract's exact, case-sensitive field names.
+func (f field) discardUnknown(v any) {
+	switch f.kind {
+	case "object":
+		obj := v.(map[string]any)
+		for key, value := range obj {
+			if child, ok := f.properties[key]; ok {
+				child.discardUnknown(value)
+			} else {
+				delete(obj, key)
+			}
+		}
+	case "array":
+		for _, item := range v.([]any) {
+			f.item.discardUnknown(item)
+		}
+	}
+}
+
 // ValidateJSON validates required keys, wire types, and revision-specific rules.
 // Without contractRevision, v1 accepts unknown fields and condition values.
 func ValidateJSON(data []byte) error {
@@ -215,7 +236,8 @@ func ValidateJSON(data []byte) error {
 	if extended && rev != ContractRevision {
 		return errors.New("unsupported contractRevision")
 	}
-	if err := wireShape(extended).check(doc, extended); err != nil {
+	shape := wireShape(extended)
+	if err := shape.check(doc, extended); err != nil {
 		return err
 	}
 	// OCI-only keys are forbidden by presence in Wasm reports, even when their
@@ -238,14 +260,7 @@ func ValidateJSON(data []byte) error {
 	}
 	// Unknown extension fields in v1 are ignored, including their wire types.
 	if !extended {
-		for _, key := range []string{"ownedObjects", "verifiedAbsence"} {
-			delete(doc, key)
-		}
-		for _, c := range doc["conditions"].([]any) {
-			m := c.(map[string]any)
-			delete(m, "objectRef")
-			delete(m, "remainingDescendants")
-		}
+		shape.discardUnknown(doc)
 	}
 	canonical, err := json.Marshal(doc)
 	if err != nil {
@@ -285,15 +300,26 @@ func validate(r Report, extended bool) error {
 	if !extended {
 		return nil
 	}
+	absenceClaim := r.AbsenceVerified || len(r.VerifiedAbsence) != 0
+	if absenceClaim {
+		if len(r.OwnedObjects) != 0 || (r.Materialized != nil && *r.Materialized) || r.ReadyReplicas != 0 || r.ReadyCapacity != 0 {
+			return errors.New("verified absence conflicts with live pool state")
+		}
+		for _, revision := range r.Revisions {
+			if revision.Ready {
+				return errors.New("verified absence conflicts with ready revision")
+			}
+		}
+	}
 	for _, c := range r.Conditions {
 		reason, ok := ConditionReasons[c.Type]
 		if !ok || reason != c.Reason {
 			return errors.New("unknown condition type or reason")
 		}
-		if r.AbsenceVerified && blocksCompletion(c.Type) {
+		if absenceClaim && blocksCompletion(c.Type) {
 			return errors.New("condition blocks verified absence")
 		}
-		if c.ObjectRef != nil && (!slices.Contains(ObjectKinds, c.ObjectRef.Kind) || c.ObjectRef.Name == "") {
+		if c.ObjectRef != nil && (!slices.Contains(ObjectKinds, c.ObjectRef.Kind) || c.ObjectRef.Name == "" || c.ObjectRef.Name != r.PoolRef.Name || (c.ObjectRef.Kind == "Lease" && singleton(c.ObjectRef.Name))) {
 			return errors.New("invalid objectRef")
 		}
 		if c.Type == TerminationPending {
@@ -306,7 +332,7 @@ func validate(r Report, extended bool) error {
 		}
 	}
 	for _, o := range r.OwnedObjects {
-		if !slices.Contains(ObjectKinds, o.Kind) || o.Namespace == "" || o.Name == "" || o.UID == "" || o.ResourceVersion == "" {
+		if !slices.Contains(ObjectKinds, o.Kind) || o.Namespace == "" || o.Name == "" || o.UID == "" || o.ResourceVersion == "" || o.Namespace != r.PoolRef.Namespace || o.Name != r.PoolRef.Name || (o.Kind == "Lease" && singleton(o.Name)) {
 			return errors.New("incomplete owned object")
 		}
 	}

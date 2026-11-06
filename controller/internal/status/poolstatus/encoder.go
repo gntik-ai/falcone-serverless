@@ -1,6 +1,7 @@
 package poolstatus
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/json"
 	"errors"
@@ -16,8 +17,9 @@ type Scope struct {
 	OwnerAnnotation string
 }
 
-// ObservedObject is an already ownership-verified, fresh-read object. The encoder
-// additionally checks its name, binding and full owner annotation against Scope.
+// ObservedObject is a fresh-read object. The encoder checks its name, binding and
+// full owner annotation against Scope before including its identity. Any object
+// at the expected name blocks absence evidence, even if its owner differs.
 // These values are report data, never delete or write preconditions.
 type ObservedObject struct {
 	OwnedObject
@@ -47,6 +49,12 @@ func Encode(r Report, scope Scope, observed []ObservedObject, options Options) (
 		r.Conditions = []Condition{}
 	}
 	r.ContractRevision = ContractRevision
+	occupied := false
+	for _, o := range observed {
+		if o.Namespace == scope.Namespace && o.Name == scope.Name && !singleton(o.Name) {
+			occupied = true
+		}
+	}
 	blocked := false
 	for i, c := range r.Conditions {
 		// Legacy wire validation accepts future fields, but the encoder must never
@@ -93,9 +101,12 @@ func Encode(r Report, scope Scope, observed []ObservedObject, options Options) (
 		}
 		r.Conditions = conditions
 	}
-	if r.AbsenceVerified && len(r.OwnedObjects) != 0 {
-		return nil, errors.New("verified absence conflicts with observed owned objects")
+	if (r.AbsenceVerified || len(r.VerifiedAbsence) != 0) && occupied {
+		return nil, errors.New("verified absence conflicts with an occupied pool name")
 	}
+	r.Conditions = canonicalEntries(r.Conditions)
+	r.Revisions = canonicalEntries(r.Revisions)
+	r.VerifiedAbsence = canonicalEntries(r.VerifiedAbsence)
 	data, err := json.Marshal(r)
 	if err != nil {
 		return nil, err
@@ -105,6 +116,20 @@ func Encode(r Report, scope Scope, observed []ObservedObject, options Options) (
 	}
 	return data, nil
 }
+
+// These wire types contain only JSON-encodable fields. Order by their complete
+// payload so ties on a type or generation cannot depend on input list ordering.
+// Clone before sorting: the caller may retain its observation for a replay.
+func canonicalEntries[T Condition | Revision | VerifiedAbsence](entries []T) []T {
+	out := slices.Clone(entries)
+	slices.SortFunc(out, func(a, b T) int {
+		left, _ := json.Marshal(a)
+		right, _ := json.Marshal(b)
+		return bytes.Compare(left, right)
+	})
+	return out
+}
+
 func singleton(name string) bool {
 	return name == "falcone-pool-controller-leader" || name == "falcone-pool-controller-scaler"
 }
