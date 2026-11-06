@@ -40,10 +40,17 @@ shared and grants no installer authority by itself.
 
 ## Prerequisites
 
-Exactly these prerequisites must already be available and verified before the
-controller creates or adopts anything. The controller reports each missing
-prerequisite, stays not ready, and nothing is created or adopted. Never silently
-disable isolation, provision a missing facility or adopt an existing object.
+The seven facility prerequisites below and the named Secrets must already be
+available and verified before the controller creates or adopts anything. The
+controller reports each missing prerequisite, stays not ready, and nothing is
+created or adopted. Never silently disable isolation, provision a missing
+facility or adopt an existing object.
+
+The `serviceIdentitySecretName` must exist in `controllerNamespace`. When OCI
+is enabled, `platformRegistryPullSecretName` must exist in every resolved OCI
+namespace. A missing named Secret is reported and makes the entire controller
+not ready; nothing is created or adopted in any watched namespace, including
+Wasm pools. A pull Secret is not required when OCI is disabled.
 
 | Prerequisite | Requirement |
 | --- | --- |

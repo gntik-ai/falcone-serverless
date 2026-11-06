@@ -39,6 +39,33 @@ func contractsRead(t *testing.T, relative string) string {
 
 func checkContracts(name, doc string) []string {
 	var reasons []string
+	versions := 0
+	inPreamble := true
+	// These fixed-format contracts support ATX headings only. Reject other
+	// heading forms rather than let rendered sections inherit token exemptions.
+	for _, line := range strings.Split(doc, "\n") {
+		if heading := contractsHeading.FindStringSubmatch(line); heading != nil && heading[1] == "##" {
+			inPreamble = false
+		}
+		if strings.HasPrefix(line, "Version:") {
+			versions++
+			if !inPreamble {
+				reasons = append(reasons, "header: version outside preamble")
+			}
+		}
+		unquoted := strings.TrimLeft(line, " >\t")
+		quotedHeading := strings.HasPrefix(strings.TrimSpace(line), ">") &&
+			(contractsHeading.MatchString(unquoted) || contractsSetextUnderline.MatchString(unquoted))
+		if contractsSetextUnderline.MatchString(line) || quotedHeading || contractsHTMLHeading.MatchString(line) {
+			reasons = append(reasons, "structure: unsupported heading syntax")
+		}
+		if strings.Contains(line, "<!--") || contractsHTMLTable.MatchString(line) {
+			reasons = append(reasons, "structure: raw HTML unsupported")
+		}
+	}
+	if versions != 1 {
+		reasons = append(reasons, "header: expected exactly one version")
+	}
 	for _, line := range []string{"Version: 1", "Contract: ctr-" + name} {
 		if !slices.Contains(strings.Split(doc, "\n"), line) {
 			reasons = append(reasons, fmt.Sprintf("header: missing %s", line))
@@ -147,6 +174,9 @@ func checkContracts(name, doc string) []string {
 // a heading at a different level. Never inherit an exception across headings.
 var contractsHeading = regexp.MustCompile(`^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$`)
 var contractsClosingHashes = regexp.MustCompile(`(?:^|[ \t]+)#+[ \t]*$`)
+var contractsSetextUnderline = regexp.MustCompile(`^ {0,3}(?:=+|-+)[ \t]*$`)
+var contractsHTMLHeading = regexp.MustCompile(`(?i)</?h[1-6](?:[ \t/>]|$)`)
+var contractsHTMLTable = regexp.MustCompile(`(?i)</?(?:table|thead|tbody|tfoot|tr|th|td)(?:[ \t/>]|$)`)
 
 type contractsBlock struct {
 	section string
@@ -186,21 +216,25 @@ func contractsCheckExtraRBAC(name string, blocks []contractsBlock) []string {
 			lines = append(lines, line)
 		}
 		for _, table := range parseTables(strings.Join(lines, "\n")) {
-			// Detection deliberately includes emphasized, plural and resource/verb
-			// aliases. They cannot be used to add permissions outside the fixed table.
-			header := mdTable{header: make([]string, len(table.header))}
-			for i, value := range table.header {
-				value = strings.ToLower(strings.TrimSpace(strings.Trim(cellText(value), "*_")))
-				switch value {
-				case "kinds", "resource", "resources":
-					value = "kind"
-				case "verb":
-					value = "verbs"
+			// A pipe-containing paragraph may precede the real Markdown header
+			// without a blank line. Inspect every row in the shared parser's run.
+			for _, row := range append([][]string{table.header}, table.rows...) {
+				// Include emphasized, plural and resource/verb aliases so they
+				// cannot add permissions outside the fixed table.
+				header := mdTable{header: make([]string, len(row))}
+				for i, value := range row {
+					value = strings.ToLower(strings.TrimSpace(strings.Trim(cellText(value), "*_")))
+					switch value {
+					case "kinds", "resource", "resources", "api kind":
+						value = "kind"
+					case "verb", "allowed verbs", "permissions":
+						value = "verbs"
+					}
+					header.header[i] = value
 				}
-				header.header[i] = value
-			}
-			if _, shaped := columns(header, "kind", "verbs"); shaped && (block.section != "RBAC" || name != "controller-config") {
-				reasons = append(reasons, "RBAC: table outside RBAC in "+block.section)
+				if _, shaped := columns(header, "kind", "verbs"); shaped && (block.section != "RBAC" || name != "controller-config") {
+					reasons = append(reasons, "RBAC: table outside RBAC in "+block.section)
+				}
 			}
 		}
 	}
@@ -277,13 +311,18 @@ func contractsCheckRBAC(body string) []string {
 // The shared Markdown helpers intentionally tolerate loose tables. Contract tables
 // are stricter: exactly one, with fixed columns, one complete row per required key.
 func contractsCheckRows(body, section, keyColumn, valueColumn string, requirements map[string][]string) []string {
+	var reasons []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "|") && !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			reasons = append(reasons, section+": unparseable row")
+		}
+	}
 	tables := parseTables(body)
 	tb, found := findTable(body, keyColumn)
 	cols, ok := columns(tb, keyColumn, valueColumn)
 	if !found || !ok || len(tables) != 1 || len(tb.header) != 2 {
-		return []string{section + ": invalid fixed table"}
+		return append(reasons, section+": invalid fixed table")
 	}
-	var reasons []string
 	seen := map[string]int{}
 	for _, row := range tb.rows {
 		key := cell(row, cols[0])
@@ -324,6 +363,21 @@ func TestContractsVersion(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			doc := contractsRead(t, "../docs/contracts/"+name+".md")
 			wantError(t, checkContracts(name, replaceOnce(t, doc, "Version: 1\n", "")), "header: missing Version: 1")
+		})
+	}
+}
+
+func TestContractsVersionPlacement(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		t.Run(name+"/conflicting version", func(t *testing.T) {
+			mutated := replaceOnce(t, doc, "Version: 1\n", "Version: 1\nVersion: 2\n")
+			wantError(t, checkContracts(name, mutated), "header: expected exactly one version")
+		})
+		t.Run(name+"/version in Forbidden", func(t *testing.T) {
+			mutated := replaceOnce(t, doc, "Version: 1\n", "")
+			mutated = contractsEditSection(t, mutated, "Forbidden", func(body string) string { return body + "\nVersion: 1\n" })
+			wantError(t, checkContracts(name, mutated), "header: version outside preamble")
 		})
 	}
 }
@@ -403,6 +457,22 @@ func TestContractsPrerequisites(t *testing.T) {
 		t.Run("empty/"+key, func(t *testing.T) {
 			wantError(t, checkContracts("controller-config", setCell(t, doc, key, 1, "")), "Prerequisites", key)
 		})
+	}
+}
+
+func TestContractsSecretPrerequisites(t *testing.T) {
+	doc := contractsRead(t, "../docs/contracts/controller-config.md")
+	body := strings.Join(strings.Fields(splitSections(doc)["Prerequisites"]), " ")
+	for _, clause := range []string{
+		"`serviceIdentitySecretName` must exist in `controllerNamespace`.",
+		"When OCI is enabled, `platformRegistryPullSecretName` must exist in every resolved OCI namespace.",
+		"A missing named Secret is reported and makes the entire controller not ready",
+		"nothing is created or adopted in any watched namespace, including Wasm pools.",
+		"A pull Secret is not required when OCI is disabled.",
+	} {
+		if !strings.Contains(body, clause) {
+			t.Errorf("Prerequisites: missing Secret readiness rule: %s", clause)
+		}
 	}
 }
 
@@ -564,15 +634,22 @@ func TestContractsTokens(t *testing.T) {
 			"CustomResourceDefinition", "customresourcedefinitions", "CRD", "crds", "ClusterRole", "clusterroles",
 			"ClusterRoleBinding", "clusterrolebindings", "RuntimeClass", "runtimeclasses", "SCC", "sccs", "SecurityContextConstraints", "securitycontextconstraints",
 		} {
-			for _, section := range []string{"preamble", bodySection, "OCI"} {
+			sections := []string{"preamble", bodySection, "OCI", "RBAC"}
+			reason := "forbidden token: " + token
+			if strings.HasPrefix(strings.ToLower(token), "scc") || strings.HasPrefix(strings.ToLower(token), "securitycontext") {
+				reason = "SCC: token " + token
+			} else {
+				sections = append(sections, "Prerequisites")
+			}
+			for _, section := range sections {
 				t.Run(name+"/"+section+"/"+token, func(t *testing.T) {
 					mutated := token + "\n" + doc
 					if section != "preamble" {
-						mutated = contractsEditSection(t, doc, section, func(body string) string { return body + "\n" + token + "\n" })
-					}
-					reason := "forbidden token: " + token
-					if strings.HasPrefix(strings.ToLower(token), "scc") || strings.HasPrefix(strings.ToLower(token), "securitycontext") {
-						reason = "SCC: token " + token
+						if strings.Contains(doc, "\n## "+section+"\n") {
+							mutated = contractsEditSection(t, doc, section, func(body string) string { return body + "\n" + token + "\n" })
+						} else {
+							mutated = doc + "\n## " + section + "\n" + token + "\n"
+						}
 					}
 					wantError(t, checkContracts(name, mutated), reason)
 				})
@@ -647,6 +724,20 @@ func TestContractsRBACWithoutOuterPipes(t *testing.T) {
 		extra := "\nKind | Verbs\n--- | ---\nPod | create\n"
 		mutated := contractsEditSection(t, doc, "OCI", func(body string) string { return body + extra })
 		wantError(t, checkContracts(name, mutated), "RBAC: table outside RBAC")
+	}
+}
+
+func TestContractsRBACAfterPipeParagraph(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		for _, paragraph := range []string{"see a | b", "| note |", "text | before | table"} {
+			t.Run(name+"/"+paragraph, func(t *testing.T) {
+				mutated := contractsEditSection(t, doc, "OCI", func(body string) string {
+					return body + "\n" + paragraph + "\n| Kind | Verbs |\n| --- | --- |\n| Pod | create |\n"
+				})
+				wantError(t, checkContracts(name, mutated), "RBAC: table outside RBAC in OCI")
+			})
+		}
 	}
 }
 
@@ -745,7 +836,10 @@ func TestContractsRBACMarkdownBoundaries(t *testing.T) {
 	for _, name := range contractsFiles {
 		doc := contractsRead(t, "../docs/contracts/"+name+".md")
 		for _, heading := range []string{"## OCI extra", "## ", "# Appendix", "### Allowed"} {
-			for _, header := range []string{"**Kind** | **Verbs**", "__Kind__ | _Verbs_", "Kinds | Verbs", "Kind | Verb", "Resource | Verbs", "Resources | Verb"} {
+			for _, header := range []string{
+				"**Kind** | **Verbs**", "__Kind__ | _Verbs_", "Kinds | Verbs", "Kind | Verb", "Resource | Verbs", "Resources | Verb",
+				"API kind | Allowed verbs", "Kind | Permissions",
+			} {
 				t.Run(name+"/"+heading+"/"+header, func(t *testing.T) {
 					mutated := doc + "\n" + heading + "\n| " + header + " |\n| --- | --- |\n| Pod | create |\n"
 					wantError(t, checkContracts(name, mutated), "RBAC: table outside RBAC")
@@ -777,6 +871,57 @@ func TestContractsTokenMarkdownBoundaries(t *testing.T) {
 	}
 }
 
+func TestContractsUnsupportedHeadings(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		sections := []string{"Forbidden"}
+		if name == "controller-config" {
+			sections = append(sections, "Prerequisites")
+		}
+		for _, section := range sections {
+			prose := "The controller creates a ClusterRole and a CRD."
+			if section == "Prerequisites" {
+				prose = "The installer writes a new SCC."
+			}
+			for _, heading := range []string{
+				"Allowed\n-------", "Allowed\n=======", "Allowed\n   ---  ",
+				"> ## Allowed", "> > ### Allowed", "> Allowed\n> -------",
+				"<h2>Allowed</h2>", "<H2 id=allowed>Allowed</H2>",
+				"<h2\n>Allowed",
+			} {
+				t.Run(name+"/"+section+"/"+heading, func(t *testing.T) {
+					mutated := contractsEditSection(t, doc, section, func(body string) string {
+						return body + "\n" + heading + "\n" + prose + "\n"
+					})
+					wantError(t, checkContracts(name, mutated), "structure: unsupported heading syntax")
+				})
+			}
+		}
+	}
+}
+
+func TestContractsRawHTML(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		t.Run(name+"/commented Forbidden", func(t *testing.T) {
+			mutated := replaceOnce(t, doc, "## Forbidden", "<!--\n## Forbidden") + "\n-->\n"
+			wantError(t, checkContracts(name, mutated), "structure: raw HTML unsupported")
+		})
+		t.Run(name+"/HTML permissions table", func(t *testing.T) {
+			mutated := contractsEditSection(t, doc, "OCI", func(body string) string {
+				return body + "\n<table><tr><th>Kind</th><th>Verbs</th></tr><tr><td>Pod</td><td>create</td></tr></table>\n"
+			})
+			wantError(t, checkContracts(name, mutated), "structure: raw HTML unsupported")
+		})
+		t.Run(name+"/multiline HTML table", func(t *testing.T) {
+			mutated := contractsEditSection(t, doc, "OCI", func(body string) string {
+				return body + "\n<table\n>\nKind | Verbs\n--- | ---\nPod | create\n"
+			})
+			wantError(t, checkContracts(name, mutated), "structure: raw HTML unsupported")
+		})
+	}
+}
+
 func TestContractsFixedTableWidths(t *testing.T) {
 	for _, tc := range []struct{ name, key, section string }{
 		{"controller-config", "broker", "Prerequisites"},
@@ -804,6 +949,30 @@ func TestContractsFixedTableWidths(t *testing.T) {
 				wantError(t, checkContracts(tc.name, mutated), tc.section+": unparseable row "+tc.key)
 			})
 		}
+	}
+}
+
+func TestContractsFixedTablePipelessRows(t *testing.T) {
+	for _, tc := range []struct{ name, section, row string }{
+		{"controller-config", "Configuration", "widenRole | true"},
+		{"controller-config", "Prerequisites", "new SCC | create one"},
+		{"resource-ownership", "Repair conditions", "IgnoreMismatch | adopt anyway"},
+	} {
+		t.Run(tc.section, func(t *testing.T) {
+			doc := contractsRead(t, "../docs/contracts/"+tc.name+".md")
+			mutated := contractsEditSection(t, doc, tc.section, func(body string) string {
+				lines := strings.Split(body, "\n")
+				for i := len(lines) - 1; i >= 0; i-- {
+					if strings.HasPrefix(lines[i], "|") {
+						lines[i] += "\n" + tc.row
+						return strings.Join(lines, "\n")
+					}
+				}
+				t.Fatal("fixed table not found")
+				return ""
+			})
+			wantError(t, checkContracts(tc.name, mutated), tc.section+": unparseable row")
+		})
 	}
 }
 
