@@ -56,27 +56,47 @@ relies on enforced tenant-scoped NetworkPolicies, distinct service accounts,
 verified bindings, scoped credential checks and SQL/RLS checks (ADR 0011).
 This contract does not activate or qualify create or shared mode.
 
-On every pool reconcile and delete, verify the bound tenant/profile/revision owner,
-ownership format version, observed UID and resourceVersion against the recorded
-owned object before any mutation. Match annotations as well as labels; a matching
-name alone never authorizes adoption. An unrecorded existing object is not adopted.
-Creation is allowed only after verified absence in the authorized binding.
-Use UID and resourceVersion preconditions for deletion and optimistic concurrency
-for writes. A conflict requires a fresh read and ownership verification, never a
-blind retry, forced apply or replacement. Record the new resourceVersion after a
-successful authorized write; a newly observed version is not automatically trusted.
+On every pool reconcile and delete, obtain a fresh API read in the authorized
+binding. Verify the full bound tenant/profile/revision owner and ownership format
+version against authoritative Falcone desired state. Match annotations as well as
+labels; a matching name alone never authorizes adoption. Missing or mismatching
+ownership metadata fails closed. Creation is allowed only after verified absence
+in the authorized binding.
+
+After restart or failover, re-establish ownership from verified bindings,
+authoritative Falcone desired state and the object's full owner annotations and
+ownership metadata. No durable per-object UID/resourceVersion registry is required.
+The object holds its ownership identity, not a copy of its own resourceVersion;
+labels alone never establish that identity or authorize access.
+
+The expected UID and resourceVersion are taken from the fresh read that passed
+ownership verification in the same attempt. Use that UID and resourceVersion as
+delete preconditions and use optimistic concurrency for writes, including
+server-side apply and scaler writes. Never compare resourceVersion against the
+controller's last successful write or a value retained across reconcile attempts.
+Status updates, scaler replica writes and Lease renewals observed before that
+verified read are not mismatches.
+
+A precondition conflict blocks completion of the current attempt only; retry
+after a fresh read and full ownership verification. If the UID is unchanged and
+owner metadata still matches, clear ResourceVersionMismatch and use the freshly
+verified resourceVersion for the next attempt. A changed UID or invalid owner
+instead raises the corresponding repair condition and preserves the resource;
+do not use the retry to adopt a replacement. Never blindly retry, force apply or
+replace an object to bypass verification.
 
 ## Repair conditions
 
 These operator-visible conditions are consumed by `ctr-pool-status-report`.
 On mismatch, keep the resource and block completion, including deletion and
-`absenceVerified=true`, until ownership is safely resolved. Do not overwrite,
-adopt or delete a mismatching resource.
+`absenceVerified=true`, for the failed attempt. UID and ownership mismatches
+require safe ownership resolution; resourceVersion conflicts follow the fresh-read
+retry rule above. Do not overwrite, adopt or delete a mismatching resource.
 
 | Condition | Trigger and effect |
 | --- | --- |
-| `UIDMismatch` | Observed UID differs from recorded UID: keep the resource and block completion. |
-| `ResourceVersionMismatch` | Observed resourceVersion differs from the expected version, including a precondition conflict: keep the resource and block completion. |
+| `UIDMismatch` | UID changed since the ownership-verified read in this attempt: keep the resource and block completion. |
+| `ResourceVersionMismatch` | A resourceVersion precondition conflict in this attempt: keep the resource and block completion; clear after a fresh read verifies the same UID and owner, then retry using that read's resourceVersion. |
 | `OwnershipMismatch` | Bound tenant/profile/revision, owner metadata or ownership format version differs or is missing: keep the resource and block completion. |
 
 ## OCI

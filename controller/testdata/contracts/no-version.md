@@ -37,11 +37,13 @@ Contract: ctr-controller-config
 
 ## RBAC
 
+No config key widens the Role.
+
 | Access | Kind | Verbs | Scope |
 | --- | --- | --- | --- |
 | write | Deployment | get, list, watch, create, update, patch, delete | Bound pool and OCI namespaces |
 | write | Service | get, list, watch, create, update, patch, delete | Bound pool and OCI namespaces |
-| write | Lease | get, list, watch, create, update, patch, delete | controllerNamespace, the two fixed Lease names for mutations |
+| write | Lease | get, list, watch, create, update, patch, delete | controllerNamespace, create is unrestricted by name in controllerNamespace; resourceNames restricts update, patch and delete to the two fixed Lease names |
 | read | ConfigMap | get, list, watch | Authorized configuration in explicitly watched namespaces |
 | read | Secret | get | Named Secrets only via resourceNames, never credential values in reports or logs |
 | read | NetworkPolicy | get, list, watch | Bound namespaces, prerequisite inspection only |

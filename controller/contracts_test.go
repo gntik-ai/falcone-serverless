@@ -16,8 +16,9 @@ import (
 // two versioned OPS-01 contracts use this format; other contracts are independent.
 var contractsFiles = []string{"resource-ownership", "controller-config"}
 
-var contractsForbiddenToken = regexp.MustCompile(`(?i)\b(customresourcedefinitions?|crds?|clusterroles?|clusterrolebindings?|runtimeclass(?:es)?)\b`)
-var contractsSCCToken = regexp.MustCompile(`(?i)\b(sccs?|securitycontextconstraints?)\b`)
+var contractsForbiddenToken = regexp.MustCompile(`(?i)^(customresourcedefinitions?|crds?|clusterroles?|clusterrolebindings?|runtimeclass(?:es)?)$`)
+var contractsWords = regexp.MustCompile(`[\pL\pN]+`)
+var contractsSCCToken = regexp.MustCompile(`(?i)^(sccs?|securitycontextconstraints?)$`)
 
 func contractsRead(t *testing.T, relative string) string {
 	t.Helper()
@@ -64,6 +65,11 @@ func checkContracts(name, doc string) []string {
 		}
 	}
 	if name == "controller-config" {
+		for _, phrase := range []string{"No config key widens the Role.", "OCI adds no verb or kind."} {
+			if !strings.Contains(doc, phrase) {
+				reasons = append(reasons, "permission ceiling: missing "+phrase)
+			}
+		}
 		reasons = append(reasons, contractsCheckRows(sections["Prerequisites"], "Prerequisites", "Prerequisite", "Requirement", map[string][]string{
 			"namespaces": {"Preprovisioned namespaces", "namespaceMode"},
 			"gateway":    {"ingress/TLS"}, "storage": {"PostgreSQL", "object storage"}, "broker": {"Kafka"},
@@ -100,49 +106,26 @@ func checkContracts(name, doc string) []string {
 			"OwnershipMismatch":       {"keep the resource", "block completion"},
 		})...)
 	}
-	// splitSections drops the preamble. Retain it explicitly for permission tables.
-	for i, line := range strings.Split(doc, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			sections[""] = strings.Join(strings.Split(doc, "\n")[:i], "\n")
-			break
-		}
-	}
-	for section, body := range sections {
-		// Markdown permits tables without outer pipes. Normalize those lines for
-		// detection only; the canonical RBAC table still has the fixed format.
-		lines := strings.Split(body, "\n")
-		for i, line := range lines {
-			if strings.Contains(line, "|") && !strings.HasPrefix(strings.TrimSpace(line), "|") {
-				lines[i] = "| " + strings.TrimSpace(line)
-			}
-		}
-		for _, table := range parseTables(strings.Join(lines, "\n")) {
-			// Detection is case-insensitive even though the canonical table is fixed.
-			header := mdTable{header: make([]string, len(table.header))}
-			for i, value := range table.header {
-				header.header[i] = strings.ToLower(cellText(value))
-			}
-			if _, shaped := columns(header, "kind", "verbs"); shaped && (section != "RBAC" || name != "controller-config") {
-				reasons = append(reasons, "RBAC: table outside RBAC in "+section)
-			}
-		}
-	}
+	reasons = append(reasons, contractsCheckExtraRBAC(name, doc)...)
 	if name == "controller-config" {
 		reasons = append(reasons, contractsCheckRBAC(sections["RBAC"])...)
 	}
 	section := ""
 	for _, line := range strings.Split(doc, "\n") {
-		if strings.HasPrefix(line, "## ") {
-			section = strings.TrimSpace(strings.TrimPrefix(line, "## "))
+		if heading := contractsHeading.FindStringSubmatch(line); heading != nil {
+			section = ""
+			if heading[1] == "##" {
+				section = strings.TrimSpace(heading[2])
+			}
 		}
-		if section != "Forbidden" {
-			for _, token := range contractsForbiddenToken.FindAllString(line, -1) {
+		// Underscores delimit Markdown emphasis as well as token boundaries.
+		// Scan words independently so adjacent restricted tokens are all seen.
+		for _, token := range contractsWords.FindAllString(line, -1) {
+			if section != "Forbidden" && contractsForbiddenToken.MatchString(token) {
 				reasons = append(reasons, "forbidden token: "+token+" outside Forbidden")
 			}
-			if section != "Prerequisites" {
-				for _, token := range contractsSCCToken.FindAllString(line, -1) {
-					reasons = append(reasons, "SCC: token "+token+" outside Prerequisites and Forbidden")
-				}
+			if section != "Forbidden" && section != "Prerequisites" && contractsSCCToken.MatchString(token) {
+				reasons = append(reasons, "SCC: token "+token+" outside Prerequisites and Forbidden")
 			}
 		}
 	}
@@ -157,13 +140,67 @@ func checkContracts(name, doc string) []string {
 	return reasons
 }
 
+// Every ATX heading starts a new permission-scan block, even an empty title or
+// a heading at a different level. Never inherit an exception across headings.
+var contractsHeading = regexp.MustCompile(`^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$`)
+
+func contractsCheckExtraRBAC(name, doc string) []string {
+	var reasons []string
+	section := ""
+	var lines []string
+	checkBlock := func() {
+		for _, table := range parseTables(strings.Join(lines, "\n")) {
+			// Detection deliberately includes emphasized, plural and resource/verb
+			// aliases. They cannot be used to add permissions outside the fixed table.
+			header := mdTable{header: make([]string, len(table.header))}
+			for i, value := range table.header {
+				value = strings.ToLower(strings.TrimSpace(strings.Trim(cellText(value), "*_")))
+				switch value {
+				case "kinds", "resource", "resources":
+					value = "kind"
+				case "verb":
+					value = "verbs"
+				}
+				header.header[i] = value
+			}
+			if _, shaped := columns(header, "kind", "verbs"); shaped && (section != "RBAC" || name != "controller-config") {
+				reasons = append(reasons, "RBAC: table outside RBAC in "+section)
+			}
+		}
+	}
+	for _, line := range strings.Split(doc, "\n") {
+		if heading := contractsHeading.FindStringSubmatch(line); heading != nil {
+			checkBlock()
+			lines = nil
+			section = ""
+			if heading[1] == "##" {
+				section = strings.TrimSpace(heading[2])
+			}
+			continue
+		}
+		// Normalize blockquoted and pipeless Markdown tables for detection only.
+		line = strings.TrimLeft(line, "> \t")
+		if strings.Contains(line, "|") && !strings.HasPrefix(line, "|") {
+			line = "| " + line
+		}
+		lines = append(lines, line)
+	}
+	checkBlock()
+	return reasons
+}
+
 func contractsCheckRBAC(body string) []string {
+	var reasons []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.Contains(line, "|") && !strings.HasPrefix(strings.TrimSpace(line), "|") {
+			reasons = append(reasons, "RBAC: unparseable row")
+		}
+	}
 	tb, found := findTable(body, "Access")
 	cols, ok := columns(tb, "Access", "Kind", "Verbs", "Scope")
 	if !found || !ok || len(parseTables(body)) != 1 || len(tb.header) != 4 {
-		return []string{"RBAC: invalid fixed table"}
+		return append(reasons, "RBAC: invalid fixed table")
 	}
-	var reasons []string
 	seen := map[string]int{}
 	writeVerbs := []string{"create", "delete", "get", "list", "patch", "update", "watch"}
 	readVerbs := []string{"get", "list", "watch"}
@@ -190,6 +227,17 @@ func contractsCheckRBAC(body string) []string {
 			reasons = append(reasons, "RBAC: forbidden kind "+kind)
 			continue
 		}
+		scope := cell(row, cols[3])
+		wantScope := map[string]string{
+			"Deployment":    "Bound pool and OCI namespaces",
+			"Service":       "Bound pool and OCI namespaces",
+			"Lease":         "controllerNamespace, create is unrestricted by name in controllerNamespace; resourceNames restricts update, patch and delete to the two fixed Lease names",
+			"ConfigMap":     "Authorized configuration in explicitly watched namespaces",
+			"NetworkPolicy": "Bound namespaces, prerequisite inspection only",
+		}[kind]
+		if wantScope != "" && scope != wantScope {
+			reasons = append(reasons, "RBAC: invalid "+kind+" scope")
+		}
 		if cell(row, cols[0]) != wantAccess {
 			reasons = append(reasons, "RBAC: forbidden access for "+kind)
 		}
@@ -205,11 +253,6 @@ func contractsCheckRBAC(body string) []string {
 	for _, kind := range []string{"Deployment", "Service", "Lease", "ConfigMap", "Secret", "NetworkPolicy"} {
 		if seen[kind] != 1 {
 			reasons = append(reasons, "RBAC: expected exactly one "+kind)
-		}
-	}
-	for _, line := range strings.Split(body, "\n") {
-		if strings.Contains(line, "|") && !strings.HasPrefix(strings.TrimSpace(line), "|") {
-			reasons = append(reasons, "RBAC: unparseable row")
 		}
 	}
 	return reasons
@@ -394,12 +437,19 @@ func TestContractsRBAC(t *testing.T) {
 			wantError(t, checkContracts("controller-config", replaceOnce(t, doc, "| read | Secret | get |", "| read | Secret | "+verbs+" |")), "RBAC", "Secret", "verbs")
 		})
 	}
-	for _, row := range []string{
-		"| read | Namespace | get | extra |", "| write | Deployment | create |", "| unknown | Deployment | get | extra |",
-		"| read | Pod | get | extra |", "| read | Job | get | extra |", "| read | ConfigMap, Secret | get | extra |",
+	for _, tc := range []struct{ row, reason string }{
+		{"| read | Namespace | get | extra |", "RBAC: forbidden kind Namespace"},
+		{"| write | Deployment | create |", "RBAC: unparseable row Deployment"},
+		{"| write | Deployment | get, list, watch, create, update, patch, delete | Bound pool and OCI namespaces | extra |", "RBAC: unparseable row Deployment"},
+		{"| unknown | Deployment | get | extra |", "RBAC: forbidden access for Deployment"},
+		{"| read | Pod | get | extra |", "RBAC: forbidden kind Pod"},
+		{"| read | Job | get | extra |", "RBAC: forbidden kind Job"},
+		{"| read | ConfigMap, Secret | get | extra |", "RBAC: forbidden kind ConfigMap, Secret"},
+		{"write | Deployment | create | extra", "RBAC: unparseable row"},
 	} {
-		t.Run(row, func(t *testing.T) {
-			wantError(t, checkContracts("controller-config", replaceOnce(t, doc, "\n## OCI\n", row+"\n\n## OCI\n")), "RBAC")
+		t.Run(tc.row, func(t *testing.T) {
+			mutated := replaceOnce(t, doc, row, row+"\n"+tc.row)
+			wantError(t, checkContracts("controller-config", mutated), tc.reason)
 		})
 	}
 	for _, kind := range []string{"Deployment", "Service", "Lease", "ConfigMap", "Secret", "NetworkPolicy"} {
@@ -618,4 +668,150 @@ func TestContractsCacheInvalidation(t *testing.T) {
 			})
 		}
 	}
+}
+
+// Permission scans must inspect every Markdown block, including content that the
+// shared level-two section helper intentionally discards.
+func TestContractsRBACMarkdownBoundaries(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		for _, heading := range []string{"## OCI extra", "## ", "# Appendix", "### Allowed"} {
+			for _, header := range []string{"**Kind** | **Verbs**", "__Kind__ | _Verbs_", "Kinds | Verbs", "Kind | Verb", "Resource | Verbs", "Resources | Verb"} {
+				t.Run(name+"/"+heading+"/"+header, func(t *testing.T) {
+					mutated := doc + "\n" + heading + "\n| " + header + " |\n| --- | --- |\n| Pod | create |\n"
+					wantError(t, checkContracts(name, mutated), "RBAC: table outside RBAC")
+				})
+			}
+		}
+	}
+}
+
+func TestContractsTokenMarkdownBoundaries(t *testing.T) {
+	for _, name := range contractsFiles {
+		doc := contractsRead(t, "../docs/contracts/"+name+".md")
+		for _, token := range []string{"__CRD__", "_ClusterRole_", "__clusterrolebindings__", "_runtimeclasses_", "_SCC_", "__securitycontextconstraints__", "CRD SCC ClusterRole SCC"} {
+			for _, heading := range []string{"preamble", "# Appendix", "### Allowed", "## ", "  ## Appendix"} {
+				t.Run(name+"/"+heading+"/"+token, func(t *testing.T) {
+					mutated := doc + "\n" + heading + "\n" + token + "\n"
+					if heading == "preamble" {
+						mutated = token + "\n" + doc
+					}
+					if strings.Contains(strings.ToLower(token), "scc") || strings.Contains(token, "securitycontext") {
+						wantError(t, checkContracts(name, mutated), "SCC: token")
+					}
+					if strings.Contains(strings.ToLower(token), "crd") || strings.Contains(strings.ToLower(token), "clusterrole") || strings.Contains(token, "runtimeclasses") {
+						wantError(t, checkContracts(name, mutated), "forbidden token:")
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestContractsFixedTableWidths(t *testing.T) {
+	for _, tc := range []struct{ name, key, section string }{
+		{"controller-config", "broker", "Prerequisites"},
+		{"controller-config", "metricsPort", "Configuration"},
+		{"resource-ownership", "UIDMismatch", "Repair conditions"},
+	} {
+		doc := contractsRead(t, "../docs/contracts/"+tc.name+".md")
+		for _, extra := range []string{"", " | unexpected"} {
+			t.Run(tc.section+"/"+extra, func(t *testing.T) {
+				var original string
+				for _, line := range strings.Split(doc, "\n") {
+					if strings.HasPrefix(line, "| "+tc.key+" |") || strings.HasPrefix(line, "| `"+tc.key+"` |") {
+						original = line
+						break
+					}
+				}
+				if original == "" {
+					t.Fatal("required fixture row not found")
+				}
+				row := "| " + tc.key + " |"
+				if extra != "" {
+					row = strings.TrimSuffix(original, "|") + extra + " |"
+				}
+				mutated := replaceOnce(t, doc, original, row)
+				wantError(t, checkContracts(tc.name, mutated), tc.section+": unparseable row "+tc.key)
+			})
+		}
+	}
+}
+
+func TestContractsRBACScopesAndCeiling(t *testing.T) {
+	doc := contractsRead(t, "../docs/contracts/controller-config.md")
+	for _, tc := range []struct{ kind, scope string }{
+		{"Deployment", "Bound pool and OCI namespaces"},
+		{"Service", "Bound pool and OCI namespaces"},
+		{"Lease", "controllerNamespace"},
+		{"ConfigMap", "Authorized configuration in explicitly watched namespaces"},
+		{"NetworkPolicy", "Bound namespaces, prerequisite inspection only"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			mutated := contractsEditSection(t, doc, "RBAC", func(body string) string {
+				lines := strings.Split(body, "\n")
+				for i, line := range lines {
+					if strings.Contains(line, "| "+tc.kind+" |") {
+						if !strings.Contains(line, tc.scope) {
+							t.Fatal("expected namespaced scope not found")
+						}
+						lines[i] = replaceOnce(t, line, splitRow(line)[3], "All namespaces cluster-wide")
+						return strings.Join(lines, "\n")
+					}
+				}
+				t.Fatal("required RBAC row not found")
+				return ""
+			})
+			wantError(t, checkContracts("controller-config", mutated), "RBAC: invalid "+tc.kind+" scope")
+		})
+	}
+	for _, phrase := range []string{"No config key widens the Role.", "OCI adds no verb or kind."} {
+		t.Run(phrase, func(t *testing.T) {
+			mutated := strings.ReplaceAll(doc, phrase, "removed")
+			wantError(t, checkContracts("controller-config", mutated), "permission ceiling: missing "+phrase)
+		})
+	}
+}
+
+// These assert the published concurrency rules, not a runtime implementation:
+// DEP-03/TEN-03 will implement them later at their Kubernetes API seam.
+func TestContractsOwnershipConcurrency(t *testing.T) {
+	doc := contractsRead(t, "../docs/contracts/resource-ownership.md")
+	sections := splitSections(doc)
+	for _, tc := range []struct{ section, phrase string }{
+		{"Ownership", "No durable per-object UID/resourceVersion registry is required."},
+		{"Ownership", "After restart or failover, re-establish ownership from verified bindings, authoritative Falcone desired state and the object's full owner annotations and ownership metadata."},
+		{"Ownership", "The expected UID and resourceVersion are taken from the fresh read that passed ownership verification in the same attempt."},
+		{"Ownership", "Status updates, scaler replica writes and Lease renewals observed before that verified read are not mismatches."},
+		{"Ownership", "A precondition conflict blocks completion of the current attempt only; retry after a fresh read and full ownership verification."},
+		{"Repair conditions", "UID changed since the ownership-verified read in this attempt"},
+		{"Repair conditions", "resourceVersion precondition conflict in this attempt"},
+		{"Repair conditions", "clear after a fresh read verifies the same UID and owner, then retry using that read's resourceVersion"},
+	} {
+		t.Run(tc.section+"/"+tc.phrase, func(t *testing.T) {
+			body := strings.Join(strings.Fields(sections[tc.section]), " ")
+			if !strings.Contains(body, tc.phrase) {
+				t.Errorf("%s: missing concurrency rule %s", tc.section, tc.phrase)
+			}
+		})
+	}
+}
+
+func TestContractsLeaseCreateScope(t *testing.T) {
+	doc := contractsRead(t, "../docs/contracts/controller-config.md")
+	tb, found := findTable(splitSections(doc)["RBAC"], "Access")
+	if !found {
+		t.Fatal("missing RBAC table")
+	}
+	for _, row := range tb.rows {
+		if cell(row, 1) == "Lease" {
+			for _, phrase := range []string{"create is unrestricted by name in controllerNamespace", "resourceNames restricts update, patch and delete to the two fixed Lease names"} {
+				if !strings.Contains(cell(row, 3), phrase) {
+					t.Errorf("Lease scope missing %s", phrase)
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing Lease row")
 }
