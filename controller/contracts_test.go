@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -782,6 +783,29 @@ func TestContractsCacheInvalidation(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(controller, entry.Name()), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// main.go imports controller/internal, so the temporary module needs its
+	// non-test sources too.
+	err = filepath.WalkDir(filepath.Join(filepath.Dir(source), "internal"), func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		rel, err := filepath.Rel(filepath.Dir(source), p)
+		if err != nil {
+			return err
+		}
+		dest := filepath.Join(controller, rel)
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return err
+		}
+		body, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(dest, body, 0o600)
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, name := range contractsFiles {
 		body := contractsRead(t, "../docs/contracts/"+name+".md")

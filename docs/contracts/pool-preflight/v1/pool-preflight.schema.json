@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gntik-ai/falcone-serverless/docs/contracts/pool-preflight/v1/pool-preflight.schema.json",
+  "title": "pool-preflight/v1",
+  "description": "Local startup report of the pool controller's self-preflight. It is not ctr-pool-status-report, the per-pool report sent to Falcone. A passed result means only that the listed access checks were allowed and every prerequisite is declared; nothing here verifies that a declared prerequisite exists.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "preflight", "prerequisites"],
+  "properties": {
+    "schemaVersion": { "const": "pool-preflight/v1" },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["result", "checks"],
+      "properties": {
+        "result": { "enum": ["passed", "failed"] },
+        "configError": { "type": "string", "minLength": 1 },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["namespace", "group", "resource", "verb", "result", "reason"],
+            "properties": {
+              "namespace": { "type": "string", "minLength": 1 },
+              "group": { "type": "string" },
+              "resource": { "type": "string", "minLength": 1 },
+              "verb": { "type": "string", "minLength": 1 },
+              "name": { "type": "string", "minLength": 1 },
+              "result": { "enum": ["allowed", "denied", "error"] },
+              "reason": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "prerequisites": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "name", "state"],
+        "properties": {
+          "kind": {
+            "enum": ["namespace", "gateway", "storage", "broker", "rbac", "network-policy-enforcement", "existing-scc"]
+          },
+          "name": { "type": "string" },
+          "state": { "enum": ["declared", "missing"] }
+        },
+        "if": { "properties": { "state": { "const": "declared" } } },
+        "then": { "properties": { "name": { "minLength": 1 } } }
+      }
+    }
+  }
+}
