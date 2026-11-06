@@ -1,0 +1,651 @@
+{
+  "schemaVersion": "pool-preflight/v1",
+  "description": "Conformance reports for pool-preflight/v1. Every valid report must pass the controller's Validate; every invalid report must fail it.",
+  "valid": [
+    {
+      "name": "passed",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "failed-denied-and-error-checks",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "failed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "denied", "reason": "no RBAC policy matched" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "error", "reason": "HTTP 500" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "failed-missing-prerequisites",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "failed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "", "state": "missing" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "", "state": "missing" }
+        ]
+      }
+    },
+    {
+      "name": "failed-config-error",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "failed",
+          "configError": "namespaceMode must be preprovisioned",
+          "checks": []
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "", "state": "missing" },
+          { "kind": "gateway", "name": "", "state": "missing" },
+          { "kind": "storage", "name": "", "state": "missing" },
+          { "kind": "broker", "name": "", "state": "missing" },
+          { "kind": "rbac", "name": "", "state": "missing" },
+          { "kind": "network-policy-enforcement", "name": "", "state": "missing" },
+          { "kind": "existing-scc", "name": "", "state": "missing" }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "passed-with-denied-check",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "denied", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "passed-with-error-check",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "error", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "passed-with-missing-prerequisite",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "", "state": "missing" }
+        ]
+      }
+    },
+    {
+      "name": "passed-without-checks",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": []
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "passed-with-config-error",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ],
+          "configError": "x"
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "declared-with-blank-name",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "  ", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "unknown-prerequisite-kind",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "oci", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "unknown-check-result",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "maybe", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "wrong-schema-version",
+      "report": {
+        "schemaVersion": "pool-status/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "failed-without-cause",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "failed",
+          "checks": [
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "missing-group",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": {
+          "result": "passed",
+          "checks": [
+            { "namespace": "pool-a", "resource": "deployments", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "apps", "resource": "deployments", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "update", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "patch", "result": "allowed", "reason": "" },
+            { "namespace": "pool-a", "group": "", "resource": "services", "verb": "delete", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "get", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "list", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "watch", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "create", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-leader", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "update", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "patch", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" },
+            { "namespace": "falcone-system", "group": "coordination.k8s.io", "resource": "leases", "verb": "delete", "name": "falcone-pool-controller-scaler", "result": "allowed", "reason": "" }
+          ]
+        },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    },
+    {
+      "name": "null-checks",
+      "report": {
+        "schemaVersion": "pool-preflight/v1",
+        "preflight": { "result": "passed", "checks": null },
+        "prerequisites": [
+          { "kind": "namespace", "name": "pool-a", "state": "declared" },
+          { "kind": "namespace", "name": "falcone-system", "state": "declared" },
+          { "kind": "gateway", "name": "falcone-gateway", "state": "declared" },
+          { "kind": "storage", "name": "falcone-storage", "state": "declared" },
+          { "kind": "broker", "name": "falcone-broker", "state": "declared" },
+          { "kind": "rbac", "name": "falcone-pool-controller", "state": "declared" },
+          { "kind": "network-policy-enforcement", "name": "cni-policy", "state": "declared" },
+          { "kind": "existing-scc", "name": "falcone-restricted", "state": "declared" }
+        ]
+      }
+    }
+  ]
+}

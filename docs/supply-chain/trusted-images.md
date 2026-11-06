@@ -36,7 +36,9 @@ Both are OCI image indexes supplied by the operator in the 2026-11-01 amendment.
 The builder tag's major.minor equals the `go` directive in `controller/go.mod`.
 Build from the repository root, using `controller/Containerfile` as the build file:
 `docker build -f controller/Containerfile .`. The build stage copies only
-`controller/go.mod` and `controller/main.go` (no test files; there is no `go.sum`),
+`controller/go.mod`, `controller/main.go` and, one explicit COPY line per file, the
+non-test sources under `controller/internal` that `main.go` imports (no test files,
+no glob or directory copy; the controller is stdlib only, so there is no `go.sum`),
 sets `GOTOOLCHAIN=local` so no toolchain is downloaded, and runs
 `CGO_ENABLED=0 go build -trimpath -ldflags '-s -w'`. Only the static binary is copied
 into the runtime image. The Containerfile has no ADD instruction, no RUN after the
@@ -44,9 +46,15 @@ runtime FROM and no copy from an external image; the runtime image has no shell 
 package manager. The image runs as the numeric user `65532:65532` and its ENTRYPOINT
 is the exec-form binary `/usr/local/bin/falcone-serverless-controller`.
 
-The binary ignores arguments, so running the image with no arguments or with
-`--help` prints `falcone-serverless-controller 0.1.0` and exits 0. Real flag
-parsing and `--help` output belong to DEP-03 (#23).
+The binary ignores arguments. At start-up it runs the read-only OPS-01 preflight
+(`docs/operations/install-prerequisites.md`): it reads the values file named by
+`FALCONE_SERVERLESS_VALUES` (default `/etc/falcone-serverless/values.json`), sends
+only SelfSubjectAccessReviews to the Kubernetes API with its service account, and
+prints one `pool-preflight/v1` JSON report to stdout. It prints
+`falcone-serverless-controller 0.1.0` after the report and exits 0 only when the
+preflight passed; otherwise it exits 1 without starting. The image therefore exits 1
+outside a configured cluster, and a run job that checks it must expect that. Real
+flag parsing and `--help` output belong to DEP-03 (#23).
 
 The root `.dockerignore` excludes `docs/`, `target/` and `.git` from every build
 context. No path that `worker/Containerfile` or `controller/Containerfile` copies

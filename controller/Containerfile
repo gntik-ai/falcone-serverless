@@ -2,6 +2,8 @@ FROM docker.io/library/golang:1.26.10-trixie@sha256:a050dcceee6eb9bf110151662dfa
 ENV GOTOOLCHAIN=local
 WORKDIR /build
 COPY controller/go.mod controller/main.go ./
+COPY controller/internal/preflight/preflight.go controller/internal/preflight/values.go ./internal/preflight/
+COPY controller/internal/status/status.go ./internal/status/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags '-s -w' -o /out/falcone-serverless-controller .
 
 FROM gcr.io/distroless/static-debian13:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
