@@ -1,0 +1,331 @@
+// Package poolstatus defines ctr-pool-status-report. It does not read Kubernetes,
+// prove descendant absence, delete objects, or emit reports to Falcone.
+package poolstatus
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"slices"
+	"time"
+)
+
+const ContractRevision = "1.1"
+const (
+	UIDMismatch             = "UIDMismatch"
+	ResourceVersionMismatch = "ResourceVersionMismatch"
+	OwnershipMismatch       = "OwnershipMismatch"
+	MissingPreconditions    = "MissingPreconditions"
+	TerminationPending      = "TerminationPending"
+)
+
+var ConditionReasons = map[string]string{
+	UIDMismatch: "uid_mismatch", ResourceVersionMismatch: "resource_version_mismatch",
+	OwnershipMismatch: "ownership_mismatch", MissingPreconditions: "missing_preconditions",
+	TerminationPending: "termination_pending", "ImagePullFailed": "image_pull_failed",
+	"ContainerStartFailed": "container_start_failed", "ContractProbeFailed": "contract_probe_failed",
+	"Dematerialized": "dematerialized",
+}
+var ObjectKinds = []string{"Deployment", "Service", "Lease"}
+var RequiredReportFields = []string{"poolRef", "observedGeneration", "reporterEpoch", "observationSeq", "desiredReplicas", "readyReplicas", "revisions", "readyCapacity", "draining", "conditions", "absenceVerified", "runtimeMode"}
+var RequiredPoolRefFields = []string{"namespace", "name"}
+var RequiredRevisionFields = []string{"revision", "ready"}
+var RequiredConditionFields = []string{"type", "reason"}
+var RequiredObjectRefFields = []string{"kind", "name"}
+var RequiredDescendantFields = []string{"replicaSets", "pods"}
+var RequiredOwnedObjectFields = []string{"kind", "namespace", "name", "uid", "resourceVersion"}
+var RequiredAbsenceFields = []string{"generation", "readAt", "absent"}
+var RequiredAbsentFields = []string{"deployments", "services", "leases", "replicaSets", "pods"}
+
+// PoolRef is the authoritative, expected pool, never an observed object's name.
+type PoolRef struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
+type Revision struct {
+	Revision string `json:"revision"`
+	Ready    bool   `json:"ready"`
+}
+type ObjectRef struct {
+	Kind string `json:"kind"`
+	Name string `json:"name"`
+}
+type Descendants struct {
+	ReplicaSets int64 `json:"replicaSets"`
+	Pods        int64 `json:"pods"`
+}
+type Condition struct {
+	Type                 string       `json:"type"`
+	Reason               string       `json:"reason"`
+	ObjectRef            *ObjectRef   `json:"objectRef,omitempty"`
+	RemainingDescendants *Descendants `json:"remainingDescendants,omitempty"`
+}
+type OwnedObject struct {
+	Kind            string `json:"kind"`
+	Namespace       string `json:"namespace"`
+	Name            string `json:"name"`
+	UID             string `json:"uid"`
+	ResourceVersion string `json:"resourceVersion"`
+}
+type Absent struct {
+	Deployments bool `json:"deployments"`
+	Services    bool `json:"services"`
+	Leases      bool `json:"leases"`
+	ReplicaSets bool `json:"replicaSets"`
+	Pods        bool `json:"pods"`
+}
+type VerifiedAbsence struct {
+	Revision   string `json:"revision,omitempty"`
+	Generation int64  `json:"generation"`
+	ReadAt     string `json:"readAt"`
+	Absent     Absent `json:"absent"`
+}
+type Report struct {
+	PoolRef            PoolRef           `json:"poolRef"`
+	ObservedGeneration int64             `json:"observedGeneration"`
+	ReporterEpoch      int64             `json:"reporterEpoch"`
+	ObservationSeq     int64             `json:"observationSeq"`
+	DesiredReplicas    int64             `json:"desiredReplicas"`
+	ReadyReplicas      int64             `json:"readyReplicas"`
+	Revisions          []Revision        `json:"revisions"`
+	ReadyCapacity      int64             `json:"readyCapacity"`
+	Draining           bool              `json:"draining"`
+	Conditions         []Condition       `json:"conditions"`
+	AbsenceVerified    bool              `json:"absenceVerified"`
+	RuntimeMode        string            `json:"runtimeMode"`
+	Revision           string            `json:"revision,omitempty"`
+	Materialized       *bool             `json:"materialized,omitempty"`
+	ContractRevision   string            `json:"contractRevision,omitempty"`
+	OwnedObjects       []OwnedObject     `json:"ownedObjects,omitempty"`
+	VerifiedAbsence    []VerifiedAbsence `json:"verifiedAbsence,omitempty"`
+}
+
+// field describes a wire shape, separately from the Go structs so omitted keys
+// and JSON null cannot become valid zero values during decoding.
+type field struct {
+	kind       string
+	properties map[string]field
+	required   []string
+	item       *field
+}
+
+func object(properties map[string]field, required ...string) field {
+	return field{kind: "object", properties: properties, required: required}
+}
+func array(item field) field { return field{kind: "array", item: &item} }
+
+var text = field{kind: "string"}
+var integer = field{kind: "integer"}
+var boolean = field{kind: "boolean"}
+
+func wireShape(extended bool) field {
+	condition := object(map[string]field{"type": text, "reason": text}, RequiredConditionFields...)
+	props := map[string]field{
+		"poolRef":            object(map[string]field{"namespace": text, "name": text}, RequiredPoolRefFields...),
+		"observedGeneration": integer, "reporterEpoch": integer, "observationSeq": integer,
+		"desiredReplicas": integer, "readyReplicas": integer, "readyCapacity": integer, "draining": boolean,
+		"revisions":       array(object(map[string]field{"revision": text, "ready": boolean}, RequiredRevisionFields...)),
+		"absenceVerified": boolean, "runtimeMode": text, "revision": text, "materialized": boolean,
+	}
+	if extended {
+		condition.properties["objectRef"] = object(map[string]field{"kind": text, "name": text}, RequiredObjectRefFields...)
+		condition.properties["remainingDescendants"] = object(map[string]field{"replicaSets": integer, "pods": integer}, RequiredDescendantFields...)
+		props["contractRevision"] = text
+		props["ownedObjects"] = array(object(map[string]field{"kind": text, "namespace": text, "name": text, "uid": text, "resourceVersion": text}, RequiredOwnedObjectFields...))
+		absent := map[string]field{}
+		for _, key := range RequiredAbsentFields {
+			absent[key] = boolean
+		}
+		props["verifiedAbsence"] = array(object(map[string]field{"revision": text, "generation": integer, "readAt": text, "absent": object(absent, RequiredAbsentFields...)}, RequiredAbsenceFields...))
+	}
+	props["conditions"] = array(condition)
+	return object(props, RequiredReportFields...)
+}
+func (f field) check(v any, strict bool) error {
+	switch f.kind {
+	case "object":
+		obj, ok := v.(map[string]any)
+		if !ok {
+			return errors.New("expected object")
+		}
+		for _, key := range f.required {
+			if _, ok := obj[key]; !ok {
+				return fmt.Errorf("missing %s", key)
+			}
+		}
+		for key, value := range obj {
+			child, ok := f.properties[key]
+			if !ok {
+				if strict {
+					return fmt.Errorf("unknown field %s", key)
+				}
+				continue
+			}
+			if err := child.check(value, strict); err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+		}
+	case "array":
+		list, ok := v.([]any)
+		if !ok {
+			return errors.New("expected array")
+		}
+		for _, item := range list {
+			if err := f.item.check(item, strict); err != nil {
+				return err
+			}
+		}
+	case "string":
+		if _, ok := v.(string); !ok {
+			return errors.New("expected string")
+		}
+	case "integer":
+		n, ok := v.(json.Number)
+		if !ok {
+			return errors.New("expected integer")
+		}
+		v, err := n.Float64()
+		if err != nil || math.IsInf(v, 0) || math.Trunc(v) != v {
+			return errors.New("expected integer")
+		}
+	case "boolean":
+		if _, ok := v.(bool); !ok {
+			return errors.New("expected boolean")
+		}
+	}
+	return nil
+}
+
+// ValidateJSON validates required keys, wire types, and revision-specific rules.
+// Without contractRevision, v1 accepts unknown fields and condition values.
+func ValidateJSON(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var doc map[string]any
+	if err := dec.Decode(&doc); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errors.New("trailing JSON data")
+	}
+	rev, extended := doc["contractRevision"]
+	if extended && rev != ContractRevision {
+		return errors.New("unsupported contractRevision")
+	}
+	if err := wireShape(extended).check(doc, extended); err != nil {
+		return err
+	}
+	// OCI-only keys are forbidden by presence in Wasm reports, even when their
+	// values would decode to an empty Go string.
+	if doc["runtimeMode"] == "wasm" {
+		for _, key := range []string{"revision", "materialized"} {
+			if _, ok := doc[key]; ok {
+				return errors.New("Wasm cannot carry OCI fields")
+			}
+		}
+		if extended {
+			if entries, ok := doc["verifiedAbsence"].([]any); ok {
+				for _, entry := range entries {
+					if _, ok := entry.(map[string]any)["revision"]; ok {
+						return errors.New("Wasm absence cannot carry revision")
+					}
+				}
+			}
+		}
+	}
+	// Unknown extension fields in v1 are ignored, including their wire types.
+	if !extended {
+		for _, key := range []string{"ownedObjects", "verifiedAbsence"} {
+			delete(doc, key)
+		}
+		for _, c := range doc["conditions"].([]any) {
+			m := c.(map[string]any)
+			delete(m, "objectRef")
+			delete(m, "remainingDescendants")
+		}
+	}
+	canonical, err := json.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	var r Report
+	if err := json.Unmarshal(canonical, &r); err != nil {
+		return err
+	}
+	return validate(r, extended)
+}
+
+// Validate checks a typed report by the same wire boundary as ValidateJSON.
+func Validate(r Report) error {
+	data, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	return ValidateJSON(data)
+}
+func blocksCompletion(typ string) bool {
+	return slices.Contains([]string{UIDMismatch, ResourceVersionMismatch, OwnershipMismatch, MissingPreconditions, TerminationPending}, typ)
+}
+func validate(r Report, extended bool) error {
+	switch r.RuntimeMode {
+	case "oci":
+		if r.Materialized == nil || len(r.Revisions) != 1 || r.Revision == "" || r.Revisions[0].Revision != r.Revision {
+			return errors.New("OCI requires materialized and one matching revision")
+		}
+	case "wasm":
+		if r.Revision != "" || r.Materialized != nil {
+			return errors.New("Wasm cannot carry OCI fields")
+		}
+	default:
+		return errors.New("unknown runtimeMode")
+	}
+	if !extended {
+		return nil
+	}
+	for _, c := range r.Conditions {
+		reason, ok := ConditionReasons[c.Type]
+		if !ok || reason != c.Reason {
+			return errors.New("unknown condition type or reason")
+		}
+		if r.AbsenceVerified && blocksCompletion(c.Type) {
+			return errors.New("condition blocks verified absence")
+		}
+		if c.ObjectRef != nil && (!slices.Contains(ObjectKinds, c.ObjectRef.Kind) || c.ObjectRef.Name == "") {
+			return errors.New("invalid objectRef")
+		}
+		if c.Type == TerminationPending {
+			d := c.RemainingDescendants
+			if d == nil || d.ReplicaSets < 0 || d.Pods < 0 || (d.ReplicaSets == 0 && d.Pods == 0) {
+				return errors.New("TerminationPending requires remaining descendants")
+			}
+		} else if c.RemainingDescendants != nil {
+			return errors.New("remainingDescendants requires TerminationPending")
+		}
+	}
+	for _, o := range r.OwnedObjects {
+		if !slices.Contains(ObjectKinds, o.Kind) || o.Namespace == "" || o.Name == "" || o.UID == "" || o.ResourceVersion == "" {
+			return errors.New("incomplete owned object")
+		}
+	}
+	if r.AbsenceVerified && len(r.VerifiedAbsence) == 0 {
+		return errors.New("absenceVerified requires verifiedAbsence")
+	}
+	for _, a := range r.VerifiedAbsence {
+		if a.Generation < 0 {
+			return errors.New("negative absence generation")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, a.ReadAt); err != nil {
+			return errors.New("invalid readAt")
+		}
+		if (r.RuntimeMode == "oci" && a.Revision != r.Revision) || (r.RuntimeMode == "wasm" && a.Revision != "") {
+			return errors.New("absence revision differs from pool")
+		}
+		if !a.Absent.Deployments || !a.Absent.Services || !a.Absent.Leases || !a.Absent.ReplicaSets || !a.Absent.Pods {
+			return errors.New("every scoped resource must be absent")
+		}
+	}
+	return nil
+}

@@ -1,0 +1,1383 @@
+{
+  "valid": [
+    {
+      "name": "UIDMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "ResourceVersionMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "ResourceVersionMismatch",
+            "reason": "resource_version_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "OwnershipMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "OwnershipMismatch",
+            "reason": "ownership_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "MissingPreconditions",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "MissingPreconditions",
+            "reason": "missing_preconditions",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "TerminationPending",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "TerminationPending",
+            "reason": "termination_pending",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            },
+            "remainingDescendants": {
+              "replicaSets": 1,
+              "pods": 2
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "ImagePullFailed",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "ImagePullFailed",
+            "reason": "image_pull_failed",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "ownedObjects": [
+          {
+            "kind": "Deployment",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-uid",
+            "resourceVersion": "123"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ContainerStartFailed",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "ContainerStartFailed",
+            "reason": "container_start_failed",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "ownedObjects": [
+          {
+            "kind": "Deployment",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-uid",
+            "resourceVersion": "123"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ContractProbeFailed",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "ContractProbeFailed",
+            "reason": "contract_probe_failed",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "ownedObjects": [
+          {
+            "kind": "Deployment",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-uid",
+            "resourceVersion": "123"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Dematerialized",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "Dematerialized",
+            "reason": "dematerialized",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "ownedObjects": [
+          {
+            "kind": "Deployment",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-uid",
+            "resourceVersion": "123"
+          }
+        ]
+      }
+    },
+    {
+      "name": "verified-absence-wasm",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "verified-absence-oci",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            },
+            "revision": "rev-1"
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "missing-generation",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-readAt",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "missing-absent",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z"
+          }
+        ]
+      }
+    },
+    {
+      "name": "remove-deployments",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "false-deployments",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": false,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "remove-services",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "false-services",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": false,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "remove-leases",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "false-leases",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": false,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "remove-replicaSets",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "false-replicaSets",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": false,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "remove-pods",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "false-pods",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": false
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "absence-with-UIDMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "absence-with-ResourceVersionMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "ResourceVersionMismatch",
+            "reason": "resource_version_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "absence-with-OwnershipMismatch",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "OwnershipMismatch",
+            "reason": "ownership_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "absence-with-MissingPreconditions",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "MissingPreconditions",
+            "reason": "missing_preconditions",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "absence-with-TerminationPending",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "TerminationPending",
+            "reason": "termination_pending",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            },
+            "remainingDescendants": {
+              "replicaSets": 1,
+              "pods": 2
+            }
+          }
+        ],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "bare-absence",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "missing-descendants",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "TerminationPending",
+            "reason": "termination_pending",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "zero-descendants",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "TerminationPending",
+            "reason": "termination_pending",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            },
+            "remainingDescendants": {
+              "replicaSets": 0,
+              "pods": 0
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "negative-descendants",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "TerminationPending",
+            "reason": "termination_pending",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            },
+            "remainingDescendants": {
+              "replicaSets": -1,
+              "pods": 0
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "unknown-condition-type",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "Unknown",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "unknown-condition-reason",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "arbitrary free text",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "unknown-condition-message",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            },
+            "message": "foreign owner"
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1"
+      }
+    },
+    {
+      "name": "unknown-report-field",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "foreign": "unknown"
+      }
+    },
+    {
+      "name": "missing-oci-revision",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [
+          {
+            "revision": "rev-1",
+            "ready": false
+          }
+        ],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "oci",
+        "revision": "rev-1",
+        "materialized": false,
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-11-06T12:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid-read-time",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "yesterday",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

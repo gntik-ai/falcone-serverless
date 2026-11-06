@@ -2,6 +2,7 @@
 
 Contract: ctr-pool-status-report
 contractVersion: 1
+contractRevision: 1.1
 
 This is the report a namespaced pool controller sends to Falcone for DEP-03,
 implementing FR-DEP-05 (a restarted controller converges on one pool
@@ -16,10 +17,21 @@ This contract defines the report only. It does not implement emission in the
 controller or ingestion in Falcone, and it does not define
 `ctr-platform-service-identity`, `ctr-namespace-bindings`,
 `ctr-runtime-status-model` or `ctr-resource-ownership`; it references them by key.
-Report cadence, heartbeat freshness and scaling metrics are out of scope. Any
-change to this contract bumps `contractVersion` and updates the conformance
-test and its reference comparator in the same change
-(`controller/pool_status_report_contract_test.go`).
+Report cadence, heartbeat freshness and scaling metrics are out of scope. Additive
+changes take a minor `contractRevision`; breaking changes bump the integer
+`contractVersion`. Both update the conformance test and reference comparator
+(`controller/pool_status_report_contract_test.go`). This follows the additive
+versioning policy in [the inventory](falcone-contract-inventory.md).
+
+The [v1 baseline schema](pool-status/v1/pool-status.schema.json) fixes the original
+contractVersion 1 field table and allows unknown fields for old consumers. The
+[v1.1 schema](pool-status/v1.1/pool-status.schema.json) accepts v1 reports without
+`contractRevision`, and strictly checks revision `"1.1"` reports. Each directory
+contains versioned `conformance.json` examples; Go tests validate both schemas,
+all examples and the encoder, and reject removed or retyped v1 fields.
+No v1 field or condition is removed or renamed. A bare v1 `absenceVerified=true`
+remains valid for compatibility; cleanup consumers must require revision 1.1
+and its verifiedAbsence evidence before completing obligations (TEN-03.t5).
 
 ## Fields
 
@@ -51,11 +63,38 @@ status and tenant reason from the [Status mapping](#status-mapping) tables.
 | `runtimeMode` | `wasm` or `oci` | yes | tenant |
 | `revision` | string | oci | operator |
 | `materialized` | boolean | oci | operator |
+| `contractRevision` | string | no | operator |
+| `ownedObjects` | array | no | operator |
+| `ownedObjects[].kind` | string | entry | operator |
+| `ownedObjects[].namespace` | string | entry | operator |
+| `ownedObjects[].name` | string | entry | operator |
+| `ownedObjects[].uid` | string | entry | operator |
+| `ownedObjects[].resourceVersion` | string | entry | operator |
+| `conditions[].objectRef` | object | no | operator |
+| `conditions[].objectRef.kind` | string | entry | operator |
+| `conditions[].objectRef.name` | string | entry | operator |
+| `conditions[].remainingDescendants` | object | TerminationPending | operator |
+| `conditions[].remainingDescendants.replicaSets` | integer | entry | operator |
+| `conditions[].remainingDescendants.pods` | integer | entry | operator |
+| `verifiedAbsence` | array | no | operator |
+| `verifiedAbsence[].revision` | string | oci | operator |
+| `verifiedAbsence[].generation` | integer | entry | operator |
+| `verifiedAbsence[].readAt` | string | entry | operator |
+| `verifiedAbsence[].absent` | object | entry | operator |
+| `verifiedAbsence[].absent.deployments` | boolean | entry | operator |
+| `verifiedAbsence[].absent.services` | boolean | entry | operator |
+| `verifiedAbsence[].absent.leases` | boolean | entry | operator |
+| `verifiedAbsence[].absent.replicaSets` | boolean | entry | operator |
+| `verifiedAbsence[].absent.pods` | boolean | entry | operator |
 
 Notes:
 
 - `Required` is `yes` for every report. `oci` means required when
-  `runtimeMode` is `oci` and absent otherwise.
+  `runtimeMode` is `oci` and absent otherwise. `no` means optional. `entry`
+  means required whenever its containing entry or object is present.
+  `TerminationPending` requires remainingDescendants only for that condition.
+  The extension rows apply to contractRevision 1.1; v1 has only the original
+  rows through materialized. All new fields have operator visibility.
 - `revision` is the Falcone revision ID of the single revision an OCI pool
   serves. For `oci`, `revisions` holds exactly the entry named by `revision`.
   `materialized` is true while the pool's Deployment and Service exist and false
@@ -65,6 +104,75 @@ Notes:
 - `conditions[]` has no free-text message field. Condition types are listed in
   [Repair conditions](#repair-conditions) and [Status mapping](#status-mapping).
   Tenant-visible text comes only from the mapping tables, never from a report field.
+
+### Object identity and cleanup evidence
+
+`contractRevision` is the string `"1.1"`. `ownedObjects` records only verified
+pool-scoped Deployments, Services and Leases in the authoritative pool binding.
+Each identity contains the UID and resourceVersion observed after the last
+controller or scaler write. These are report values only: they never replace the
+same-attempt fresh-read preconditions of [resource ownership](resource-ownership.md).
+Never compare a reported resourceVersion to a later read as a deletion guard.
+
+Leases in both `ownedObjects` and `absent` mean pool-scoped Leases only, with the
+expected pool name. The singleton `falcone-pool-controller-leader` and
+`falcone-pool-controller-scaler` Leases are never listed or counted: they are
+controller infrastructure and will not become absent during tenant cleanup.
+
+A mismatch never echoes observed values from a possibly foreign object.
+`conditions[].objectRef`, when supplied, contains only the expected kind
+(Deployment, Service or Lease) and name derived from authoritative pool state.
+It has no UID, owner annotation, namespace or observed name. This applies even
+when truncated pool hashes collide in a shared namespace. The encoder takes a
+trusted Scope (binding, expected name and full owner annotation), ignores input
+ownedObjects, filters fresh ownership-verified observations against that scope,
+and suppresses all owned object identities while a cleanup condition blocks.
+It never sends owner annotations. Scope is not derived from observed objects.
+
+Revision 1.1 fixes the operator reason codes (these are not tenant text):
+
+| Reason | Type |
+| --- | --- |
+| uid_mismatch | UIDMismatch |
+| resource_version_mismatch | ResourceVersionMismatch |
+| ownership_mismatch | OwnershipMismatch |
+| missing_preconditions | MissingPreconditions |
+| termination_pending | TerminationPending |
+| image_pull_failed | ImagePullFailed |
+| container_start_failed | ContainerStartFailed |
+| contract_probe_failed | ContractProbeFailed |
+| dematerialized | Dematerialized |
+
+`TerminationPending` requires nonnegative `remainingDescendants.replicaSets` and
+`remainingDescendants.pods` counts with at least one nonzero count. Other
+conditions cannot carry remainingDescendants. Conditions still have no free text.
+
+Each `verifiedAbsence` entry identifies the dematerialized entry's generation,
+its OCI revision (OCI only), and an RFC 3339 fresh-read time `readAt`. Its `absent`
+object must explicitly set all five keys to true: deployments, services, leases,
+replicaSets and pods. Missing keys or false values are never absence evidence.
+The generation identifies the desired-state entry being cleaned up; the revision
+must match the OCI pool's revision. A Deployment being absent alone is not proof
+that its descendant ReplicaSets and Pods have stopped running tenant code.
+
+With contractRevision present, absenceVerified=true requires at least one
+verifiedAbsence entry and forbids UIDMismatch, ResourceVersionMismatch,
+OwnershipMismatch, MissingPreconditions and TerminationPending. Reports without
+contractRevision remain v1, including their original absenceVerified semantics.
+
+**Until a reviewed mechanism proves descendant absence, the controller must
+report absenceVerified=false.** This change grants no Pod or ReplicaSet reads,
+widens no RBAC, and implements no proof, deletion logic or emission path.
+TEN-03.t4 must settle descendant proof before any producer asserts it.
+The encoder accepts evidence from its trusted caller; validation checks its
+shape, not whether the caller actually performed fresh reads.
+
+The encoder kill switch is `Options.DisableExtensions`. It emits v1 only,
+omitting contractRevision, ownedObjects, verifiedAbsence, objectRef and
+remainingDescendants, and omitting the new MissingPreconditions and
+TerminationPending conditions. It forces absenceVerified=false even when its
+input says true. Wiring this option to controller configuration belongs to
+TEN-03.t4; ctr-controller-config and preflight are unchanged.
 
 ## Transport
 
@@ -105,6 +213,9 @@ rules and never changes stored state.
   (FR-STO-06). It must be monotonic across leader changes. If the controller
   cannot read a monotonic fencing token from its Lease, `contractVersion` must be
   bumped before it reports.
+- A changed `readAt` or `resourceVersion` is a different payload and requires
+  a new `observationSeq`. Reusing an equal key for that payload is refused as
+  a conflict. Encoding the same observation must be deterministic.
 - `observationSeq` rises with each new observation within an epoch. The design has
   no such counter, so it reuses the Lease and fencing patterns: the controller
   keeps it in memory, restarts it when `reporterEpoch` rises, and never reuses a
@@ -157,6 +268,8 @@ it owned are absent.
 | `UIDMismatch` | Keep the resource and block completion; status stays deletion_pending |
 | `ResourceVersionMismatch` | Keep the resource and block completion; status stays deletion_pending |
 | `OwnershipMismatch` | Keep the resource and block completion; status stays deletion_pending |
+| `MissingPreconditions` | Keep the resource and block completion; status stays deletion_pending |
+| `TerminationPending` | Keep the resource and block completion while descendants remain; status stays deletion_pending |
 
 ## Status mapping
 

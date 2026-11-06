@@ -139,7 +139,8 @@ func checkContracts(name, doc string) []string {
 			"UIDMismatch": {"keep the resource", "block completion", "UID changed since the ownership-verified read in this attempt"},
 			"ResourceVersionMismatch": {"keep the resource", "block completion", "resourceVersion precondition conflict in this attempt",
 				"clear after a fresh read verifies the same UID and owner", "retry using that read's resourceVersion"},
-			"OwnershipMismatch": {"keep the resource", "block completion"},
+			"OwnershipMismatch":    {"keep the resource", "block completion"},
+			"MissingPreconditions": {"keep the resource", "block completion"},
 		})...)
 	}
 	reasons = append(reasons, contractsCheckExtraRBAC(name, blocks)...)
@@ -539,7 +540,7 @@ func TestContractsOwnership(t *testing.T) {
 			wantError(t, checkContracts("resource-ownership", mutated), tc.section, tc.phrase)
 		})
 	}
-	for _, reason := range []string{"UIDMismatch", "ResourceVersionMismatch", "OwnershipMismatch"} {
+	for _, reason := range []string{"UIDMismatch", "ResourceVersionMismatch", "OwnershipMismatch", "MissingPreconditions"} {
 		t.Run(reason, func(t *testing.T) {
 			wantError(t, checkContracts("resource-ownership", dropRow(t, doc, reason)), "Repair conditions", reason)
 		})

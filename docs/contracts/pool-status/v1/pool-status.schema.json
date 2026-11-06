@@ -1,0 +1,152 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ctr-pool-status-report/v1",
+  "type": "object",
+  "properties": {
+    "poolRef": {
+      "type": "object",
+      "properties": {
+        "namespace": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "name"
+      ],
+      "additionalProperties": true
+    },
+    "observedGeneration": {
+      "type": "integer"
+    },
+    "reporterEpoch": {
+      "type": "integer"
+    },
+    "observationSeq": {
+      "type": "integer"
+    },
+    "desiredReplicas": {
+      "type": "integer"
+    },
+    "readyReplicas": {
+      "type": "integer"
+    },
+    "revisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "revision": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revision",
+          "ready"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "readyCapacity": {
+      "type": "integer"
+    },
+    "draining": {
+      "type": "boolean"
+    },
+    "conditions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "reason"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "absenceVerified": {
+      "type": "boolean"
+    },
+    "runtimeMode": {
+      "type": "string",
+      "enum": [
+        "wasm",
+        "oci"
+      ]
+    },
+    "revision": {
+      "type": "string"
+    },
+    "materialized": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "poolRef",
+    "observedGeneration",
+    "reporterEpoch",
+    "observationSeq",
+    "desiredReplicas",
+    "readyReplicas",
+    "revisions",
+    "readyCapacity",
+    "draining",
+    "conditions",
+    "absenceVerified",
+    "runtimeMode"
+  ],
+  "additionalProperties": true,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "runtimeMode": {
+            "const": "oci"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "revision",
+          "materialized"
+        ],
+        "properties": {
+          "revisions": {
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      },
+      "else": {
+        "not": {
+          "anyOf": [
+            {
+              "required": [
+                "revision"
+              ]
+            },
+            {
+              "required": [
+                "materialized"
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
