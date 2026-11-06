@@ -37,7 +37,7 @@ Contract: ctr-controller-config
 
 ## RBAC
 
-No config key widens the Role.
+No config key widens the Role. OCI adds no verb or kind.
 
 | Access | Kind | Verbs | Scope |
 | --- | --- | --- | --- |
