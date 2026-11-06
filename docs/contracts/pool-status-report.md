@@ -166,6 +166,8 @@ widens no RBAC, and implements no proof, deletion logic or emission path.
 TEN-03.t4 must settle descendant proof before any producer asserts it.
 The encoder accepts evidence from its trusted caller; validation checks its
 shape, not whether the caller actually performed fresh reads.
+The encoder refuses to assert verified absence when an ownership-verified
+observation in the same input still identifies a live pool-scoped object.
 
 The encoder kill switch is `Options.DisableExtensions`. It emits v1 only,
 omitting contractRevision, ownedObjects, verifiedAbsence, objectRef and

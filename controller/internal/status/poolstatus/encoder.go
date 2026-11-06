@@ -93,6 +93,9 @@ func Encode(r Report, scope Scope, observed []ObservedObject, options Options) (
 		}
 		r.Conditions = conditions
 	}
+	if r.AbsenceVerified && len(r.OwnedObjects) != 0 {
+		return nil, errors.New("verified absence conflicts with observed owned objects")
+	}
 	data, err := json.Marshal(r)
 	if err != nil {
 		return nil, err

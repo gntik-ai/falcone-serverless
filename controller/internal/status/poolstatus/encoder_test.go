@@ -113,6 +113,48 @@ func TestEncoderRejectsIncompleteScope(t *testing.T) {
 	}
 }
 
+func TestEncoderRejectsVerifiedAbsenceWhileOwnedObjectsRemain(t *testing.T) {
+	var report poolstatus.Report
+	for _, raw := range readJSON(t, "v1.1/conformance.json")["valid"].([]any) {
+		fixture := raw.(map[string]any)
+		if fixture["name"] == "verified-absence-wasm" {
+			if err := json.Unmarshal(encoded(t, fixture["report"]), &report); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if !report.AbsenceVerified {
+		t.Fatal("missing verified absence fixture")
+	}
+	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: `["own-tenant","own-profile"]`}
+	for _, kind := range []string{"Deployment", "Service", "Lease"} {
+		t.Run(kind, func(t *testing.T) {
+			observed := []poolstatus.ObservedObject{{
+				OwnedObject: poolstatus.OwnedObject{
+					Kind: kind, Namespace: scope.Namespace, Name: scope.Name,
+					UID: "own-uid", ResourceVersion: "123",
+				},
+				OwnerAnnotation: scope.OwnerAnnotation,
+			}}
+			data, err := poolstatus.Encode(report, scope, observed, poolstatus.Options{})
+			if err == nil || len(data) != 0 {
+				t.Fatal("encoder asserted verified absence while an owned object remains")
+			}
+			legacy, err := poolstatus.Encode(report, scope, observed, poolstatus.Options{DisableExtensions: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var decoded poolstatus.Report
+			if err := json.Unmarshal(legacy, &decoded); err != nil {
+				t.Fatal(err)
+			}
+			if decoded.AbsenceVerified || decoded.ContractRevision != "" || len(decoded.OwnedObjects) != 0 {
+				t.Fatal("kill switch must emit v1 without asserting absence")
+			}
+		})
+	}
+}
+
 func TestEncoderRejectsForeignConditionTextWithKillSwitch(t *testing.T) {
 	for _, disable := range []bool{false, true} {
 		for _, field := range []string{"type", "reason"} {
