@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gntik-ai/falcone-serverless/controller/internal/leader"
@@ -64,6 +66,8 @@ type store struct {
 	lease     *leader.Lease
 	rev       int
 	writes    int
+	reads     int
+	onUpdate  func()
 	fail      bool
 	conflict  func()
 	onGet     func()
@@ -80,6 +84,7 @@ func copyLease(l leader.Lease) leader.Lease {
 func (s *store) Get(context.Context) (leader.Lease, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reads++
 	if s.onGet != nil {
 		s.onGet()
 	}
@@ -90,6 +95,15 @@ func (s *store) Get(context.Context) (leader.Lease, error) {
 		return leader.Lease{}, leader.ErrNotFound
 	}
 	return copyLease(*s.lease), nil
+}
+func (s *store) normalizeTimes(l *leader.Lease) {
+	if s.normalize {
+		for _, stamp := range []*string{&l.Spec.AcquireTime, &l.Spec.RenewTime} {
+			if parsed, err := time.Parse(time.RFC3339Nano, *stamp); err == nil {
+				*stamp = parsed.Truncate(time.Microsecond).UTC().Format("2006-01-02T15:04:05.000000Z07:00")
+			}
+		}
+	}
 }
 func (s *store) Create(_ context.Context, l leader.Lease) (leader.Lease, error) {
 	s.mu.Lock()
@@ -102,13 +116,7 @@ func (s *store) Create(_ context.Context, l leader.Lease) (leader.Lease, error) 
 	}
 	s.rev++
 	l.Metadata.ResourceVersion = strconv.Itoa(s.rev)
-	if s.normalize {
-		for _, stamp := range []*string{&l.Spec.AcquireTime, &l.Spec.RenewTime} {
-			if parsed, err := time.Parse(time.RFC3339Nano, *stamp); err == nil {
-				*stamp = parsed.Truncate(time.Microsecond).UTC().Format("2006-01-02T15:04:05.000000Z07:00")
-			}
-		}
-	}
+	s.normalizeTimes(&l)
 	s.lease = &l
 	s.writes++
 	if s.onCreate != nil {
@@ -133,15 +141,12 @@ func (s *store) Update(_ context.Context, l leader.Lease) (leader.Lease, error) 
 	}
 	s.rev++
 	l.Metadata.ResourceVersion = strconv.Itoa(s.rev)
-	if s.normalize {
-		for _, stamp := range []*string{&l.Spec.AcquireTime, &l.Spec.RenewTime} {
-			if parsed, err := time.Parse(time.RFC3339Nano, *stamp); err == nil {
-				*stamp = parsed.Truncate(time.Microsecond).UTC().Format("2006-01-02T15:04:05.000000Z07:00")
-			}
-		}
-	}
+	s.normalizeTimes(&l)
 	s.lease = &l
 	s.writes++
+	if s.onUpdate != nil {
+		s.onUpdate()
+	}
 	return copyLease(l), nil
 }
 func elector(t *testing.T, s *store, c *fakeClock, id string) *leader.Elector {
@@ -272,30 +277,45 @@ func TestReleaseHandoverAndRestartEpoch(t *testing.T) {
 	}
 }
 func TestForeignOwnershipNeverAdopted(t *testing.T) {
-	for _, edit := range []func(*leader.Lease){func(l *leader.Lease) { l.Metadata.Labels = nil }, func(l *leader.Lease) { l.Metadata.Annotations = nil }, func(l *leader.Lease) { l.Metadata.Annotations["falcone.ai/owner"] = `["pool-a","leader"]` }, func(l *leader.Lease) { l.Metadata.Annotations["falcone.ai/ownership-version"] = "2" }} {
-		c := clock()
-		s := &store{}
-		a := elector(t, s, c, "a")
-		a.Tick(context.Background())
-		edit(s.lease)
-		c.advance(time.Hour)
-		var logs []string
-		b, err := leader.New(leader.Config{Namespace: "release", Identity: "b", LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, s, c, func(s string) { logs = append(logs, s) })
-		if err != nil {
-			t.Fatal(err)
-		}
-		b.Tick(context.Background())
-		c.advance(time.Hour)
-		b.Tick(context.Background())
-		if s.writes != 1 {
-			t.Fatal("adopted foreign lease")
-		}
-		if _, ok := b.Gate().Epoch(); ok {
-			t.Fatal("unverified leadership")
-		}
-		if len(logs) != 2 || logs[0] != "leader lease ownership unverified" {
-			t.Fatal(logs)
-		}
+	for name, edit := range map[string]func(*leader.Lease){
+		"label":           func(l *leader.Lease) { l.Metadata.Labels = nil },
+		"annotations":     func(l *leader.Lease) { l.Metadata.Annotations = nil },
+		"owner namespace": func(l *leader.Lease) { l.Metadata.Annotations["falcone.ai/owner"] = `["pool-a","leader"]` },
+		"scaler duty":     func(l *leader.Lease) { l.Metadata.Annotations["falcone.ai/owner"] = `["release","scaler"]` },
+		"version":         func(l *leader.Lease) { l.Metadata.Annotations["falcone.ai/ownership-version"] = "2" },
+		"name":            func(l *leader.Lease) { l.Metadata.Name = "falcone-pool-controller-scaler" },
+		"namespace":       func(l *leader.Lease) { l.Metadata.Namespace = "pool-a" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := clock()
+			s := &store{}
+			a := elector(t, s, c, "a")
+			a.Tick(context.Background())
+			g := a.Gate()
+			edit(s.lease)
+			a.Tick(context.Background()) // Still before the local renew deadline.
+			if _, ok := g.Epoch(); ok || g.Context().Err() == nil || s.writes != 1 {
+				t.Fatal("current holder retained authority after ownership became unverified")
+			}
+			c.advance(time.Hour)
+			var logs []string
+			b, err := leader.New(leader.Config{Namespace: "release", Identity: "b", LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, s, c, func(s string) { logs = append(logs, s) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Tick(context.Background())
+			c.advance(time.Hour)
+			b.Tick(context.Background())
+			if s.writes != 1 {
+				t.Fatal("adopted foreign lease")
+			}
+			if _, ok := b.Gate().Epoch(); ok {
+				t.Fatal("unverified leadership")
+			}
+			if len(logs) != 2 || logs[0] != "leader lease ownership unverified" || logs[1] != logs[0] {
+				t.Fatal(logs)
+			}
+		})
 	}
 }
 func TestConflictRereadsAndStepsDown(t *testing.T) {
@@ -304,11 +324,15 @@ func TestConflictRereadsAndStepsDown(t *testing.T) {
 	a := elector(t, s, c, "a")
 	a.Tick(context.Background())
 	g := a.Gate()
+	reads := s.reads
 	s.conflict = func() { s.lease.Spec.HolderIdentity = "foreign"; s.lease.Spec.LeaseTransitions++ }
 	c.advance(time.Second)
 	a.Tick(context.Background())
 	if _, ok := g.Epoch(); ok {
 		t.Fatal("conflict retained leadership")
+	}
+	if s.reads != reads+2 {
+		t.Fatal("conflict did not immediately re-read the Lease")
 	}
 	if s.writes != 1 {
 		t.Fatal("conflict forced write")
@@ -451,48 +475,48 @@ func TestFailedReleasePreservesLeaseUntilExpiry(t *testing.T) {
 }
 
 func TestReplacementLeaseDoesNotOverlapCancelledDuties(t *testing.T) {
-	c := clock()
-	c.waits = make(chan time.Duration, 10)
-	s := &store{}
-	gets := 0
-	s.onGet = func() {
-		gets++
-		if gets == 2 {
-			s.lease = nil
+	synctest.Test(t, func(t *testing.T) {
+		c := clock()
+		c.waits = make(chan time.Duration, 10)
+		s := &store{}
+		gets := 0
+		s.onGet = func() {
+			gets++
+			if gets == 2 {
+				s.lease = nil
+			}
 		}
-	}
-	a := elector(t, s, c, "a")
-	ctx, cancel := context.WithCancel(context.Background())
-	var starts atomic.Int32
-	unblock := make(chan struct{})
-	finished := make(chan struct{})
-	started := make(chan struct{}, 2)
-	go func() {
-		a.Run(ctx, func(ctx context.Context, _ *leader.Gate) {
-			starts.Add(1)
-			started <- struct{}{}
-			<-ctx.Done()
-			<-unblock
-		})
-		close(finished)
-	}()
-	await(t, started)
-	<-c.waits
-	c.advance(2 * time.Second)
-	<-c.waits
-	// The second retry means the replacement has been handled; yield to duties.
-	for i := 0; i < 100; i++ {
-		time.Sleep(time.Microsecond)
-	}
-	count := starts.Load()
-	cancel()
-	<-c.waits
-	c.advance(10 * time.Second)
-	await(t, finished)
-	close(unblock)
-	if count != 1 {
-		t.Fatalf("started %d overlapping duties after Lease replacement", count)
-	}
+		a := elector(t, s, c, "a")
+		ctx, cancel := context.WithCancel(context.Background())
+		var starts atomic.Int32
+		unblock := make(chan struct{})
+		finished := make(chan struct{})
+		started := make(chan struct{}, 2)
+		go func() {
+			a.Run(ctx, func(ctx context.Context, _ *leader.Gate) {
+				starts.Add(1)
+				started <- struct{}{}
+				<-ctx.Done()
+				<-unblock
+			})
+			close(finished)
+		}()
+		await(t, started)
+		<-c.waits
+		c.advance(2 * time.Second)
+		<-c.waits
+		// Wait until every duty goroutine has either started or blocked.
+		synctest.Wait()
+		count := starts.Load()
+		cancel()
+		<-c.waits
+		c.advance(10 * time.Second)
+		await(t, finished)
+		close(unblock)
+		if count != 1 {
+			t.Fatalf("started %d overlapping duties after Lease replacement", count)
+		}
+	})
 }
 
 func TestTwoRunningInstancesOnlyLeaderReconcilesAndPublishes(t *testing.T) {
@@ -565,6 +589,13 @@ func TestGateChecksClockWhenWatchdogIsDelayed(t *testing.T) {
 	}
 }
 
+func TestNilGateHasNoDutyAuthority(t *testing.T) {
+	var g *leader.Gate
+	if _, ok := g.Epoch(); ok || g.Context().Err() == nil {
+		t.Fatal("absent gate must deny authority and provide a cancelled duty context")
+	}
+}
+
 func TestKubernetesMicroTimeResponsesPermitAcquisitionAndRenewal(t *testing.T) {
 	c := clock()
 	c.now = c.now.Add(123456789 * time.Nanosecond)
@@ -626,6 +657,47 @@ func TestStandbyWaitsFullDurationFromLastObservedRenewal(t *testing.T) {
 	}
 }
 
+func TestDeletedLeaseWaitsForLastObservedHolderToExpire(t *testing.T) {
+	c := clock()
+	s := &store{}
+	a := elector(t, s, c, "a")
+	b := elector(t, s, c, "b")
+	ctx := context.Background()
+	a.Tick(ctx)
+	b.Tick(ctx)
+	c.advance(2 * time.Second)
+	a.Tick(ctx)
+	c.advance(2 * time.Second)
+	b.Tick(ctx) // Observe a renewal at t=4, independently of its remote timestamp.
+	old := a.Gate()
+	n := epoch(t, a)
+	s.lease = nil
+	c.advance(time.Second)
+	b.Tick(ctx)
+	if _, ok := old.Epoch(); !ok {
+		t.Fatal("reproduction requires the partitioned holder's gate to remain open")
+	}
+	if _, ok := b.Gate().Epoch(); ok {
+		t.Fatal("deleted Lease opened a second gate before the observed holder expired")
+	}
+	if s.writes != 2 || s.lease != nil {
+		t.Fatal("standby created a replacement while the old holder could still write")
+	}
+	c.advance(13 * time.Second) // t=18: only 14s since the observation.
+	b.Tick(ctx)
+	if s.writes != 2 || s.lease != nil {
+		t.Fatal("404 reset or bypassed the observation-based expiry wait")
+	}
+	c.advance(2 * time.Second) // Next retry after expiry at t=19.
+	b.Tick(ctx)
+	if epoch(t, b) != n+1 || s.writes != 3 {
+		t.Fatal("replacement did not acquire within leaseDuration + retryPeriod with a fresh epoch")
+	}
+	if _, ok := old.Epoch(); ok {
+		t.Fatal("replacement overlaps the old holder")
+	}
+}
+
 func TestCancelledCampaignDoesNotWriteLease(t *testing.T) {
 	for _, duringRead := range []bool{false, true} {
 		c := clock()
@@ -657,5 +729,168 @@ func TestShutdownReleasesAcquisitionConfirmedDuringCancellation(t *testing.T) {
 	a.Run(ctx, func(context.Context, *leader.Gate) { t.Error("started duties after shutdown") })
 	if s.lease == nil || s.lease.Spec.HolderIdentity != "" || s.lease.Spec.LeaseTransitions != 0 {
 		t.Fatal("shutdown left a confirmed acquisition held")
+	}
+}
+
+// A plain successful Get must revoke authority, without relying on a conflict
+// or waiting for the local watchdog.
+func TestForeignHolderOnReadImmediatelyFencesDuties(t *testing.T) {
+	c := clock()
+	s := &store{}
+	a := elector(t, s, c, "a")
+	a.Tick(context.Background())
+	g := a.Gate()
+	c.advance(time.Second)
+	s.lease.Spec.HolderIdentity = "b"
+	s.lease.Spec.LeaseTransitions++
+	a.Tick(context.Background())
+	if _, ok := g.Epoch(); ok || g.Context().Err() == nil {
+		t.Fatal("foreign holder read did not immediately fence writes and publishes")
+	}
+	if s.writes != 1 {
+		t.Fatal("wrote after observing a foreign holder")
+	}
+}
+
+func TestStaleShutdownCannotReleaseAnotherTenure(t *testing.T) {
+	t.Run("another holder acquired", func(t *testing.T) {
+		c := clock()
+		s := &store{}
+		a := elector(t, s, c, "a")
+		b := elector(t, s, c, "b")
+		ctx := context.Background()
+		a.Tick(ctx)
+		b.Tick(ctx)
+		c.advance(15 * time.Second)
+		b.Tick(ctx)
+		n := epoch(t, b)
+		writes := s.writes
+		a.Shutdown(ctx)
+		if s.writes != writes || s.lease.Spec.HolderIdentity != "b" || s.lease.Spec.LeaseTransitions != n {
+			t.Fatal("old leader released a newly acquired tenure")
+		}
+	})
+	// Isolate each guard: a foreign holder with the old epoch, and a newer
+	// epoch with the old identity, must each independently prevent release.
+	for _, sameIdentity := range []bool{false, true} {
+		t.Run(strconv.FormatBool(sameIdentity), func(t *testing.T) {
+			c := clock()
+			s := &store{}
+			a := elector(t, s, c, "a")
+			a.Tick(context.Background())
+			s.lease.Spec.HolderIdentity = "b"
+			if sameIdentity {
+				s.lease.Spec.HolderIdentity = "a"
+				s.lease.Spec.LeaseTransitions++
+			}
+			before := copyLease(*s.lease)
+			a.Shutdown(context.Background())
+			if s.writes != 1 || s.lease.Spec != before.Spec {
+				t.Fatal("stale shutdown wrote another holder or epoch's Lease")
+			}
+			if _, ok := a.Gate().Epoch(); ok {
+				t.Fatal("shutdown retained authority")
+			}
+		})
+	}
+}
+
+func TestRenewDeadlineIncludesReadAndWriteLatency(t *testing.T) {
+	for _, operation := range []string{"get", "update"} {
+		t.Run(operation, func(t *testing.T) {
+			c := clock()
+			s := &store{}
+			a := elector(t, s, c, "a")
+			a.Tick(context.Background())
+			g := a.Gate()
+			c.advance(2 * time.Second) // Renewal starts at t=2; deadline must be t=12.
+			latency := func() { c.advance(3 * time.Second) }
+			if operation == "get" {
+				s.onGet = latency
+			} else {
+				s.onUpdate = latency
+			}
+			a.Tick(context.Background()) // Completes at t=5.
+			c.advance(6 * time.Second)   // t=11.
+			if _, ok := g.Epoch(); !ok {
+				t.Fatal("renewal closed the gate early")
+			}
+			c.advance(time.Second) // t=12, not t=15.
+			if _, ok := g.Epoch(); ok || g.Context().Err() == nil {
+				t.Fatal("API latency extended the renewal deadline")
+			}
+		})
+	}
+}
+
+// This API boundary returns a different record than the write it accepted.
+type changedReplyClient struct {
+	leader.Client
+	change func(*leader.Lease)
+}
+
+func (c changedReplyClient) Create(ctx context.Context, l leader.Lease) (leader.Lease, error) {
+	result, err := c.Client.Create(ctx, l)
+	c.change(&result)
+	return result, err
+}
+func (c changedReplyClient) Update(ctx context.Context, l leader.Lease) (leader.Lease, error) {
+	result, err := c.Client.Update(ctx, l)
+	c.change(&result)
+	return result, err
+}
+
+func TestWriteResponseMustConfirmOwnedTenure(t *testing.T) {
+	for _, renew := range []bool{false, true} {
+		for name, change := range map[string]func(*leader.Lease){
+			"holder":    func(l *leader.Lease) { l.Spec.HolderIdentity = "b" },
+			"epoch":     func(l *leader.Lease) { l.Spec.LeaseTransitions++ },
+			"ownership": func(l *leader.Lease) { l.Metadata.Labels = nil },
+		} {
+			t.Run(strconv.FormatBool(renew)+"/"+name, func(t *testing.T) {
+				c := clock()
+				s := &store{}
+				alter := false
+				client := changedReplyClient{Client: s, change: func(l *leader.Lease) {
+					if alter {
+						change(l)
+					}
+				}}
+				a, err := leader.New(leader.Config{Namespace: "release", Identity: "a", LeaseDuration: 15 * time.Second, RenewDeadline: 10 * time.Second, RetryPeriod: 2 * time.Second}, client, c, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if renew {
+					a.Tick(context.Background())
+					epoch(t, a)
+					c.advance(time.Second)
+				}
+				alter = true
+				a.Tick(context.Background())
+				if _, ok := a.Gate().Epoch(); ok {
+					t.Fatal("unconfirmed write response authorized leadership")
+				}
+				if g := a.Gate(); g != nil && g.Context().Err() == nil {
+					t.Fatal("unconfirmed renewal did not cancel duties")
+				}
+			})
+		}
+	}
+}
+
+func TestEpochExhaustionNeverWritesOrAcquires(t *testing.T) {
+	c := clock()
+	s := &store{}
+	a := elector(t, s, c, "a")
+	a.Tick(context.Background())
+	s.lease.Spec.LeaseTransitions = math.MaxInt32
+	s.lease.Spec.HolderIdentity = ""
+	b := elector(t, s, c, "b")
+	b.Tick(context.Background())
+	if s.writes != 1 {
+		t.Fatal("exhausted epoch was incremented")
+	}
+	if _, ok := b.Gate().Epoch(); ok {
+		t.Fatal("acquired an exhausted epoch")
 	}
 }

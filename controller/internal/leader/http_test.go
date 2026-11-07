@@ -70,7 +70,7 @@ func TestHTTPFailuresAreBoundedAndRedacted(t *testing.T) {
 		body     string
 		location string
 	}{
-		{"missing", 404, "credential-body", ""}, {"conflict", 409, "credential-body", ""}, {"error", 500, "credential-body", ""}, {"invalid", 200, "credential-body", ""}, {"too-large", 200, strings.Repeat("x", (1<<20)+1), ""}, {"redirect", 302, "credential-body", "https://foreign.example/steal"},
+		{"missing", 404, "credential-body", ""}, {"conflict", 409, "credential-body", ""}, {"error", 500, "credential-body", ""}, {"invalid", 200, "credential-body", ""}, {"too-large", 200, `{"padding":"` + strings.Repeat("x", (1<<20)-13) + `"}`, ""}, {"redirect", 302, "credential-body", "https://foreign.example/steal"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0

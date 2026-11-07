@@ -20,6 +20,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gntik-ai/falcone-serverless/controller/internal/preflight"
@@ -686,6 +687,94 @@ func TestLeasePreflightDenialAndErrorNeverCampaign(t *testing.T) {
 	}
 }
 
+// pfLeaseAPI records forbidden traffic without aborting before the final
+// assertions. beforeGet injects external API events at the HTTP boundary.
+type pfLeaseAPI struct {
+	t                                                   *testing.T
+	base                                                http.RoundTripper
+	lease                                               map[string]any
+	gets, renewals, poolWrites, replicaChanges, deletes int
+	beforeGet                                           func()
+	unavailable                                         bool
+}
+
+func (f *pfLeaseAPI) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.URL.Path == pfSSARPath {
+		return f.base.RoundTrip(r)
+	}
+	collection := "/apis/coordination.k8s.io/v1/namespaces/" + pfController + "/leases"
+	if r.Method == http.MethodDelete {
+		f.deletes++
+	}
+	if r.Method == http.MethodPatch {
+		f.replicaChanges++
+	}
+	expectedPath := collection + "/falcone-pool-controller-leader"
+	if r.Method == http.MethodPost {
+		expectedPath = collection
+	}
+	if r.URL.Path != expectedPath {
+		f.poolWrites++
+		return nil, errors.New("unexpected pool traffic")
+	}
+	code := 200
+	switch r.Method {
+	case http.MethodGet:
+		f.gets++
+		if f.beforeGet != nil {
+			f.beforeGet()
+		}
+		if f.unavailable {
+			return nil, errors.New("API unavailable")
+		}
+		if f.lease == nil {
+			code = 404
+		}
+	case http.MethodPost, http.MethodPut:
+		if f.unavailable {
+			return nil, errors.New("API unavailable")
+		}
+		if r.Context().Err() != nil {
+			return nil, r.Context().Err()
+		}
+		var next map[string]any
+		if json.NewDecoder(r.Body).Decode(&next) != nil {
+			f.t.Fatal("invalid Lease")
+		}
+		metadata := next["metadata"].(map[string]any)
+		if r.Method == http.MethodPut && metadata["resourceVersion"] != "1" {
+			f.t.Fatal("missing resourceVersion")
+		}
+		metadata["resourceVersion"] = "1"
+		f.lease = next
+		if r.Method == http.MethodPut && next["spec"].(map[string]any)["holderIdentity"] != "" {
+			f.renewals++
+		}
+	default:
+		return nil, errors.New("unexpected Lease verb")
+	}
+	b, _ := json.Marshal(f.lease)
+	return &http.Response{StatusCode: code, Body: io.NopCloser(bytes.NewReader(b)), Header: make(http.Header)}, nil
+}
+func (f *pfLeaseAPI) requireNoPoolMutations(t *testing.T) {
+	t.Helper()
+	if f.poolWrites != 0 || f.replicaChanges != 0 || f.deletes != 0 {
+		t.Fatalf("pool writes=%d replica changes=%d deletes=%d", f.poolWrites, f.replicaChanges, f.deletes)
+	}
+}
+func requireReportAndVersion(t *testing.T, out *bytes.Buffer) {
+	t.Helper()
+	dec := json.NewDecoder(out)
+	var report status.Report
+	if dec.Decode(&report) != nil || report.Preflight.Result != status.ResultPassed {
+		t.Fatal("missing report")
+	}
+	rest, _ := io.ReadAll(io.MultiReader(dec.Buffered(), out))
+	if strings.TrimSpace(string(rest)) != "falcone-serverless-controller "+Version {
+		t.Fatalf("unexpected stdout %q", rest)
+	}
+}
+
 func TestSignalledRunReleasesLeaseAndKeepsStdoutBounded(t *testing.T) {
 	e := pfOfflineEnv(pfValues(func(m map[string]any) {
 		m["leaseDurationSeconds"] = 3
@@ -694,76 +783,26 @@ func TestSignalledRunReleasesLeaseAndKeepsStdoutBounded(t *testing.T) {
 	}))
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	base := e.client.Transport
-	var lease map[string]any
-	gets := 0
-	released := false
-	poolWrites, replicaChanges, deletes := 0, 0, 0
-	e.client.Transport = mainTransport(func(r *http.Request) (*http.Response, error) {
-		if r.URL.Path == pfSSARPath {
-			return base.RoundTrip(r)
-		}
-		if r.URL.Path != "/apis/coordination.k8s.io/v1/namespaces/"+pfController+"/leases" && r.URL.Path != "/apis/coordination.k8s.io/v1/namespaces/"+pfController+"/leases/falcone-pool-controller-leader" {
-			poolWrites++
-			if r.Method == http.MethodDelete {
-				deletes++
-			}
-			if r.Method == http.MethodPatch {
-				replicaChanges++
-			}
-			t.Fatalf("unexpected pool traffic %s", r.URL.Path)
-		}
-		code := 200
-		switch r.Method {
-		case http.MethodGet:
-			gets++
-			if gets == 2 {
-				if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
-					t.Fatal(err)
-				}
-				<-ctx.Done()
-			}
-			if lease == nil {
-				code = 404
-			}
-		case http.MethodPost, http.MethodPut:
-			if r.Context().Err() != nil {
-				return nil, r.Context().Err()
-			}
-			if err := json.NewDecoder(r.Body).Decode(&lease); err != nil {
+	fake := &pfLeaseAPI{t: t, base: e.client.Transport}
+	fake.beforeGet = func() {
+		if fake.gets == 2 {
+			if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 				t.Fatal(err)
 			}
-			metadata := lease["metadata"].(map[string]any)
-			if r.Method == http.MethodPut && metadata["resourceVersion"] != "1" {
-				t.Fatal("missing resourceVersion")
-			}
-			metadata["resourceVersion"] = "1"
-			spec := lease["spec"].(map[string]any)
-			if spec["holderIdentity"] == "" {
-				released = true
-				if spec["leaseTransitions"] != float64(0) {
-					t.Fatal("release reset epoch")
-				}
-			}
-		default:
-			t.Fatalf("unexpected Lease verb %s", r.Method)
+			<-ctx.Done()
 		}
-		data, _ := json.Marshal(lease)
-		return &http.Response{StatusCode: code, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
-	})
+	}
+	e.client.Transport = fake
 	code := run(deps{ctx: ctx, getenv: func(k string) string { return e.env[k] }, readFile: func(p string) ([]byte, error) { return e.files[p], nil }, client: e.client, stdout: &e.out, start: func() { e.out.WriteString("falcone-serverless-controller " + Version + "\n") }})
-	if code != 0 || !released || poolWrites != 0 || replicaChanges != 0 || deletes != 0 {
-		t.Fatalf("exit %d released %t pool mutations %d/%d/%d", code, released, poolWrites, replicaChanges, deletes)
+	if code != 0 || fake.lease == nil {
+		t.Fatalf("exit %d, missing Lease", code)
 	}
-	dec := json.NewDecoder(&e.out)
-	var report status.Report
-	if dec.Decode(&report) != nil || report.Preflight.Result != status.ResultPassed {
-		t.Fatal("missing report")
+	spec := fake.lease["spec"].(map[string]any)
+	if spec["holderIdentity"] != "" || spec["leaseTransitions"] != float64(0) {
+		t.Fatal("release did not preserve fencing history")
 	}
-	rest, _ := io.ReadAll(io.MultiReader(dec.Buffered(), &e.out))
-	if strings.TrimSpace(string(rest)) != "falcone-serverless-controller "+Version {
-		t.Fatalf("unexpected stdout %q", rest)
-	}
+	fake.requireNoPoolMutations(t)
+	requireReportAndVersion(t, &e.out)
 }
 
 func TestDegradedBehaviorDocumentsFourScenarios(t *testing.T) {
@@ -793,76 +832,91 @@ func TestProductionDutiesMakeNoPoolMutationsWhileDegraded(t *testing.T) {
 			defer cancel()
 			e.ctx = ctx
 			base := e.client.Transport
-			gets, renewals, poolWrites, replicaChanges, deletes := 0, 0, 0, 0, 0
-			var lease map[string]any
-			e.client.Transport = mainTransport(func(r *http.Request) (*http.Response, error) {
-				if r.URL.Path == pfSSARPath {
+			if scenario == "Failed preflight" {
+				e.client.Transport = mainTransport(func(r *http.Request) (*http.Response, error) {
 					resp, err := base.RoundTrip(r)
-					if scenario == "Failed preflight" {
-						resp.Body = io.NopCloser(strings.NewReader(`{"status":{"allowed":false}}`))
-					}
+					resp.Body = io.NopCloser(strings.NewReader(`{"status":{"allowed":false}}`))
 					return resp, err
+				})
+			}
+			fake := &pfLeaseAPI{t: t, base: e.client.Transport}
+			fake.beforeGet = func() {
+				if fake.gets == 3 {
+					cancel()
 				}
-				collection := "/apis/coordination.k8s.io/v1/namespaces/" + pfController + "/leases"
-				if r.URL.Path != collection && r.URL.Path != collection+"/falcone-pool-controller-leader" {
-					poolWrites++
-					if r.Method == http.MethodDelete {
-						deletes++
-					}
-					if r.Method == http.MethodPatch {
-						replicaChanges++
-					}
-					t.Fatalf("unexpected pool traffic %s", r.URL.Path)
+				if fake.gets >= 2 && scenario == "API server unavailable" {
+					fake.unavailable = true
 				}
-				code := 200
-				switch r.Method {
-				case http.MethodGet:
-					gets++
-					if gets == 3 {
-						cancel()
-					}
-					if lease == nil {
-						code = 404
-					} else if gets >= 2 {
-						switch scenario {
-						case "Leader loss":
-							lease["spec"].(map[string]any)["holderIdentity"] = "another-process"
-						case "API server unavailable":
-							return nil, errors.New("API unavailable")
-						}
-					}
-				case http.MethodPost, http.MethodPut:
-					if r.Context().Err() != nil {
-						return nil, r.Context().Err()
-					}
-					if json.NewDecoder(r.Body).Decode(&lease) != nil {
-						t.Fatal("invalid Lease")
-					}
-					lease["metadata"].(map[string]any)["resourceVersion"] = "1"
-					if r.Method == http.MethodPut && lease["spec"].(map[string]any)["holderIdentity"] != "" {
-						renewals++
-					}
-				default:
-					deletes++
-					t.Fatalf("unexpected Lease verb %s", r.Method)
+				if fake.lease != nil && fake.gets >= 2 && scenario == "Leader loss" {
+					fake.lease["spec"].(map[string]any)["holderIdentity"] = "another-process"
 				}
-				b, _ := json.Marshal(lease)
-				return &http.Response{StatusCode: code, Body: io.NopCloser(bytes.NewReader(b)), Header: make(http.Header)}, nil
-			})
+			}
+			e.client.Transport = fake
 			code := e.run()
 			if scenario == "Failed preflight" {
-				if code != 1 || e.calls != 0 || gets != 0 {
+				if code != 1 || e.calls != 0 || fake.gets != 0 {
 					t.Fatal("failed preflight started election")
 				}
 			} else if code != 0 {
 				t.Fatal(code)
 			}
-			if poolWrites != 0 || replicaChanges != 0 || deletes != 0 {
-				t.Fatalf("pool writes=%d replicas=%d deletes=%d", poolWrites, replicaChanges, deletes)
-			}
-			if scenario == "Stale desired state" && renewals == 0 {
+			fake.requireNoPoolMutations(t)
+			if scenario == "Stale desired state" && fake.renewals == 0 {
 				t.Fatal("stale desired state stopped Lease renewal")
 			}
 		})
 	}
+}
+
+func TestRunRotatesLeaseTokenAndLogsOnlyToStderr(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		e := pfOfflineEnv(pfValues(nil))
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		fake := &pfLeaseAPI{t: t, base: e.client.Transport}
+		fake.beforeGet = func() {
+			if fake.gets == 2 {
+				delete(fake.lease["metadata"].(map[string]any), "labels")
+			}
+			if fake.gets == 3 {
+				cancel()
+			}
+		}
+		currentToken := pfToken
+		leaseRequests, rotatedRequests := 0, 0
+		client := &http.Client{Transport: mainTransport(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") != "Bearer "+currentToken {
+				t.Fatal("main retained a token across rotation")
+			}
+			if r.URL.Path != pfSSARPath {
+				leaseRequests++
+				if currentToken != pfToken {
+					rotatedRequests++
+				}
+			}
+			resp, err := fake.RoundTrip(r)
+			if r.URL.Path != pfSSARPath {
+				currentToken += "-rotated"
+			}
+			return resp, err
+		})}
+		var stderr bytes.Buffer
+		code := run(deps{ctx: ctx, stderr: &stderr, getenv: func(k string) string { return e.env[k] },
+			readFile: func(p string) ([]byte, error) {
+				if p == pfTokenPath {
+					return []byte(currentToken), nil
+				}
+				return e.files[p], nil
+			},
+			client: client, stdout: &e.out, start: func() { e.out.WriteString("falcone-serverless-controller " + Version + "\n") },
+		})
+		if code != 0 || leaseRequests < 3 || rotatedRequests < 2 {
+			t.Fatal("did not exercise rotated Lease requests")
+		}
+		if stderr.String() != "leader lease ownership unverified\n" {
+			t.Fatalf("unexpected stderr %q", stderr.String())
+		}
+		fake.requireNoPoolMutations(t)
+		requireReportAndVersion(t, &e.out)
+	})
 }

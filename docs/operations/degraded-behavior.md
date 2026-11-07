@@ -41,11 +41,18 @@ Renewals retain the epoch. Acquisition, renewal and release use updates with the
 freshly read resourceVersion. Conflicts trigger a read, never a forced write;
 a foreign holder immediately closes the old gate. If a Lease is absent, creation
 uses the highest epoch observed by that process plus one, or zero if none.
+After observing another non-empty holder, even a missing Lease requires waiting
+that holder's full leaseDuration from the last observed record change before
+creating a replacement. Repeated missing responses do not restart this wait.
 Epoch exhaustion fails closed.
 
-Never delete the Lease manually. Deletion followed by a full process restart can
-reset leaseTransitions, and Falcone refuses lower epochs: reporting becomes stale
-but fails safe. Preserve the Lease and its epoch in recovery/restore. If history
+Never delete the Lease manually. A running standby retains the expiry wait above
+so deletion cannot bypass an observed holder's fence. A fresh process has no such
+observation history: deletion and restart while an old holder is still active can
+overlap leaders. Stop all controller instances and allow the old Lease duration
+to elapse before recovering a deleted Lease. Deletion followed by a full process
+restart can also reset leaseTransitions, and Falcone refuses lower epochs, leaving
+reporting stale. Preserve the Lease and its epoch in recovery/restore. If history
 has already been lost, restore a trusted epoch history or coordinate an audited
 Falcone fencing-state recovery with its operator; do not bypass the epoch guard
 or invent a replacement epoch in this controller.

@@ -105,7 +105,9 @@ type Gate struct {
 
 func (g *Gate) Context() context.Context {
 	if g == nil {
-		return context.Background()
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
 	}
 	return g.ctx
 }
@@ -235,6 +237,11 @@ func (e *Elector) Tick(ctx context.Context) {
 		e.observe(l)
 	} else {
 		e.gate.close()
+		// Absence does not revoke a previously observed holder's local gate.
+		// Retain its observation-based expiry even across repeated 404s.
+		if e.seen && e.observed.HolderIdentity != "" && e.observed.HolderIdentity != e.config.Identity && start.Sub(e.observedAt) < time.Duration(e.observed.LeaseDurationSeconds)*time.Second {
+			return
+		}
 		l = e.fresh()
 	}
 	_, active := e.gate.Epoch()
