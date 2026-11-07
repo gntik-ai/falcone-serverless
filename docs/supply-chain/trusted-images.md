@@ -49,10 +49,16 @@ is the exec-form binary `/usr/local/bin/falcone-serverless-controller`.
 The binary ignores arguments. At start-up it runs the read-only OPS-01 preflight
 (`docs/operations/install-prerequisites.md`): it reads the values file named by
 `FALCONE_SERVERLESS_VALUES` (default `/etc/falcone-serverless/values.json`), sends
-only SelfSubjectAccessReviews to the Kubernetes API with its service account, and
+SelfSubjectAccessReviews to the Kubernetes API with its service account, and
 prints one `pool-preflight/v1` JSON report to stdout. It prints
-`falcone-serverless-controller 0.1.0` after the report and exits 0 only when the
-preflight passed; otherwise it exits 1 without starting. The image therefore exits 1
+`falcone-serverless-controller 0.1.0` after a passed report, then runs Lease election
+until SIGTERM/SIGINT. The chart supplies `POD_NAMESPACE` through the downward API;
+it must equal `controllerNamespace`. The binary uses only get/create/update on the
+fixed leader Lease in that namespace, re-reading the projected token per request.
+Pool reconciliation and report publishing remain no-ops behind the local-clock
+write gate until DEP-03. Shutdown cancels duties, waits a bounded time, and clears
+the holder only after duties stop; then it exits 0. Election logs go to stderr.
+A failed preflight exits 1 without starting. The image therefore exits 1
 outside a configured cluster, and a run job that checks it must expect that. Real
 flag parsing and `--help` output belong to DEP-03 (#23).
 

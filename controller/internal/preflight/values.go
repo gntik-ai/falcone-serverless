@@ -8,6 +8,7 @@ import (
 	"io"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gntik-ai/falcone-serverless/controller/internal/status"
 )
@@ -22,6 +23,9 @@ var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // ctr-serverless-chart-values). Every other key is ignored. Prerequisite fields
 // hold trimmed names, empty when absent or blank.
 type Values struct {
+	LeaseDuration            time.Duration
+	RenewDeadline            time.Duration
+	RetryPeriod              time.Duration
 	WatchedPoolNamespaces    []string
 	ControllerNamespace      string
 	Gateway                  string
@@ -37,6 +41,10 @@ type namedRef struct {
 }
 
 type rawValues struct {
+	LeaseDuration         json.RawMessage `json:"leaseDurationSeconds"`
+	RenewDeadline         json.RawMessage `json:"renewDeadlineSeconds"`
+	RetryPeriod           json.RawMessage `json:"retryPeriodSeconds"`
+	LeaderLeaseName       json.RawMessage `json:"leaderElectionLeaseName"`
 	WatchedPoolNamespaces []string        `json:"watchedPoolNamespaces"`
 	ControllerNamespace   string          `json:"controllerNamespace"`
 	NamespaceMode         json.RawMessage `json:"namespaceMode"`
@@ -64,6 +72,26 @@ func ParseValues(data []byte) (Values, error) {
 		return Values{}, errors.New("values file has data after the JSON object")
 	}
 	var errs []error
+	timings := []int64{15, 10, 2}
+	for i, value := range []json.RawMessage{raw.LeaseDuration, raw.RenewDeadline, raw.RetryPeriod} {
+		if len(value) > 0 {
+			var n int64
+			if err := json.Unmarshal(value, &n); err != nil || n <= 0 || n > 300 {
+				errs = append(errs, errors.New("leader election timings must be positive integer seconds at most 300"))
+			}
+			timings[i] = n
+		}
+	}
+	if timings[0] <= timings[1] || timings[1] <= timings[2] {
+		errs = append(errs, errors.New("leader election requires leaseDurationSeconds > renewDeadlineSeconds > retryPeriodSeconds > 0"))
+	}
+	if len(raw.LeaderLeaseName) > 0 {
+		var name string
+		if json.Unmarshal(raw.LeaderLeaseName, &name) != nil || name != LeaderLeaseName {
+			errs = append(errs, errors.New("leaderElectionLeaseName must be falcone-pool-controller-leader"))
+		}
+	}
+
 	if err := checkNamespaceMode(raw.NamespaceMode); err != nil {
 		errs = append(errs, err)
 	}
@@ -88,6 +116,7 @@ func ParseValues(data []byte) (Values, error) {
 	}
 	p := raw.Prerequisites
 	return Values{
+		LeaseDuration: time.Duration(timings[0]) * time.Second, RenewDeadline: time.Duration(timings[1]) * time.Second, RetryPeriod: time.Duration(timings[2]) * time.Second,
 		WatchedPoolNamespaces:    raw.WatchedPoolNamespaces,
 		ControllerNamespace:      raw.ControllerNamespace,
 		Gateway:                  strings.TrimSpace(p.GatewayRoute.Name),
@@ -114,6 +143,9 @@ func checkNamespaceMode(raw json.RawMessage) error {
 	}
 	return nil
 }
+
+// ValidNamespace reports whether a release namespace is a DNS-1123 label.
+func ValidNamespace(ns string) bool { return validNamespace(ns) }
 
 func validNamespace(ns string) bool { return len(ns) <= 63 && dnsLabel.MatchString(ns) }
 

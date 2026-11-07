@@ -193,3 +193,17 @@ func TestMissingPrerequisitesCoversEveryKindWithEmptyNames(t *testing.T) {
 		}
 	}
 }
+
+func TestElectionTimingsFailClosed(t *testing.T) {
+	for _, field := range []string{"leaseDurationSeconds", "renewDeadlineSeconds", "retryPeriodSeconds", "leaderElectionLeaseName"} {
+		for _, value := range []any{0, -1, 301, 1.5, "wrong", nil} {
+			var m map[string]any
+			_ = json.Unmarshal([]byte(validValues), &m)
+			m[field] = value
+			data, _ := json.Marshal(m)
+			if _, err := preflight.ParseValues(data); err == nil {
+				t.Fatalf("accepted invalid %s=%v", field, value)
+			}
+		}
+	}
+}

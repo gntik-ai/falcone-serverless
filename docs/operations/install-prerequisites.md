@@ -10,7 +10,15 @@ asks the Kubernetes API, with SelfSubjectAccessReviews only, whether its own
 identity holds the verbs below, and it reports whether the values file declares
 every prerequisite. It prints one `pool-preflight/v1` JSON report to stdout. When
 the result is `failed` it exits 1 and starts nothing; when it is `passed` it
-continues. The preflight creates, updates, adopts and deletes nothing.
+continues with Lease leader election until SIGTERM/SIGINT. The preflight creates,
+updates, adopts and deletes nothing. Election uses only get/create/update on the
+fixed leader Lease in the release namespace; pool duties remain no-ops until DEP-03.
+See [degraded behavior](degraded-behavior.md) for timing and shutdown semantics.
+
+The chart must inject `POD_NAMESPACE` using the downward API `fieldRef:
+metadata.namespace`. A missing, invalid or mismatched value fails with configError
+and exit 1 before access reviews or Lease requests. This is a deployment dependency
+for gntik-ai/falcone-charts; the source repository does not render the chart.
 
 ## Values the controller reads
 
@@ -23,7 +31,11 @@ differs fails closed as a missing prerequisite.
 | Field | Meaning |
 | --- | --- |
 | `watchedPoolNamespaces` | Required explicit list of DNS-1123 namespace names, no duplicates, no `*`. |
-| `controllerNamespace` | Required DNS-1123 namespace name holding the two Leases. |
+| `controllerNamespace` | Required DNS-1123 namespace name holding the two Leases; must equal `POD_NAMESPACE`. |
+| `leaderElectionLeaseName` | Absent or `falcone-pool-controller-leader`; every other value fails closed. |
+| `leaseDurationSeconds` | Integer seconds, default 15, maximum 300. |
+| `renewDeadlineSeconds` | Integer seconds, default 10, strictly less than lease duration. |
+| `retryPeriodSeconds` | Integer seconds, default 2, strictly less than renew deadline and greater than zero. |
 | `namespaceMode` | Absent means `preprovisioned`. `create`, `shared`, a blank value and any other value fail closed before any request: neither mode is implemented. |
 | `prerequisites.gatewayRoute.name` | Name of the existing gateway route. |
 | `prerequisites.storage.name` | Name of the existing storage binding. |
