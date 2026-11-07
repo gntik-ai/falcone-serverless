@@ -297,13 +297,17 @@ is not a routing input: traffic gating uses readiness only.
 | `unavailable` | The pool has no ready capacity it should have, or a failure condition below is present |
 | `deploying` | observedGeneration is below Falcone's desired generation, or readyReplicas is below desiredReplicas with no failure condition |
 | `active` | observedGeneration equals the desired generation and readyReplicas equals desiredReplicas, including a pool scaled to zero |
-| `deletion_pending` | Falcone has recorded deletion and absenceVerified is not yet true |
+| `deletion_pending` | Falcone has recorded deletion; stays pending until contractRevision is 1.1, absenceVerified=true and nonempty verifiedAbsence evidence are present together |
 
 ### OCI conditions
 
 Conditions of an OCI pool (`runtimeMode` oci). The condition is operator-visible.
 The tenant sees the status and the tenant reason, which contains no registry path,
 pod name or node name and matches `^[a-z][a-z0-9_]*$`.
+The schema and validator accept these condition types on Wasm reports as well;
+they validate the shared condition vocabulary, not its runtime applicability.
+Producers must emit these conditions only for OCI pools, and consumers must apply
+the following mapping only when runtimeMode is oci.
 
 | Condition | Visibility | Status | Tenant reason |
 | --- | --- | --- | --- |

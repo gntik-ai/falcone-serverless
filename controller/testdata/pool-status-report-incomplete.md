@@ -90,6 +90,11 @@ Notes:
   [Repair conditions](#repair-conditions) and [Status mapping](#status-mapping).
   Tenant-visible text comes only from the mapping tables, never from a report field.
 
+These are report values only: they never replace the
+same-attempt fresh-read preconditions of resource ownership.
+Until a reviewed mechanism proves descendant absence, the controller must
+report absenceVerified=false.
+
 ## Transport
 
 The controller sends each report to Falcone as an in-cluster HTTP request. The
@@ -132,6 +137,8 @@ rules and never changes stored state.
   no such counter, so it reuses the Lease and fencing patterns: the controller
   keeps it in memory, restarts it when `reporterEpoch` rises, and never reuses a
   value within an epoch.
+- A changed `readAt` or `resourceVersion` is a different payload and requires
+  a new `observationSeq`.
 
 ## Ordering cases
 

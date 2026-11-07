@@ -187,7 +187,7 @@
         "absenceVerified": false,
         "runtimeMode": "oci",
         "revision": "rev-1",
-        "materialized": false,
+        "materialized": true,
         "contractRevision": "1.1",
         "ownedObjects": [
           {
@@ -196,6 +196,13 @@
             "name": "falcone-pool-example",
             "uid": "own-uid",
             "resourceVersion": "123"
+          },
+          {
+            "kind": "Service",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-service-uid",
+            "resourceVersion": "124"
           }
         ]
       }
@@ -233,7 +240,7 @@
         "absenceVerified": false,
         "runtimeMode": "oci",
         "revision": "rev-1",
-        "materialized": false,
+        "materialized": true,
         "contractRevision": "1.1",
         "ownedObjects": [
           {
@@ -242,6 +249,13 @@
             "name": "falcone-pool-example",
             "uid": "own-uid",
             "resourceVersion": "123"
+          },
+          {
+            "kind": "Service",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-service-uid",
+            "resourceVersion": "124"
           }
         ]
       }
@@ -279,7 +293,7 @@
         "absenceVerified": false,
         "runtimeMode": "oci",
         "revision": "rev-1",
-        "materialized": false,
+        "materialized": true,
         "contractRevision": "1.1",
         "ownedObjects": [
           {
@@ -288,6 +302,13 @@
             "name": "falcone-pool-example",
             "uid": "own-uid",
             "resourceVersion": "123"
+          },
+          {
+            "kind": "Service",
+            "namespace": "shared-runtime",
+            "name": "falcone-pool-example",
+            "uid": "own-service-uid",
+            "resourceVersion": "124"
           }
         ]
       }
@@ -326,16 +347,7 @@
         "runtimeMode": "oci",
         "revision": "rev-1",
         "materialized": false,
-        "contractRevision": "1.1",
-        "ownedObjects": [
-          {
-            "kind": "Deployment",
-            "namespace": "shared-runtime",
-            "name": "falcone-pool-example",
-            "uid": "own-uid",
-            "resourceVersion": "123"
-          }
-        ]
+        "contractRevision": "1.1"
       }
     },
     {
@@ -1479,6 +1491,36 @@
             }
           }
         ]
+      }
+    },
+    {
+      "name": "unsupported-contractRevision",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [
+          {
+            "type": "UIDMismatch",
+            "reason": "uid_mismatch",
+            "objectRef": {
+              "kind": "Deployment",
+              "name": "falcone-pool-example"
+            }
+          }
+        ],
+        "absenceVerified": false,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.2"
       }
     }
   ]

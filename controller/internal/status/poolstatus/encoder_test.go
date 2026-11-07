@@ -31,6 +31,12 @@ func TestEncoderFixturesAndIsolation(t *testing.T) {
 				// A hash collision in the shared namespace: expected name, foreign owner.
 				{OwnedObject: poolstatus.OwnedObject{Kind: "Deployment", Namespace: scope.Namespace, Name: scope.Name, UID: "other-tenant-uid", ResourceVersion: "999"}, OwnerAnnotation: `["other-tenant-owner"]`},
 			}
+			if r.RuntimeMode == "oci" && r.Materialized != nil && *r.Materialized {
+				objects = append(objects, poolstatus.ObservedObject{
+					OwnedObject:     poolstatus.OwnedObject{Kind: "Service", Namespace: scope.Namespace, Name: scope.Name, UID: "own-service-uid", ResourceVersion: "124"},
+					OwnerAnnotation: scope.OwnerAnnotation,
+				})
+			}
 			for _, name := range []string{"falcone-pool-controller-leader", "falcone-pool-controller-scaler"} {
 				objects = append(objects, poolstatus.ObservedObject{OwnedObject: poolstatus.OwnedObject{Kind: "Lease", Namespace: scope.Namespace, Name: name, UID: "singleton-uid", ResourceVersion: "5"}, OwnerAnnotation: scope.OwnerAnnotation})
 			}
@@ -39,7 +45,7 @@ func TestEncoderFixturesAndIsolation(t *testing.T) {
 					r.Conditions[i].ObjectRef.Name = "other-tenant-name"
 				}
 			}
-			if r.AbsenceVerified {
+			if r.AbsenceVerified || fixture["name"] == "Dematerialized" {
 				objects = slices.DeleteFunc(objects, func(o poolstatus.ObservedObject) bool {
 					return o.Namespace == scope.Namespace && o.Name == scope.Name
 				})
@@ -117,10 +123,7 @@ func TestEncoderFixturesAndIsolation(t *testing.T) {
 func TestEncoderCanonicalizesObservationLists(t *testing.T) {
 	for _, name := range []string{"ImagePullFailed", "verified-absence-wasm"} {
 		t.Run(name, func(t *testing.T) {
-			var r poolstatus.Report
-			if err := json.Unmarshal(encoded(t, fixtureReport(t, name)), &r); err != nil {
-				t.Fatal(err)
-			}
+			r := decodeFixtureReport(t, name)
 			r.Conditions = []poolstatus.Condition{
 				{Type: "ImagePullFailed", Reason: "image_pull_failed", ObjectRef: &poolstatus.ObjectRef{Kind: "Service", Name: "untrusted"}},
 				{Type: "ImagePullFailed", Reason: "image_pull_failed", ObjectRef: &poolstatus.ObjectRef{Kind: "Deployment", Name: "untrusted"}},
@@ -153,9 +156,65 @@ func TestEncoderCanonicalizesObservationLists(t *testing.T) {
 }
 
 func TestEncoderRejectsIncompleteScope(t *testing.T) {
-	_, err := poolstatus.Encode(poolstatus.Report{}, poolstatus.Scope{}, nil, poolstatus.Options{})
-	if err == nil || strings.Contains(err.Error(), "uid") {
-		t.Fatal("expected safe scope error")
+	for _, missing := range []string{"namespace", "name", "owner"} {
+		for _, disable := range []bool{false, true} {
+			t.Run(missing+"/disable="+strconv.FormatBool(disable), func(t *testing.T) {
+				r := decodeFixtureReport(t, "ImagePullFailed")
+				scope := poolstatus.Scope{PoolRef: r.PoolRef, OwnerAnnotation: "own-owner"}
+				switch missing {
+				case "namespace":
+					scope.Namespace = ""
+				case "name":
+					scope.Name = ""
+				case "owner":
+					scope.OwnerAnnotation = ""
+				}
+				observed := []poolstatus.ObservedObject{{
+					OwnedObject: r.OwnedObjects[0],
+					// Missing ownership must never match an incomplete trusted scope.
+					OwnerAnnotation: "",
+				}}
+				data, err := poolstatus.Encode(r, scope, observed, poolstatus.Options{DisableExtensions: disable})
+				if err == nil || len(data) != 0 || err.Error() != "authoritative pool scope is required" {
+					t.Fatal("expected safe scope error with no report", err)
+				}
+			})
+		}
+	}
+}
+
+func TestEncoderKillSwitchClearsDescendantsOnLegacyCondition(t *testing.T) {
+	r := decodeFixtureReport(t, "UIDMismatch")
+	r.Conditions[0].RemainingDescendants = &poolstatus.Descendants{ReplicaSets: 1, Pods: 2}
+	r.AbsenceVerified = true
+	scope := poolstatus.Scope{PoolRef: r.PoolRef, OwnerAnnotation: "own-owner"}
+	data, err := poolstatus.Encode(r, scope, nil, poolstatus.Options{DisableExtensions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	schema := readJSON(t, "v1/pool-status.schema.json")
+	if err := schemaError(schema, schema, doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["absenceVerified"] != false {
+		t.Fatal("kill switch asserted absence")
+	}
+	for _, key := range []string{"contractRevision", "ownedObjects", "verifiedAbsence"} {
+		if _, present := doc[key]; present {
+			t.Fatalf("kill switch emitted %s", key)
+		}
+	}
+	conditions := doc["conditions"].([]any)
+	if len(conditions) != 1 {
+		t.Fatal("kill switch must preserve the legacy repair condition")
+	}
+	c := conditions[0].(map[string]any)
+	if len(c) != 2 || c["type"] != "UIDMismatch" || c["reason"] != "uid_mismatch" {
+		t.Fatal("kill switch must emit only the v1 condition fields", c)
 	}
 }
 
@@ -163,10 +222,7 @@ func TestEncoderRejectsSingletonScope(t *testing.T) {
 	for _, name := range []string{"falcone-pool-controller-leader", "falcone-pool-controller-scaler"} {
 		for _, disable := range []bool{false, true} {
 			t.Run(name+"/disable="+strconv.FormatBool(disable), func(t *testing.T) {
-				var report poolstatus.Report
-				if err := json.Unmarshal(encoded(t, fixtureReport(t, "ImagePullFailed")), &report); err != nil {
-					t.Fatal(err)
-				}
+				report := decodeFixtureReport(t, "ImagePullFailed")
 				scope := poolstatus.Scope{PoolRef: poolstatus.PoolRef{Namespace: report.PoolRef.Namespace, Name: name}, OwnerAnnotation: "own-owner"}
 				if data, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{DisableExtensions: disable}); err == nil || len(data) != 0 {
 					t.Fatal("encoder accepted a controller singleton as pool scope")
@@ -177,10 +233,7 @@ func TestEncoderRejectsSingletonScope(t *testing.T) {
 }
 
 func TestEncoderCanonicalizesOwnedObjects(t *testing.T) {
-	var report poolstatus.Report
-	if err := json.Unmarshal(encoded(t, fixtureReport(t, "ImagePullFailed")), &report); err != nil {
-		t.Fatal(err)
-	}
+	report := decodeFixtureReport(t, "ImagePullFailed")
 	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: "own-owner"}
 	// UIDs deliberately sort differently from kinds, so UID sorting cannot mask
 	// a missing kind comparison. Each object is verified in the same shared pool.
@@ -230,10 +283,7 @@ func TestEncoderCanonicalizesOwnedObjects(t *testing.T) {
 func TestEncoderRejectsMalformedReadAt(t *testing.T) {
 	for _, readAt := range []string{"2026-01-01T1:00:00Z", "2026-01-01T00:00:00,5Z", "2026-01-01T00:00:00+24:00", "2026-02-30T00:00:00Z"} {
 		t.Run(readAt, func(t *testing.T) {
-			var report poolstatus.Report
-			if err := json.Unmarshal(encoded(t, fixtureReport(t, "verified-absence-wasm")), &report); err != nil {
-				t.Fatal(err)
-			}
+			report := decodeFixtureReport(t, "verified-absence-wasm")
 			report.VerifiedAbsence[0].ReadAt = readAt
 			scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: "own-owner"}
 			if data, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{}); err == nil || len(data) != 0 {
@@ -247,10 +297,7 @@ func TestEncoderPreservesValidReadAt(t *testing.T) {
 	schema := readJSON(t, "v1.1/pool-status.schema.json")
 	for _, readAt := range []string{"2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.123456789+05:30", "2026-01-01T23:59:59-23:59"} {
 		t.Run(readAt, func(t *testing.T) {
-			var report poolstatus.Report
-			if err := json.Unmarshal(encoded(t, fixtureReport(t, "verified-absence-wasm")), &report); err != nil {
-				t.Fatal(err)
-			}
+			report := decodeFixtureReport(t, "verified-absence-wasm")
 			report.VerifiedAbsence[0].ReadAt = readAt
 			scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: "own-owner"}
 			data, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{})
@@ -272,10 +319,7 @@ func TestEncoderPreservesValidReadAt(t *testing.T) {
 }
 
 func TestEncoderRejectsVerifiedAbsenceWhileOwnedObjectsRemain(t *testing.T) {
-	var report poolstatus.Report
-	if err := json.Unmarshal(encoded(t, fixtureReport(t, "verified-absence-wasm")), &report); err != nil {
-		t.Fatal(err)
-	}
+	report := decodeFixtureReport(t, "verified-absence-wasm")
 	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: `["own-tenant","own-profile"]`}
 	for _, kind := range []string{"Deployment", "Service", "Lease"} {
 		t.Run(kind, func(t *testing.T) {
@@ -323,10 +367,7 @@ func TestEncoderRejectsForeignConditionTextWithKillSwitch(t *testing.T) {
 }
 
 func TestEncoderRejectsAbsenceAtOccupiedPoolName(t *testing.T) {
-	var report poolstatus.Report
-	if err := json.Unmarshal(encoded(t, fixtureReport(t, "verified-absence-wasm")), &report); err != nil {
-		t.Fatal(err)
-	}
+	report := decodeFixtureReport(t, "verified-absence-wasm")
 	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: `["own-tenant","own-profile"]`}
 	for _, owner := range []string{"", `["other-tenant-owner"]`, scope.OwnerAnnotation} {
 		for _, kind := range []string{"Deployment", "Service", "Lease"} {

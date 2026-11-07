@@ -20,6 +20,40 @@ func fixtureReport(t *testing.T, name string) map[string]any {
 	return nil
 }
 
+func decodeFixtureReport(t *testing.T, name string) poolstatus.Report {
+	t.Helper()
+	var report poolstatus.Report
+	if err := json.Unmarshal(encoded(t, fixtureReport(t, name)), &report); err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+func TestOCIMaterializationFixtures(t *testing.T) {
+	for _, name := range []string{"ImagePullFailed", "ContainerStartFailed", "ContractProbeFailed", "Dematerialized"} {
+		t.Run(name, func(t *testing.T) {
+			r := fixtureReport(t, name)
+			objects, _ := r["ownedObjects"].([]any)
+			if name == "Dematerialized" {
+				if r["materialized"] != false || len(objects) != 0 {
+					t.Fatal("dematerialized example must have no live owned objects")
+				}
+				return
+			}
+			if r["materialized"] != true {
+				t.Fatal("startup failure example must show a materialized pool")
+			}
+			kinds := map[string]bool{}
+			for _, o := range objects {
+				kinds[o.(map[string]any)["kind"].(string)] = true
+			}
+			if !kinds["Deployment"] || !kinds["Service"] {
+				t.Fatal("materialized example must show both Deployment and Service")
+			}
+		})
+	}
+}
+
 func TestAbsenceRejectsContradictoryState(t *testing.T) {
 	schema := readJSON(t, "v1.1/pool-status.schema.json")
 	for _, flag := range []bool{false, true} {
@@ -169,9 +203,16 @@ func TestLegacyUnknownFieldsAndTrailingData(t *testing.T) {
 	if err := poolstatus.ValidateJSON(append(encoded(t, r), []byte(" {}")...)); err == nil {
 		t.Fatal("trailing data accepted")
 	}
+}
+
+func TestValidatorRejectsUnknownRevisionAlone(t *testing.T) {
+	r := fixtureReport(t, "UIDMismatch")
+	if err := poolstatus.ValidateJSON(encoded(t, r)); err != nil {
+		t.Fatal("control report must be valid", err)
+	}
 	r["contractRevision"] = "1.2"
 	if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
-		t.Fatal("unknown revision accepted")
+		t.Fatal("unknown revision accepted on an otherwise valid report")
 	}
 }
 

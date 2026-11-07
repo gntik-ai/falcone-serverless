@@ -29,14 +29,21 @@ var (
 
 	// Phrases a section must contain, compared after collapsing whitespace.
 	poolStatusPhrases = map[string][]string{
-		"Fields":               {"no free-text message field", "exactly the entry named by `revision`"},
-		"Transport":            {"HTTP", "gRPC"},
-		"Authentication":       {"ctr-platform-service-identity"},
-		"Authorization":        {"ctr-namespace-bindings", "never from report fields", "namespaceMode", "ADR 0011", "alone does not establish tenant ownership", "before ordering"},
-		"Generation semantics": {"observedGeneration", "reporterEpoch", "observationSeq", "Lease", "fencing", "contractVersion"},
-		"Ordering cases":       {"lexicographic"},
-		"Repair conditions":    {"absenceVerified"},
-		"Status mapping":       {"readiness only"},
+		"Fields": {
+			"no free-text message field", "exactly the entry named by `revision`",
+			"Until a reviewed mechanism proves descendant absence, the controller must report absenceVerified=false.",
+			"These are report values only: they never replace the same-attempt fresh-read preconditions",
+		},
+		"Transport":      {"HTTP", "gRPC"},
+		"Authentication": {"ctr-platform-service-identity"},
+		"Authorization":  {"ctr-namespace-bindings", "never from report fields", "namespaceMode", "ADR 0011", "alone does not establish tenant ownership", "before ordering"},
+		"Generation semantics": {
+			"observedGeneration", "reporterEpoch", "observationSeq", "Lease", "fencing", "contractVersion",
+			"A changed `readAt` or `resourceVersion` is a different payload and requires a new `observationSeq`.",
+		},
+		"Ordering cases":    {"lexicographic"},
+		"Repair conditions": {"absenceVerified"},
+		"Status mapping":    {"readiness only"},
 	}
 
 	poolStatusV1Fields = []struct{ name, typ, required string }{
@@ -687,6 +694,39 @@ const (
 func TestPoolStatusReportContract(t *testing.T) {
 	if errs := checkPoolStatusReport(poolStatusDoc(t)); len(errs) != 0 {
 		t.Fatalf("contract does not conform:\n%s", strings.Join(errs, "\n"))
+	}
+}
+
+func TestPoolStatusDeletionPendingRequiresVerifiedEvidence(t *testing.T) {
+	tb, ok := findTable(poolStatusDoc(t), "Status")
+	if !ok {
+		t.Fatal("missing status mapping")
+	}
+	for _, row := range tb.rows {
+		if cellText(row[0]) != "deletion_pending" {
+			continue
+		}
+		for _, clause := range []string{"until", "contractRevision is 1.1", "absenceVerified=true", "nonempty verifiedAbsence", "together"} {
+			if !strings.Contains(cellText(row[1]), clause) {
+				t.Errorf("deletion_pending must require revision 1.1 and verified absence together: missing %q in %q", clause, cellText(row[1]))
+			}
+		}
+		return
+	}
+	t.Fatal("missing deletion_pending mapping")
+}
+
+func TestPoolStatusReportRequiresCleanupSafetyClauses(t *testing.T) {
+	doc := poolStatusDoc(t)
+	for _, clause := range []string{
+		"Until a reviewed mechanism proves descendant absence, the controller must\nreport absenceVerified=false.",
+		"These are report values only: they never replace the\nsame-attempt fresh-read preconditions",
+		"A changed `readAt` or `resourceVersion` is a different payload and requires\n  a new `observationSeq`.",
+	} {
+		t.Run(strings.Fields(clause)[0], func(t *testing.T) {
+			mutated := replaceOnce(t, doc, clause, "elided")
+			wantError(t, checkPoolStatusReport(mutated), "missing phrase")
+		})
 	}
 }
 
