@@ -244,7 +244,10 @@ func (e *Elector) Token() (Token, bool) {
 // Run campaigns until ctx ends, then shuts down gracefully. Ticks start one
 // retry period apart, start to start: the time a tick took is part of that period
 // and never added to it, so slow requests cannot stretch the polling interval
-// that the takeover bound (leaseDuration + 2 x retryPeriod) is built on.
+// that the takeover bound (leaseDuration + 2 x retryPeriod) is built on. A
+// candidate whose observation becomes eligible sooner wakes exactly then, and
+// takes over without a further read (see campaign), so neither the poll phase
+// nor a read's latency is added to the wait after the observation.
 func (e *Elector) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		started := e.clock.Now()
@@ -254,6 +257,8 @@ func (e *Elector) Run(ctx context.Context) {
 			if rem := g.remaining(); rem < wait {
 				wait = max(rem, 0)
 			}
+		} else if until, ok := e.untilEligible(); ok && until > 0 && until < wait {
+			wait = until
 		}
 		select {
 		case <-ctx.Done():
@@ -280,6 +285,25 @@ func (e *Elector) Tick(ctx context.Context) {
 		return
 	}
 	e.campaign(ctx)
+}
+
+// eligible reports whether the stored observation of an owned Lease has stood for
+// long enough, on the local clock, to be taken over. The caller holds e.mu.
+func (e *Elector) eligible(now time.Time) (time.Duration, bool) {
+	if !e.haveObs || !owned(e.obs) || e.obs.Holder == "" {
+		return 0, false
+	}
+	return e.wait(time.Duration(e.obs.LeaseDurationSeconds)*time.Second) - now.Sub(e.obsAt), true
+}
+
+// untilEligible is how long until a candidate's observation may be taken over.
+func (e *Elector) untilEligible() (time.Duration, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.stopped || e.current.Load() != nil {
+		return 0, false
+	}
+	return e.eligible(e.clock.Now())
 }
 
 func (e *Elector) secs() int64 { return int64(e.cfg.Timings.LeaseDuration / time.Second) }
@@ -340,6 +364,14 @@ func (e *Elector) renew(ctx context.Context, g *Gate) {
 }
 
 func (e *Elector) campaign(ctx context.Context) {
+	// An observation that has already stood for the full wait is acted on without
+	// another read: the update carries its resourceVersion, so a changed record
+	// answers 409 and nothing is overwritten. This keeps the read's latency out of
+	// the time from the observation to the takeover.
+	if until, ok := e.eligible(e.clock.Now()); ok && until <= 0 {
+		e.takeOver(ctx, e.obs)
+		return
+	}
 	l, err := e.call(ctx, nil, func(c context.Context) (Lease, error) { return e.client.Get(c) })
 	now := e.clock.Now()
 	switch {
@@ -464,8 +496,12 @@ func (e *Elector) takeOver(ctx context.Context, l Lease) {
 		e.lead(got, start)
 	case errors.Is(err, ErrConflict):
 		// Another writer won; the next Get observes the new record.
+		e.haveObs = false
 	case errors.Is(err, ErrNotFound):
-		// Deleted since our Get: the next Get sees 404 and starts the barrier.
+		// Deleted since we observed it. The 404 is a successful API response, so the
+		// recovery barrier starts here, from this reading.
+		e.haveObs = false
+		e.absent(ctx, e.clock.Now())
 	default:
 		e.failure()
 	}
