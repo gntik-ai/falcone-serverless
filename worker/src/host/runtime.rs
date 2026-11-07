@@ -59,6 +59,13 @@ struct CallTicket {
 struct Permit(Arc<CallTicket>);
 
 impl CallTicket {
+    fn finished(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .finished
+    }
+
     fn detach(&self) {
         // Always lock budget before call state, as in Permit::drop.
         let mut budget = self
@@ -338,13 +345,14 @@ pub struct Host {
     memory_denied: bool,
     buffer_denied: Arc<AtomicBool>,
     interrupted: bool,
-    cancelled_call: Mutex<Option<Arc<CallTicket>>>,
+    cancelled_calls: Mutex<Vec<Arc<CallTicket>>>,
     guest_deadline: Option<Duration>,
     deadline_timer: Option<DeadlineTimer>,
     guest_memory_bytes: usize,
     guest_to_host_bytes: usize,
     host_to_guest_bytes: usize,
     call_timeout: Duration,
+    call_timeout_ceiling: Duration,
     cancelled: Arc<AtomicBool>,
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
@@ -359,7 +367,7 @@ impl Host {
             memory_denied: false,
             buffer_denied: Arc::new(AtomicBool::new(false)),
             interrupted: false,
-            cancelled_call: Mutex::new(None),
+            cancelled_calls: Mutex::new(Vec::new()),
             guest_deadline: None,
             deadline_timer: None,
             limits: StoreLimitsBuilder::new()
@@ -372,6 +380,7 @@ impl Host {
             guest_to_host_bytes: BUFFER_BYTES,
             host_to_guest_bytes: BUFFER_BYTES,
             call_timeout: Duration::from_secs(30),
+            call_timeout_ceiling: Duration::from_secs(30),
             cancelled: Arc::new(AtomicBool::new(false)),
             keys: BTreeMap::new(),
             next_handle: 0,
@@ -392,6 +401,7 @@ impl Host {
         host.host_to_guest_bytes = limits.get(Field::HostToGuestBytes) as usize;
         host.guest_deadline = Some(Duration::from_millis(limits.get(Field::GuestDeadlineMs)));
         host.call_timeout = Duration::from_millis(limits.get(Field::HostCallDeadlineMs));
+        host.call_timeout_ceiling = host.call_timeout;
         host.limits = StoreLimitsBuilder::new()
             .memory_size(host.guest_memory_bytes)
             .memories(1)
@@ -409,23 +419,29 @@ impl Host {
         } else if self.interrupted {
             Some(super::ExecutionOutcome::GuestInterrupted)
         } else {
-            self.cancelled_call
+            let calls = self
+                .cancelled_calls
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .map(|ticket| {
-                    if ticket
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .finished
-                    {
-                        super::ExecutionOutcome::HostCallCancelled
-                    } else {
-                        super::ExecutionOutcome::HostCallUncertain
-                    }
-                })
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if calls.iter().any(|ticket| !ticket.finished()) {
+                Some(super::ExecutionOutcome::HostCallUncertain)
+            } else if !calls.is_empty() {
+                Some(super::ExecutionOutcome::HostCallCancelled)
+            } else {
+                None
+            }
         }
+    }
+
+    fn record_cancelled_call(&self, ticket: &Arc<CallTicket>) {
+        let mut calls = self
+            .cancelled_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Keep every unresolved call, not just the latest. Live helper permits
+        // bound this list; finished tickets need not accumulate across calls.
+        calls.retain(|pending| !pending.finished());
+        calls.push(ticket.clone());
     }
 
     /// Only the independent blocked-host-call fixture disables guest interruption.
@@ -435,7 +451,7 @@ impl Host {
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
-        self.call_timeout = timeout.min(Duration::from_secs(30));
+        self.call_timeout = timeout.min(self.call_timeout_ceiling);
     }
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
@@ -499,29 +515,19 @@ impl Host {
         loop {
             if self.cancelled.load(Ordering::Acquire) {
                 ticket.detach();
-                *self
-                    .cancelled_call
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket.clone());
+                self.record_cancelled_call(&ticket);
                 return Err(HostError::Cancelled);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 ticket.detach();
-                *self
-                    .cancelled_call
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket.clone());
+                self.record_cancelled_call(&ticket);
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
                 Ok(reply) => {
                     if matches!(reply, Err(HostError::Timeout | HostError::Cancelled)) {
-                        *self
-                            .cancelled_call
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(ticket.clone());
+                        self.record_cancelled_call(&ticket);
                     }
                     return reply;
                 }

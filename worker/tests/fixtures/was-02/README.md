@@ -129,9 +129,10 @@ The two buffer ceilings and host-call ceiling remain owned by
 `falcone:host@0.1.0`; this contract can lower them, never raise them. The other
 ceilings make this qualification contract finite and are not RUN-02 profiles.
 `Host::new` retains the earlier 256 MiB / 1 MiB / 30 s behavior.
-`Host::with_limits` consumes an already validated contract. Its guest deadline
-requires an epoch-enabled engine, fails closed without one, starts immediately
-before instantiation, and includes guest start functions. Its timer stops and
+`Host::with_limits` consumes an already validated contract. The public timeout
+override can shorten calls, but cannot raise the validated host-call ceiling.
+The guest deadline requires an epoch-enabled engine, fails closed without one,
+starts immediately before instantiation, and includes guest start functions. Its timer stops and
 joins when the store drops. Shared-engine epoch ticks check each store's own
 wall deadline before interrupting it. The blocked-call fixture explicitly opts
 out of guest interruption through the qualification-only constructor modifier.
@@ -168,8 +169,12 @@ host-call deadline with epoch and fuel disabled and the cancellation flag unset.
 Both allow a **2000 ms scheduling tolerance**. Binding entry is observed rather
 than assumed after a sleep. The guest sees only WIT `timeout`; host evidence is
 `host-call-uncertain` while the binding remains blocked and
-`host-call-cancelled` only after helper exit/join is observed. Stalling fixtures
-serialize and release their bindings, including during assertion unwinding.
+`host-call-cancelled` only after helper exit/join is observed. Evidence stays
+uncertain for an earlier blocked call when a later timed-out binding exits;
+cancelled requires every timed-out binding to have exited. Finished tickets are
+discarded on subsequent timeouts, so evidence retention is bounded by the helper
+budget. Stalling fixtures serialize and release their bindings, including during
+assertion unwinding.
 
 The termination fixture re-execs only the trusted `current_exe`. Its embedded
 loop ignores the host cancellation flag; a pipe handshake proves the child

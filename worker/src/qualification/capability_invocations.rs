@@ -1618,7 +1618,9 @@ pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed
     }
     impl Bindings for Blocked {
         fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-            self.entered.store(true, Ordering::Release);
+            if self.entered.swap(true, Ordering::AcqRel) {
+                return Err(HostError::Timeout);
+            }
             let (lock, wake) = &self.release;
             drop(
                 wake.wait_while(lock.lock().unwrap(), |released| !*released)
@@ -1648,8 +1650,11 @@ pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed
         },
         ..Default::default()
     };
-    let host = Host::with_limits(context, binding.clone(), &execution_limits())
+    let mut host = Host::with_limits(context, binding.clone(), &execution_limits())
         .without_guest_deadline_for_qualification();
+    // The public override may shorten a call, but cannot raise the validated
+    // 100 ms contract to a more permissive deadline.
+    host.set_call_timeout(std::time::Duration::from_millis(2500));
     let cancelled = host.cancellation();
     let (mut store, instance) =
         host::instantiate(&engine, include_str!("fixtures/limits-events.wat"), host).unwrap();
@@ -1664,7 +1669,7 @@ pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed
     wait_for("blocked binding entry", || {
         binding.entered.load(Ordering::Acquire)
     });
-    let (store, result) = guest.join().unwrap();
+    let (mut store, result) = guest.join().unwrap();
     assert_eq!(result, (3,)); // WIT timeout, never success.
     assert!(start.elapsed() <= std::time::Duration::from_millis(2100));
     assert!(!cancelled.load(Ordering::Acquire));
@@ -1672,6 +1677,17 @@ pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed
         store.data().outcome(),
         Some(host::ExecutionOutcome::HostCallUncertain)
     );
+    // A later binding can exit after returning timeout while the first call is
+    // still running. Its exit must not erase the earlier uncertain evidence.
+    assert_eq!(run.call(&mut store, (0,)).unwrap(), (3,));
+    let observe_until = std::time::Instant::now() + std::time::Duration::from_millis(100);
+    while std::time::Instant::now() < observe_until {
+        assert_eq!(
+            store.data().outcome(),
+            Some(host::ExecutionOutcome::HostCallUncertain)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     drop(release);
     wait_for("binding exit observed", || {
         store.data().outcome() == Some(host::ExecutionOutcome::HostCallCancelled)
