@@ -4,6 +4,7 @@
 //! is bounded by the guest linear memory capped by the store limiter. UTF-8
 //! validation still takes CPU proportional to the guest range. No raw ABI lifting.
 use super::{Bindings, Context, HostError, Level, Operation, Pair, Reply, import_allowed};
+use crate::limits::{self, Limits};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock, Weak,
@@ -15,10 +16,11 @@ use wasmtime::component::{
     Component, ComponentType, Instance, Lift, Linker, LinkerInstance, Resource, ResourceType,
     WasmList, WasmStr,
 };
-use wasmtime::{Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
-pub const BUFFER_BYTES: usize = 1_048_576;
-pub const GUEST_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+// The ceilings of the limits contract, which a validated contract never exceeds.
+pub const BUFFER_BYTES: usize = limits::MAX_BUFFER_BYTES as usize;
+pub const GUEST_MEMORY_BYTES: usize = limits::MAX_GUEST_MEMORY_BYTES as usize;
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -160,6 +162,7 @@ struct Helper {
     operation: Option<Operation>,
     send: mpsc::SyncSender<Result<Reply, HostError>>,
     deadline: Instant,
+    buffers: super::net::Buffers,
 }
 impl Helper {
     fn run(mut self) {
@@ -170,6 +173,7 @@ impl Helper {
                 request,
                 self.deadline,
                 self.cancelled.clone(),
+                self.buffers,
             )
             .map(Reply::Http),
             operation => self.binding.call(&self.context, operation),
@@ -178,14 +182,21 @@ impl Helper {
     }
 }
 
-#[derive(Default)]
-struct Bytes(usize);
+/// Running canonical-ABI byte total for one direction, checked against that direction's limit.
+struct Bytes {
+    used: usize,
+    limit: usize,
+}
 impl Bytes {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
     fn add(&mut self, bytes: usize) -> Result<(), HostError> {
-        if !super::aggregate_within_limit(&[self.0, bytes]) {
-            return Err(HostError::LimitExceeded);
-        }
-        self.0 += bytes;
+        self.used = self
+            .used
+            .checked_add(bytes)
+            .filter(|total| *total <= self.limit)
+            .ok_or(HostError::LimitExceeded)?;
         Ok(())
     }
 }
@@ -266,7 +277,7 @@ fn preflight(
     fields: Option<&WasmList<LazyPair>>,
     overhead: usize,
 ) -> Result<(), HostError> {
-    let mut bytes = Bytes::default();
+    let mut bytes = store.data().inbound();
     bytes.add(overhead)?;
     for list in lists {
         bytes.add(4)?;
@@ -301,30 +312,93 @@ fn preflight(
     Ok(())
 }
 
+/// Store limiter that also records that the guest-memory limit stopped a growth, so a
+/// resulting trap is reported as a limit outcome rather than a generic trap.
+struct Limiter {
+    inner: StoreLimits,
+    memory_bytes: usize,
+    memory_denied: bool,
+}
+
+impl ResourceLimiter for Limiter {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        let allowed = self.inner.memory_growing(current, desired, maximum)?;
+        if !allowed && desired > self.memory_bytes {
+            self.memory_denied = true;
+        }
+        Ok(allowed)
+    }
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.memory_grow_failed(error)
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.inner.table_growing(current, desired, maximum)
+    }
+    fn table_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.inner.table_grow_failed(error)
+    }
+    fn instances(&self) -> usize {
+        self.inner.instances()
+    }
+    fn tables(&self) -> usize {
+        self.inner.tables()
+    }
+    fn memories(&self) -> usize {
+        self.inner.memories()
+    }
+}
+
 pub struct Host {
     pub context: Context,
     pub bindings: Arc<dyn Bindings>,
-    limits: StoreLimits,
+    limits: Limits,
+    limiter: Limiter,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
+    // Sticky record of host calls that did not complete with a confirmed reply.
+    cancelled_seen: AtomicBool,
+    uncertain: AtomicBool,
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
     executions: BTreeMap<u32, (String, String)>,
 }
 
 impl Host {
+    /// Qualification limits, equal to the constants the worker enforced before the contract.
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
+        Self::with_limits(context, bindings, Limits::qualification())
+    }
+
+    /// Buffer, guest-memory and host-call limits all come from the validated contract.
+    pub fn with_limits(context: Context, bindings: Arc<dyn Bindings>, limits: Limits) -> Self {
         Self {
             context,
             bindings,
-            limits: StoreLimitsBuilder::new()
-                .memory_size(GUEST_MEMORY_BYTES)
-                .memories(1)
-                .tables(4)
-                .table_elements(GUEST_TABLE_ELEMENTS)
-                .build(),
-            call_timeout: Duration::from_secs(30),
+            limiter: Limiter {
+                inner: StoreLimitsBuilder::new()
+                    .memory_size(limits.guest_memory_bytes())
+                    .memories(1)
+                    .tables(4)
+                    .table_elements(GUEST_TABLE_ELEMENTS)
+                    .build(),
+                memory_bytes: limits.guest_memory_bytes(),
+                memory_denied: false,
+            },
+            call_timeout: limits.host_call_deadline(),
+            limits,
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled_seen: AtomicBool::new(false),
+            uncertain: AtomicBool::new(false),
             keys: BTreeMap::new(),
             next_handle: 0,
             executions: BTreeMap::new(),
@@ -332,7 +406,37 @@ impl Host {
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
-        self.call_timeout = timeout.min(Duration::from_secs(30));
+        self.call_timeout = timeout.min(self.limits.host_call_deadline());
+    }
+
+    pub fn limits(&self) -> &Limits {
+        &self.limits
+    }
+
+    /// True once the guest-memory limit denied a growth in this store.
+    pub fn guest_memory_limit_hit(&self) -> bool {
+        self.limiter.memory_denied
+    }
+
+    /// True once a host call was cancelled.
+    pub fn cancellation_observed(&self) -> bool {
+        self.cancelled_seen.load(Ordering::Acquire)
+    }
+
+    /// True once a host call outlived its deadline after the binding had started, so the
+    /// platform effect may or may not have happened.
+    pub fn uncertain_host_call(&self) -> bool {
+        self.uncertain.load(Ordering::Acquire)
+    }
+
+    /// Guest-to-host byte accounting against the contract's guest-to-host limit.
+    fn inbound(&self) -> Bytes {
+        Bytes::new(self.limits.guest_to_host_buffer_bytes())
+    }
+
+    /// Host-to-guest byte accounting against the contract's host-to-guest limit.
+    fn outbound(&self) -> Bytes {
+        Bytes::new(self.limits.host_to_guest_buffer_bytes())
     }
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
@@ -360,6 +464,24 @@ impl Host {
     }
 
     fn call(&self, operation: Operation) -> Result<Reply, HostError> {
+        let started = std::cell::Cell::new(false);
+        let result = self.dispatch(operation, &started);
+        match result {
+            Err(HostError::Cancelled) => self.cancelled_seen.store(true, Ordering::Release),
+            // Before the binding started nothing can have happened; after, it is unknown.
+            Err(HostError::Timeout) if started.get() => {
+                self.uncertain.store(true, Ordering::Release);
+            }
+            _ => {}
+        }
+        result
+    }
+
+    fn dispatch(
+        &self,
+        operation: Operation,
+        started: &std::cell::Cell<bool>,
+    ) -> Result<Reply, HostError> {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(HostError::Cancelled);
         }
@@ -374,6 +496,10 @@ impl Host {
             operation: Some(operation),
             send,
             deadline,
+            buffers: super::net::Buffers {
+                guest_to_host: self.limits.guest_to_host_buffer_bytes(),
+                host_to_guest: self.limits.host_to_guest_buffer_bytes(),
+            },
         };
         // Each permit covers one helper and its joiner. If the helper cannot be
         // spawned, its closure, and with it the reply sender, is dropped, so the
@@ -390,6 +516,7 @@ impl Host {
                 }
             })
             .map_err(|_| HostError::LimitExceeded)?;
+        started.set(true);
         loop {
             if self.cancelled.load(Ordering::Acquire) {
                 ticket.detach();
@@ -446,7 +573,8 @@ fn storage_resource<T: Send + 'static>(
                 else {
                     return Err(HostError::Denied);
                 };
-                let mut bytes = Bytes::default();
+                // Host-to-guest: the result is checked against its own direction's limit.
+                let mut bytes = store.data().outbound();
                 bytes.add(4)?;
                 bytes.add(data.len())?;
                 Ok(data)
@@ -461,7 +589,7 @@ fn storage_resource<T: Send + 'static>(
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[], &[&data_arg], None, 4)?;
                 let key = store.data().key(handle.rep(), checkpoint)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = store.data().inbound();
                 bytes.add(4)?;
                 let data = data(&data_arg, &mut store, &mut bytes)?;
                 empty(store.data().call(Operation::Write {
@@ -483,7 +611,7 @@ pub fn instantiate(
     source: impl AsRef<[u8]>,
     host: Host,
 ) -> wasmtime::Result<(Store<Host>, Instance)> {
-    let mut context_bytes = Bytes::default();
+    let mut context_bytes = host.inbound();
     for value in [
         &host.context.invocation_key,
         &host.context.attempt_id,
@@ -538,7 +666,7 @@ pub fn instantiate(
         "report",
         |store: StoreContextMut<'_, Host>, (completed, total, message): (u64, u64, WasmStr)| {
             let result: Result<(), HostError> = (|| {
-                let mut bytes = Bytes::default();
+                let mut bytes = store.data().inbound();
                 bytes.add(16)?;
                 let message = string(&message, &store, &mut bytes)?;
                 empty(store.data().call(Operation::Progress {
@@ -567,7 +695,7 @@ pub fn instantiate(
              (destination, payload): (WasmStr, WasmList<u8>)| {
                 let result = (|| {
                     preflight(&mut store, &[&destination], &[&payload], None, 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = store.data().inbound();
                     let destination = string(&destination, &store, &mut bytes)?;
                     // Check list length before reading or copying even one element.
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -596,7 +724,7 @@ pub fn instantiate(
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[&message], &[], Some(&fields), 1)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = store.data().inbound();
                 bytes.add(1)?;
                 let message = string(&message, &store, &mut bytes)?;
                 let mut fields = pairs(&fields, &mut store, &mut bytes)?;
@@ -659,7 +787,7 @@ pub fn instantiate(
                     {
                         return Err(HostError::LimitExceeded);
                     }
-                    let mut bytes = Bytes::default();
+                    let mut bytes = store.data().inbound();
                     let workflow = string(&workflow, &store, &mut bytes)?;
                     let input = data(&input, &mut store, &mut bytes)?;
                     if !store
@@ -700,7 +828,7 @@ pub fn instantiate(
              (handle, name, payload): (Resource<Execution>, WasmStr, WasmList<u8>)| {
                 let result: Result<(), HostError> = (|| {
                     preflight(&mut store, &[&name], &[&payload], None, 4)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = store.data().inbound();
                     bytes.add(4)?;
                     let name = string(&name, &store, &mut bytes)?;
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -736,7 +864,7 @@ pub fn instantiate(
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
                 let result: Result<super::net::Response, HostError> = (|| {
                     preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = store.data().inbound();
                     let url = string(&url, &store, &mut bytes)?;
                     let method = string(&method, &store, &mut bytes)?;
                     let headers = pairs(&headers, &mut store, &mut bytes)?;
@@ -752,12 +880,13 @@ pub fn instantiate(
             },
         )?;
     }
+    let guest_memory = host.limits.guest_memory_bytes();
     let mut store = Store::new(engine, host);
-    store.limiter(|host| &mut host.limits);
+    store.limiter(|host| &mut host.limiter);
     // Wasmtime charges lazy cursors as if eagerly lifted. Keep that finite
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
-    store.set_hostcall_fuel(GUEST_MEMORY_BYTES * 16);
+    store.set_hostcall_fuel(guest_memory * 16);
     let instance = linker.instantiate(&mut store, &component)?;
     Ok((store, instance))
 }

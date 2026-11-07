@@ -8,6 +8,7 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod limits_fixtures;
 pub use falcone_serverless_worker::host;
 
 use artifact::supervisor::CompileLimits;
@@ -124,6 +125,75 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
     )
 }
 
+/// WAS-02 limits and cancellation fixtures. The guest sources arrive in FS_WAS02_FIXTURES
+/// as JSON; without them nothing can run, which is unverified, never passed.
+fn limits_cancellation() -> std::process::ExitCode {
+    use limits_fixtures::{Fixtures, Setup, Verdict};
+    let record = |status: &str, reason: &str| {
+        println!(
+            "{}",
+            serde_json::json!({"check":"limits_cancellation","status":status,"reason":reason})
+        );
+    };
+    let setup = (|| {
+        let fixtures = Fixtures::from_json(
+            &std::env::var("FS_WAS02_FIXTURES").map_err(|_| "FS_WAS02_FIXTURES unset")?,
+        )?;
+        let limits = match std::env::var("FS_WAS02_LIMITS") {
+            Ok(text) => falcone_serverless_worker::limits::Limits::parse(&text)
+                .map_err(|e| e.to_string())?,
+            Err(_) => falcone_serverless_worker::limits::Limits::qualification(),
+        };
+        let exe = std::env::current_exe().map_err(|_| "executable_path")?;
+        let scratch = std::env::temp_dir().join(format!("was02-limits-{}", std::process::id()));
+        std::fs::create_dir(&scratch).map_err(|_| "scratch_create")?;
+        Ok::<_, String>(Setup {
+            fixtures,
+            limits,
+            compile_child: Some(exe.with_file_name("artifact-compile-child")),
+            termination_child: Some(exe),
+            scratch,
+        })
+    })();
+    let setup = match setup {
+        Ok(setup) => setup,
+        Err(reason) => {
+            record("unverified", &reason);
+            return std::process::ExitCode::from(2);
+        }
+    };
+    let reports = limits_fixtures::run_all(&setup);
+    let _ = std::fs::remove_dir_all(&setup.scratch);
+    let (mut failed, mut unverified) = (false, false);
+    for report in &reports {
+        let (status, reason) = match &report.verdict {
+            Verdict::Passed => ("passed", String::new()),
+            Verdict::Failed(reason) => {
+                failed = true;
+                ("failed", reason.clone())
+            }
+            Verdict::Unverified(reason) => {
+                unverified = true;
+                ("unverified", reason.clone())
+            }
+        };
+        println!(
+            "{}",
+            serde_json::json!({"check":"was02_limits","fixture":report.name,"status":status,"reason":reason})
+        );
+    }
+    if failed {
+        record("failed", "see fixture records");
+        std::process::ExitCode::FAILURE
+    } else if unverified {
+        record("unverified", "see fixture records");
+        std::process::ExitCode::from(2)
+    } else {
+        record("passed", "");
+        std::process::ExitCode::SUCCESS
+    }
+}
+
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("binding_drop_probe") => {
@@ -146,6 +216,10 @@ fn main() -> std::process::ExitCode {
             capability_invocations::process_budget_probe();
             return std::process::ExitCode::SUCCESS;
         }
+        Some("--limits-child") => {
+            return limits_fixtures::child_main(&std::env::args().nth(2).unwrap_or_default());
+        }
+        Some("--limits-cancellation") => return limits_cancellation(),
         Some("--capability-gates") => {
             capability_invocations::guest_table_growth_is_bounded_independently_of_linear_memory();
             capability_invocations::exhausted_execution_handles_do_not_start_untracked_workflows();

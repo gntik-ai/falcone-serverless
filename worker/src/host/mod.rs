@@ -1,8 +1,15 @@
 //! Invocation capability boundary. Callers supply only Falcone-verified scopes;
 //! guest data never supplies a tenant, workspace, binding or grant.
 
+mod deadline;
 pub mod net;
+mod outcome;
 mod runtime;
+pub use deadline::{
+    Clock, DeadlineGuard, Decision, EPOCH_TICK, EpochClock, Probe, SystemClock, decide,
+    epoch_engine,
+};
+pub use outcome::{Ended, Execution, Outcome, TerminationFallback, classify, end_execution};
 pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, instantiate};
 use wasmtime::component::{ComponentType, Lift, Lower};
 

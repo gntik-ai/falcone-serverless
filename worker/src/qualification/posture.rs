@@ -2,6 +2,8 @@
 
 #[path = "../host/mod.rs"]
 pub mod host;
+#[path = "../limits/mod.rs"]
+pub mod limits;
 
 use serde_json::Value;
 

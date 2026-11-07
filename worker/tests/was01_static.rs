@@ -157,6 +157,9 @@ fn source_valid(path: &Path, source: &str) -> bool {
         "host/mod.rs",
         "host/net.rs",
         "host/runtime.rs",
+        "host/deadline.rs",
+        "host/outcome.rs",
+        "qualification/limits_fixtures.rs",
         "qualification/capability_http.rs",
         "qualification/capability_invocations.rs",
     ]
