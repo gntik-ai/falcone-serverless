@@ -45,18 +45,24 @@ controller stays a non-leader. A Lease the controller creates carries them.
 
 ### Recovery barrier
 
-A 404 hides the previous holder's last renewal. If this process did not watch the
-Lease continuously (it has no history, it missed renewals during an API error, or
-the Lease was deleted after its last observation), it fails closed. It starts a
-barrier at its first successful API response and waits one full lease duration, on
-its own clock, before it creates the Lease. An API error during the barrier
-restarts it from the next success. A Lease that reappears cancels it and normal
+A 404 hides the previous holder's last renewal, however closely the Lease was
+polled: reading an unchanged record cannot show that nobody renewed between the
+last read and the deletion, and that renewal keeps the holder's gate open for up to
+`renewDeadline`. So every 404 fails closed, including one right after a successful
+read. It starts a barrier at its first successful API response and waits one full
+lease duration, on its own clock, before it creates the Lease. An API error during
+the barrier restarts it from the next success. A Lease that reappears cancels it and
 observation applies. With the default timings:
 
 - B observes A's Lease at t=0, then loses API access while A renews through t=14.
 - The Lease is deleted at t=15 and B sees 404 at t=16. A, partitioned, keeps a valid
   gate until t=24.
 - B's barrier starts at t=16, so B sends no create and opens no gate before t=31.
+
+The same holds when B polls without a gap: B reads A's unchanged record at t=0 to
+t=8, A renews right after the read at t=8 (earlier renewals failed), the Lease is
+deleted at t=9 and A is partitioned, so A's gate stays open until t=18. B sees 404 at
+t=10, starts the barrier there and creates nothing before t=25.
 
 The first start on an empty namespace therefore waits one lease duration before the
 first acquisition: a first install cannot be told apart from a deleted Lease. When

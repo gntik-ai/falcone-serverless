@@ -117,7 +117,7 @@ type Sink interface {
 
 // Reporter publishes pool-status reports for the leader only. The reporterEpoch of
 // every report is the leadership token's epoch, and observationSeq restarts when
-// the epoch rises and never repeats within an epoch.
+// the epoch rises and never repeats within an epoch, not even after a failed send.
 type Reporter struct {
 	Leadership Leadership
 	Sink       Sink
@@ -152,9 +152,8 @@ func (r *Reporter) Publish(ctx context.Context, rep poolstatus.Report, scope poo
 	if again, ok := r.Leadership.Token(); !ok || again != tok {
 		return ErrNotLeader // leadership changed while encoding
 	}
-	if err := r.Sink.Publish(ctx, payload); err != nil {
-		return err
-	}
+	// Reserve the sequence before the send: a receiver may have stored the payload
+	// even when the response fails, so the next observation must not reuse it.
 	r.epoch, r.seq = tok.Epoch, seq
-	return nil
+	return r.Sink.Publish(ctx, payload)
 }

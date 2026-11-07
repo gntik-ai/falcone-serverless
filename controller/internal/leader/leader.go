@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -142,7 +143,7 @@ type Config struct {
 // NewIdentity builds a holder identity from POD_NAME and a per-process random
 // suffix, so a restarted container never reuses a previous incarnation's hold.
 func NewIdentity(podName string, random io.Reader) (string, error) {
-	if len(podName) > 253 || !podNamePattern.MatchString(podName) {
+	if !validPodName(podName) {
 		return "", errors.New("POD_NAME is absent or not a valid pod name")
 	}
 	var b [8]byte
@@ -152,7 +153,21 @@ func NewIdentity(podName string, random io.Reader) (string, error) {
 	return podName + "_" + hex.EncodeToString(b[:]), nil
 }
 
-var podNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+
+// validPodName accepts a DNS subdomain: at most 253 characters of dot-separated
+// labels, each a DNS label of at most 63 characters (so a..b and a.-b are refused).
+func validPodName(name string) bool {
+	if name == "" || len(name) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(name, ".") {
+		if len(label) > 63 || !dnsLabelPattern.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
 
 // Elector campaigns for, renews and releases the leader Lease.
 type Elector struct {
@@ -174,8 +189,6 @@ type Elector struct {
 	obs     Lease
 	obsAt   time.Time // local reading when obs was first seen
 	haveObs bool
-	healthy bool      // no API failure since lastOK
-	lastOK  time.Time // local reading of the last successful API response
 	barrier barrier
 
 	// History, kept across terms so a recreated Lease continues the fencing token.
@@ -320,7 +333,6 @@ func (e *Elector) campaign(ctx context.Context) {
 // failure records an API failure: nothing is learned, continuity of observation is
 // broken, and a running barrier restarts at the next successful response.
 func (e *Elector) failure() {
-	e.healthy = false
 	if e.barrier.active {
 		e.barrier.started = false
 	}
@@ -354,7 +366,6 @@ func (e *Elector) observe(ctx context.Context, l Lease, now time.Time) {
 	if !e.haveObs || !sameRecord(e.obs, l) {
 		e.obs, e.obsAt, e.haveObs = l, now, true
 	}
-	e.healthy, e.lastOK = true, now
 	if !owned(l) {
 		return // never take over a Lease without our ownership metadata
 	}
@@ -364,31 +375,24 @@ func (e *Elector) observe(ctx context.Context, l Lease, now time.Time) {
 	e.takeOver(ctx, l)
 }
 
-// absent handles a 404. A 404 the process has continuously observed (it saw the
-// Lease, no API failure since, polls close together) follows the normal rule: wait
-// out the lease duration from the last record change. Any other 404, including one
-// with no history, starts the recovery barrier, because renewals made while the
-// process was blind, or before it started, are invisible: the previous holder's
-// gate can stay open for up to renewDeadline after the Lease vanished. The barrier
-// runs from the first successful response, on this process's own clock.
+// absent handles a 404. Every 404 starts the recovery barrier, however closely the
+// Lease was polled before: polling cannot show that nobody renewed between the last
+// read and the deletion, and that renewal opens the holder's gate for up to
+// renewDeadline after the Lease vanished. The holder's last possible renewal is
+// no later than this first successful response, so waiting a full lease duration
+// from it, measured on this process's own clock, outlasts every gate. A failure
+// restarts the barrier from the next success (see failure); a Lease that reappears
+// cancels it (see observe).
 func (e *Elector) absent(ctx context.Context, now time.Time) {
-	continuous := e.haveObs && e.healthy && now.Sub(e.lastOK) <= 2*e.cfg.Timings.RetryPeriod
-	e.healthy, e.lastOK = true, now
-	if !continuous && !e.barrier.active {
+	if !e.barrier.active {
 		e.barrier = barrier{active: true}
 		e.haveObs = false
-		e.logf("leader: no continuous history of the Lease; starting the recovery barrier")
+		e.logf("leader: the Lease is absent; starting the recovery barrier")
 	}
-	var ready bool
-	if e.barrier.active {
-		if !e.barrier.started {
-			e.barrier.started, e.barrier.at = true, now
-		}
-		ready = now.Sub(e.barrier.at) >= e.wait(e.knownDuration)
-	} else {
-		ready = e.obs.Holder == "" || now.Sub(e.obsAt) >= e.wait(time.Duration(e.obs.LeaseDurationSeconds)*time.Second)
+	if !e.barrier.started {
+		e.barrier.started, e.barrier.at = true, now
 	}
-	if ready {
+	if now.Sub(e.barrier.at) >= e.wait(e.knownDuration) {
 		e.create(ctx)
 	}
 }
@@ -439,7 +443,7 @@ func (e *Elector) takeOver(ctx context.Context, l Lease) {
 	case errors.Is(err, ErrConflict):
 		// Another writer won; the next Get observes the new record.
 	case errors.Is(err, ErrNotFound):
-		e.healthy = false // deleted since our Get: continuity is gone
+		// Deleted since our Get: the next Get sees 404 and starts the barrier.
 	default:
 		e.failure()
 	}
@@ -478,7 +482,7 @@ func (e *Elector) stepDown(reason string) {
 		e.cancel()
 		e.cancel = nil
 	}
-	e.haveObs, e.healthy, e.barrier = false, false, barrier{}
+	e.haveObs, e.barrier = false, barrier{}
 	e.logf("leader: stopped leading: %s", reason)
 }
 

@@ -127,7 +127,7 @@ func TestNoWritesAfterLeadershipIsLostOrTheAPIIsUnreachable(t *testing.T) {
 			w := &fakeWriter{}
 			fresh := func() leader.DesiredState { return leader.DesiredState{Available: true, ObservedAt: clock.Now()} }
 			var gate *leader.Gate
-			eventually(t, "the duty to start", func() bool {
+			a.duty.await(t, "the duty to start", func() bool {
 				a.duty.mu.Lock()
 				defer a.duty.mu.Unlock()
 				if len(a.duty.gates) == 1 {
@@ -169,13 +169,16 @@ func TestAnInstanceThatNeverLedWritesNothing(t *testing.T) {
 type fakeSink struct {
 	mu       sync.Mutex
 	payloads [][]byte
+	// after, when set, is the error returned for payload n (0-based) after the
+	// receiver has already recorded it: accepted, but the response was lost.
+	after map[int]error
 }
 
 func (s *fakeSink) Publish(_ context.Context, p []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.payloads = append(s.payloads, append([]byte(nil), p...))
-	return nil
+	return s.after[len(s.payloads)-1]
 }
 
 func (s *fakeSink) all() [][]byte {
@@ -276,4 +279,36 @@ func TestObservationSeqRestartsWhenTheEpochRises(t *testing.T) {
 		t.Fatalf("epochs/seqs: first %d/%d second %d/%d", first.ReporterEpoch, first.ObservationSeq, second.ReporterEpoch, second.ObservationSeq)
 	}
 	_ = time.Second
+}
+
+// TestSequenceIsNeverReusedAfterAnAcceptedReportWhoseResponseFailed: the receiver
+// stored the first report, the response was an error, and the next observation is a
+// different payload. It must carry a new observationSeq (pool-status-report.md:
+// "never reuses a value within an epoch").
+func TestSequenceIsNeverReusedAfterAnAcceptedReportWhoseResponseFailed(t *testing.T) {
+	clock, store := newFakeClock(), &fakeStore{}
+	a := newInstance(t, clock, store, "a", defaults)
+	holdFirst(t, clock, a)
+	sink := &fakeSink{after: map[int]error{0: errors.New("response lost")}}
+	r := &leader.Reporter{Leadership: a.el, Sink: sink}
+	ctx := context.Background()
+	if err := r.Publish(ctx, baseReport, reportScope, nil, poolstatus.Options{}); err == nil {
+		t.Fatal("the failed response was not reported")
+	}
+	changed := baseReport
+	changed.ReadyReplicas = 0
+	if err := r.Publish(ctx, changed, reportScope, nil, poolstatus.Options{}); err != nil {
+		t.Fatal(err)
+	}
+	var seen []int64
+	for _, p := range sink.all() {
+		var rep poolstatus.Report
+		if err := json.Unmarshal(p, &rep); err != nil {
+			t.Fatal(err)
+		}
+		seen = append(seen, rep.ObservationSeq)
+	}
+	if len(seen) != 2 || seen[0] == seen[1] || seen[1] < seen[0] {
+		t.Fatalf("observationSeq values %v: a different payload reused or lowered the sequence", seen)
+	}
 }

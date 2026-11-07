@@ -53,6 +53,10 @@ func TestRunSendsNoLeaseRequestWhenPodIdentityIsUnusable(t *testing.T) {
 		"POD_NAMESPACE is not a name": func(env map[string]string) { env["POD_NAMESPACE"] = "../kube-system" },
 		"POD_NAME absent":             func(env map[string]string) { delete(env, "POD_NAME") },
 		"POD_NAME invalid":            func(env map[string]string) { env["POD_NAME"] = "Not A Pod/Name" },
+		"POD_NAME empty label":        func(env map[string]string) { env["POD_NAME"] = "a..b" },
+		"POD_NAME label starts '-'":   func(env map[string]string) { env["POD_NAME"] = "a.-b" },
+		"POD_NAME label ends '-'":     func(env map[string]string) { env["POD_NAME"] = "a-.b" },
+		"POD_NAME trailing dot":       func(env map[string]string) { env["POD_NAME"] = "a." },
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := pfNewEnv(t, pfValues(nil))
@@ -102,9 +106,10 @@ func TestRunSendsNoLeaseRequestWhenALeaseCheckIsDeniedOrErrors(t *testing.T) {
 // --- a full lead, shut down and release cycle over HTTP ----------------------
 
 type mainClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []mainTimer
+	mu      sync.Mutex
+	now     time.Time
+	timers  []mainTimer
+	waiters []chan struct{} // closed when a timer is registered
 }
 
 type mainTimer struct {
@@ -124,7 +129,33 @@ func (c *mainClock) After(d time.Duration) <-chan time.Time {
 		return ch
 	}
 	c.timers = append(c.timers, mainTimer{c.now.Add(d), d, ch})
+	for _, w := range c.waiters {
+		close(w)
+	}
+	c.waiters = nil
 	return ch
+}
+
+// awaitIdle blocks until the election loop waits for its next retry, so no Lease
+// request is in flight and time may move. It subscribes to timer registrations
+// before it checks, so it neither polls nor sleeps.
+func (c *mainClock) awaitIdle(t *testing.T, retry time.Duration) {
+	t.Helper()
+	guard := time.After(30 * time.Second)
+	for {
+		c.mu.Lock()
+		w := make(chan struct{})
+		c.waiters = append(c.waiters, w)
+		c.mu.Unlock()
+		if c.idle(retry) {
+			return
+		}
+		select {
+		case <-w:
+		case <-guard:
+			t.Fatal("the election loop never went idle")
+		}
+	}
 }
 
 func (c *mainClock) advance(d time.Duration) {
@@ -234,7 +265,6 @@ func TestRunLeadsThenReleasesTheLeaseOnShutdown(t *testing.T) {
 		close(dutyStopped)
 	}
 	var out, errOut bytes.Buffer
-	started := 0
 	done := make(chan int, 1)
 	go func() {
 		done <- run(ctx, deps{
@@ -246,7 +276,6 @@ func TestRunLeadsThenReleasesTheLeaseOnShutdown(t *testing.T) {
 				return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 			},
 			client: e.api.Client(), timeout: 2 * time.Second,
-			start:  func() { started++ },
 			clock:  clock,
 			random: bytes.NewReader([]byte{1, 2, 3, 4, 5, 6, 7, 8}),
 			duties: []leader.Duty{duty},
@@ -257,11 +286,9 @@ func TestRunLeadsThenReleasesTheLeaseOnShutdown(t *testing.T) {
 	// real HTTPS round trip never races a fake request timeout.
 	deadline := 200
 	for ; deadline > 0; deadline-- {
+		clock.awaitIdle(t, leader.DefaultTimings.RetryPeriod)
 		if h, ok := leases.holder(); ok && h != "" {
 			break
-		}
-		for spins := 0; !clock.idle(leader.DefaultTimings.RetryPeriod) && spins < 200000; spins++ {
-			time.Sleep(20 * time.Microsecond)
 		}
 		clock.advance(leader.DefaultTimings.RetryPeriod)
 	}
@@ -291,8 +318,9 @@ func TestRunLeadsThenReleasesTheLeaseOnShutdown(t *testing.T) {
 	if h, ok := leases.holder(); !ok || h != "" {
 		t.Fatalf("Lease after shutdown = %q (exists %v), want released with an empty holder", h, ok)
 	}
-	if started != 1 {
-		t.Fatalf("start hook ran %d times", started)
+	// The version banner is a diagnostic on stderr; stdout never carries it.
+	if !strings.Contains(errOut.String(), "falcone-serverless-controller ") {
+		t.Fatalf("stderr = %q, want the version banner", errOut.String())
 	}
 	// Exactly one JSON report on stdout, then nothing else.
 	dec := json.NewDecoder(&out)

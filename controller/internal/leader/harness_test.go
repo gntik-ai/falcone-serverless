@@ -16,13 +16,57 @@ const (
 	poolB     = "pool-b"
 )
 
+// signal is a broadcast: wait returns a channel that closes at the next notify, so
+// a test blocks on the event it needs instead of polling or sleeping.
+type signal struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (s *signal) wait() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch == nil {
+		s.ch = make(chan struct{})
+	}
+	return s.ch
+}
+
+func (s *signal) notify() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ch != nil {
+		close(s.ch)
+		s.ch = nil
+	}
+}
+
+// await blocks until cond holds, re-checking after every notify. The deadline only
+// guards against a hung test; it is never what makes a test pass.
+func (s *signal) await(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	guard := time.After(30 * time.Second)
+	for {
+		changed := s.wait() // subscribe before checking, so no notify is missed
+		if cond() {
+			return
+		}
+		select {
+		case <-changed:
+		case <-guard:
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
 var epoch0 = time.Unix(1_800_000_000, 0).UTC()
 
 // fakeClock is a manually advanced clock. Timers fire when Advance passes them.
 type fakeClock struct {
-	mu     sync.Mutex
-	now    time.Time
-	timers []fakeTimer
+	mu      sync.Mutex
+	now     time.Time
+	timers  []fakeTimer
+	changed signal // notified whenever a timer is registered
 }
 
 type fakeTimer struct {
@@ -40,13 +84,15 @@ func (c *fakeClock) Now() time.Time {
 
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	ch := make(chan time.Time, 1)
 	if d <= 0 {
 		ch <- c.now
+		c.mu.Unlock()
 		return ch
 	}
 	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch})
+	c.mu.Unlock()
+	c.changed.notify()
 	return ch
 }
 
@@ -78,16 +124,7 @@ func (c *fakeClock) pending() int {
 // clock is known to be waiting before the test advances time.
 func (c *fakeClock) waitTimers(t *testing.T, n int) {
 	t.Helper()
-	for i := 0; i < 1_000_000; i++ {
-		c.mu.Lock()
-		got := len(c.timers)
-		c.mu.Unlock()
-		if got >= n {
-			return
-		}
-		time.Sleep(10 * time.Microsecond)
-	}
-	t.Fatalf("fewer than %d timers pending", n)
+	c.changed.await(t, "pending timers", func() bool { return c.pending() >= n })
 }
 
 // fakeStore is one in-memory Lease store, the Kubernetes API's view of the Lease.
@@ -293,6 +330,7 @@ type dutyProbe struct {
 	gates     []*leader.Gate
 	stuck     bool // ignore cancellation until released
 	release   chan struct{}
+	changed   signal // notified whenever the duty starts or stops
 }
 
 func newDutyProbe() *dutyProbe { return &dutyProbe{release: make(chan struct{})} }
@@ -304,6 +342,7 @@ func (p *dutyProbe) duty(ctx context.Context, g *leader.Gate) {
 	p.gates = append(p.gates, g)
 	stuck := p.stuck
 	p.mu.Unlock()
+	p.changed.notify()
 	<-ctx.Done()
 	if stuck {
 		<-p.release
@@ -312,6 +351,7 @@ func (p *dutyProbe) duty(ctx context.Context, g *leader.Gate) {
 	p.running--
 	p.cancelled++
 	p.mu.Unlock()
+	p.changed.notify()
 }
 
 func (p *dutyProbe) snapshot() (running, started, cancelled int) {
@@ -320,16 +360,10 @@ func (p *dutyProbe) snapshot() (running, started, cancelled int) {
 	return p.running, p.started, p.cancelled
 }
 
-// eventually polls cond on real scheduling only (no clock, no sleeps of note).
-func eventually(t *testing.T, what string, cond func() bool) {
+// await blocks until cond holds, re-checked after every duty start or stop.
+func (p *dutyProbe) await(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	for i := 0; i < 1_000_000; i++ {
-		if cond() {
-			return
-		}
-		time.Sleep(10 * time.Microsecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	p.changed.await(t, what, cond)
 }
 
 func newInstance(t *testing.T, clock *fakeClock, store *fakeStore, name string, timings leader.Timings) *instance {

@@ -3,6 +3,7 @@ package leader_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,7 +58,7 @@ func TestExactlyOneInstanceHoldsAndRunsTheDuty(t *testing.T) {
 	if b.open() {
 		holder, other = b, a
 	}
-	eventually(t, "the leader's duty to run", func() bool { r, _, _ := holder.duty.snapshot(); return r == 1 })
+	holder.duty.await(t, "the leader's duty to run", func() bool { r, _, _ := holder.duty.snapshot(); return r == 1 })
 	if r, s, _ := other.duty.snapshot(); r != 0 || s != 0 {
 		t.Fatalf("the non-leader ran its duty: running %d started %d", r, s)
 	}
@@ -119,8 +120,8 @@ func TestHandoverTimingAfterRenewalsStop(t *testing.T) {
 	if a.open() {
 		t.Fatal("A's gate is still open after B took over")
 	}
-	eventually(t, "A's duty to be cancelled", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
-	eventually(t, "B's duty to run", func() bool { r, _, _ := b.duty.snapshot(); return r == 1 })
+	a.duty.await(t, "A's duty to be cancelled", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
+	b.duty.await(t, "B's duty to run", func() bool { r, _, _ := b.duty.snapshot(); return r == 1 })
 	if tok, ok := b.el.Token(); !ok || tok.Epoch != 1 {
 		t.Fatalf("B's token = %+v, %v; want epoch 1 (one transition)", tok, ok)
 	}
@@ -177,6 +178,49 @@ func TestDeletedLeaseDoesNotOpenASecondGate(t *testing.T) {
 	// leaseTransitions it knew (A took the empty store at 0, so B must be at 1 or more).
 	if tok, ok := b.el.Token(); !ok || tok.Epoch < 1 {
 		t.Fatalf("B's epoch = %+v, want a value above A's", tok)
+	}
+}
+
+// TestDeletionAfterAnUnseenRenewalDoesNotOpenASecondGate is the second checker's
+// split-brain: B reads A's unchanged record at 0, 2, 4, 6 and 8 (A's renewals at 2,
+// 4 and 6 failed), A renews right after B's read at 8, the Lease is deleted at 9 and
+// A is partitioned. B's reads are continuous, yet it cannot know about the renewal
+// at 8: A's gate stays open until 18. B must treat the 404 at 10 as lost history,
+// create nothing before 25 (first success plus leaseDuration) and never overlap A.
+func TestDeletionAfterAnUnseenRenewalDoesNotOpenASecondGate(t *testing.T) {
+	clock, store := newFakeClock(), &fakeStore{}
+	a := newInstance(t, clock, store, "a", defaults)
+	b := newInstance(t, clock, store, "b", defaults)
+	holdFirst(t, clock, a)
+	t0 := clock.Now()
+	a.client.setFault("update", errNetwork) // A's renewals at 2, 4 and 6 fail
+	for step := 0; step <= 40; step++ {
+		s := clock.Now().Sub(t0)
+		switch s {
+		case 8 * sec:
+			a.client.setFault("update", nil) // B reads first, then A renews
+		case 9 * sec:
+			store.remove()
+			a.client.setDown(true)
+		}
+		if s%(2*sec) == 0 {
+			b.tick()
+			a.tick()
+		}
+		aOpen, bOpen := a.open(), b.open()
+		if aOpen && bOpen {
+			t.Fatalf("t=%v: both gates are open", s)
+		}
+		if creates, _, _ := b.client.counts(); s < 25*sec && (creates != 0 || bOpen) {
+			t.Fatalf("t=%v: B sent %d creates, gate open %v; want none before t=25", s, creates, bOpen)
+		}
+		if wantA := s < 18*sec; aOpen != wantA {
+			t.Fatalf("t=%v: A's gate open = %v, want %v (last renewal at 8, renewDeadline 10)", s, aOpen, wantA)
+		}
+		clock.Advance(sec)
+	}
+	if !b.open() {
+		t.Fatal("B should acquire once the recovery barrier passed")
 	}
 }
 
@@ -237,7 +281,7 @@ func TestAPIErrorDuringBarrierRestartsIt(t *testing.T) {
 }
 
 // TestReappearingLeaseCancelsTheBarrier: the observed Lease ends the barrier and
-// normal observation applies.
+// normal observation applies; a later 404 starts a barrier of its own.
 func TestReappearingLeaseCancelsTheBarrier(t *testing.T) {
 	clock, store := newFakeClock(), &fakeStore{}
 	b := newInstance(t, clock, store, "b", defaults)
@@ -246,20 +290,25 @@ func TestReappearingLeaseCancelsTheBarrier(t *testing.T) {
 	store.seed(leader.Lease{Name: leader.LeaseName, Holder: "other", LeaseDurationSeconds: 15,
 		Labels:      map[string]string{"falcone.ai/owner": "pool-controller"},
 		Annotations: map[string]string{"falcone.ai/ownership-version": "1"}})
-	b.tick() // sees the Lease: barrier cancelled, observation starts here
-	seen := clock.Now()
+	b.tick() // sees the Lease: the barrier is cancelled and normal observation applies
+	clock.Advance(sec)
+	b.tick() // still the same record, held by someone else
+	if creates, _, _ := b.client.counts(); creates != 0 || b.open() {
+		t.Fatal("B must not act on a Lease held by another instance")
+	}
 	store.remove()
-	clock.Advance(2 * sec)
-	b.tick() // continuous observation, record gone: normal rule is seen + leaseDuration
-	for clock.Now().Sub(seen) < defaults.LeaseDuration {
-		if b.open() {
-			t.Fatalf("opened %v after observing the Lease", clock.Now().Sub(seen))
+	clock.Advance(sec)
+	b.tick() // the 404 starts a new barrier here, whatever was observed before
+	gone := clock.Now()
+	for clock.Now().Sub(gone) < defaults.LeaseDuration {
+		if creates, _, _ := b.client.counts(); creates != 0 || b.open() {
+			t.Fatalf("created %v after the 404", clock.Now().Sub(gone))
 		}
 		clock.Advance(sec)
 		b.tick()
 	}
 	if !b.open() {
-		t.Fatal("B should acquire once leaseDuration passed since it observed the Lease")
+		t.Fatal("B should acquire once leaseDuration passed since the 404")
 	}
 }
 
@@ -293,7 +342,7 @@ func TestHolderThatGetsNotFoundOrConflictLosesItsGateAtOnce(t *testing.T) {
 			if after, _, _ := a.client.counts(); after != creates {
 				t.Fatalf("a holder recreated the Lease while its gate was open (%d -> %d creates)", creates, after)
 			}
-			eventually(t, "the duty to be cancelled", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
+			a.duty.await(t, "the duty to be cancelled", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
 			// Back to candidate: with the Lease gone it must wait out a barrier, not recreate at once.
 			clock.Advance(2 * sec)
 			a.tick()
@@ -421,7 +470,7 @@ func TestShutdownClosesGateThenCancelsDrainsAndReleases(t *testing.T) {
 	clock, store := newFakeClock(), &fakeStore{}
 	a := newInstance(t, clock, store, "a", defaults)
 	holdFirst(t, clock, a)
-	eventually(t, "duty start", func() bool { r, _, _ := a.duty.snapshot(); return r == 1 })
+	a.duty.await(t, "duty start", func() bool { r, _, _ := a.duty.snapshot(); return r == 1 })
 	a.el.Shutdown()
 	if r, _, c := a.duty.snapshot(); r != 0 || c != 1 {
 		t.Fatalf("duty running %d cancelled %d after shutdown", r, c)
@@ -444,7 +493,7 @@ func TestShutdownWithAStuckDutyReleasesNothing(t *testing.T) {
 	a := newInstance(t, clock, store, "a", defaults)
 	a.duty.stuck = true
 	holdFirst(t, clock, a)
-	eventually(t, "duty start", func() bool { r, _, _ := a.duty.snapshot(); return r == 1 })
+	a.duty.await(t, "duty start", func() bool { r, _, _ := a.duty.snapshot(); return r == 1 })
 	before := store.current()
 	done := make(chan struct{})
 	base := clock.pending()
@@ -547,6 +596,30 @@ func TestIdentityHasARandomSuffixPerProcess(t *testing.T) {
 	}
 	if _, err := leader.NewIdentity("", bytesReader{1, 2, 3, 4, 5, 6, 7, 8}); err == nil {
 		t.Fatal("an empty POD_NAME was accepted")
+	}
+}
+
+func TestIdentityRefusesMalformedDNSSubdomains(t *testing.T) {
+	long63, long64 := strings.Repeat("a", 63), strings.Repeat("a", 64)
+	for name, pod := range map[string]string{
+		"empty label":            "a..b",
+		"label starts with -":    "a.-b",
+		"label ends with -":      "a-.b",
+		"leading dot":            ".a",
+		"trailing dot":           "a.",
+		"upper case":             "Pod",
+		"label over 63":          long64,
+		"name over 253":          strings.Repeat(long63[:50]+".", 6) + "a",
+		"underscore (separator)": "a_b",
+	} {
+		if _, err := leader.NewIdentity(pod, bytesReader{1, 2, 3, 4, 5, 6, 7, 8}); err == nil {
+			t.Errorf("%s: %q was accepted", name, pod)
+		}
+	}
+	for _, pod := range []string{"a", "a.b", "controller-7d9f6c-abcde", "a-b.c-d", long63} {
+		if _, err := leader.NewIdentity(pod, bytesReader{1, 2, 3, 4, 5, 6, 7, 8}); err != nil {
+			t.Errorf("%q was refused: %v", pod, err)
+		}
 	}
 }
 

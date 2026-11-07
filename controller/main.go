@@ -49,7 +49,7 @@ type deps struct {
 	readFile func(string) ([]byte, error)
 	client   *http.Client   // built from the service account CA when nil
 	timeout  time.Duration  // per access review; preflight.DefaultTimeout when zero
-	start    func()         // runs once, after a passed preflight and before the campaign
+	start    func()         // optional; runs once, after a passed preflight and before the campaign
 	clock    leader.Clock   // the system clock when nil
 	random   io.Reader      // crypto/rand when nil
 	timings  leader.Timings // leader.DefaultTimings when zero
@@ -63,7 +63,6 @@ func main() {
 	code := run(ctx, deps{
 		getenv:   os.Getenv,
 		readFile: os.ReadFile,
-		start:    func() { fmt.Printf("falcone-serverless-controller %s\n", Version) },
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 	})
@@ -90,7 +89,11 @@ func run(ctx context.Context, d deps) int {
 		_, _ = fmt.Fprintf(d.stderr, "leader election not started: %v\n", err)
 		return 1
 	}
-	d.start()
+	// The version banner is a diagnostic: stdout holds the one JSON report only.
+	_, _ = fmt.Fprintf(d.stderr, "falcone-serverless-controller %s\n", Version)
+	if d.start != nil {
+		d.start()
+	}
 	elector.Run(ctx)
 	return 0
 }
