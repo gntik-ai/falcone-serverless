@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	contractDir   = "../../../docs/contracts/pool-preflight/v1"
-	prereqsDoc    = "../../../docs/operations/install-prerequisites.md"
-	staleContrDir = "../../../docs/contracts/pool-status"
+	contractDir           = "../../../docs/contracts/pool-preflight/v1"
+	prereqsDoc            = "../../../docs/operations/install-prerequisites.md"
+	poolStatusContractDir = "../../../docs/contracts/pool-status"
 )
 
 type conformanceReport struct {
@@ -276,7 +276,7 @@ func TestSchemaMatchesGoConstants(t *testing.T) {
 }
 
 func TestNoPreflightDocumentUnderPoolStatus(t *testing.T) {
-	err := filepath.WalkDir(staleContrDir, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(poolStatusContractDir, func(path string, entry os.DirEntry, err error) error {
 		if os.IsNotExist(err) {
 			return nil
 		}

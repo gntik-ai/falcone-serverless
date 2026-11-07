@@ -114,6 +114,51 @@ func TestValidatorConformance(t *testing.T) {
 		}
 	}
 }
+
+func TestSchemaAndValidatorRejectInvalidIdentitiesAndShapes(t *testing.T) {
+	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	for _, edit := range []string{"owned-kind", "owned-empty-uid", "owned-empty-resourceVersion", "objectRef-kind", "objectRef-singleton-leader", "objectRef-singleton-scaler", "descendants-on-repair", "negative-generation"} {
+		t.Run(edit, func(t *testing.T) {
+			r := fixtureReport(t, "ImagePullFailed")
+			switch edit {
+			case "owned-kind":
+				r["ownedObjects"].([]any)[0].(map[string]any)["kind"] = "Pod"
+			case "owned-empty-uid":
+				r["ownedObjects"].([]any)[0].(map[string]any)["uid"] = ""
+			case "owned-empty-resourceVersion":
+				r["ownedObjects"].([]any)[0].(map[string]any)["resourceVersion"] = ""
+			case "objectRef-kind":
+				r = fixtureReport(t, "UIDMismatch")
+				r["conditions"].([]any)[0].(map[string]any)["objectRef"].(map[string]any)["kind"] = "Pod"
+			case "objectRef-singleton-leader", "objectRef-singleton-scaler":
+				r = fixtureReport(t, "UIDMismatch")
+				name := "falcone-pool-controller-leader"
+				if edit == "objectRef-singleton-scaler" {
+					name = "falcone-pool-controller-scaler"
+				}
+				r["poolRef"].(map[string]any)["name"] = name
+				r["conditions"].([]any)[0].(map[string]any)["objectRef"] = map[string]any{"kind": "Lease", "name": name}
+			case "descendants-on-repair":
+				r = fixtureReport(t, "UIDMismatch")
+				r["conditions"].([]any)[0].(map[string]any)["remainingDescendants"] = map[string]any{"replicaSets": 1, "pods": 2}
+			case "negative-generation":
+				r = fixtureReport(t, "verified-absence-wasm")
+				r["verifiedAbsence"].([]any)[0].(map[string]any)["generation"] = -1
+			}
+			r = clone(t, r)
+			t.Run("schema", func(t *testing.T) {
+				if err := schemaError(schema, schema, r); err == nil {
+					t.Fatal("schema accepted invalid identity or evidence shape")
+				}
+			})
+			t.Run("validator", func(t *testing.T) {
+				if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
+					t.Fatal("validator accepted invalid identity or evidence shape")
+				}
+			})
+		})
+	}
+}
 func TestLegacyUnknownFieldsAndTrailingData(t *testing.T) {
 	r := readJSON(t, "v1/conformance.json")["valid"].([]any)[0].(map[string]any)["report"].(map[string]any)
 	r["futureField"] = true
@@ -127,6 +172,53 @@ func TestLegacyUnknownFieldsAndTrailingData(t *testing.T) {
 	r["contractRevision"] = "1.2"
 	if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
 		t.Fatal("unknown revision accepted")
+	}
+}
+
+func TestValidatorAcceptsJSONSchemaIntegerForms(t *testing.T) {
+	for _, version := range []string{"v1", "v1.1"} {
+		schema := readJSON(t, version+"/pool-status.schema.json")
+		for _, number := range []string{"1.0", "1e2", "100e-2", "9.223372036854775807e18", "-9.223372036854775808e18", "0e-1000000"} {
+			t.Run(version+"/"+number, func(t *testing.T) {
+				r := readJSON(t, version+"/conformance.json")["valid"].([]any)[0].(map[string]any)["report"].(map[string]any)
+				r["observationSeq"] = json.Number(number)
+				if err := schemaError(schema, schema, clone(t, r)); err != nil {
+					t.Fatalf("schema rejected integer representation: %v", err)
+				}
+				if err := poolstatus.ValidateJSON(encoded(t, r)); err != nil {
+					t.Fatalf("valid integer representation rejected: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestValidatorAcceptsNestedIntegerForms(t *testing.T) {
+	for _, name := range []string{"TerminationPending", "verified-absence-wasm"} {
+		t.Run(name, func(t *testing.T) {
+			r := fixtureReport(t, name)
+			if name == "TerminationPending" {
+				counts := r["conditions"].([]any)[0].(map[string]any)["remainingDescendants"].(map[string]any)
+				counts["replicaSets"], counts["pods"] = json.Number("1.0"), json.Number("2e0")
+			} else {
+				r["verifiedAbsence"].([]any)[0].(map[string]any)["generation"] = json.Number("5.0")
+			}
+			if err := poolstatus.ValidateJSON(encoded(t, r)); err != nil {
+				t.Fatalf("valid nested integer representation rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestValidatorRejectsInexactOrOverflowingIntegers(t *testing.T) {
+	for _, number := range []string{"1.00000000000000001", "1e-1000000", "9223372036854775808", "-9223372036854775809", "1e309"} {
+		t.Run(number, func(t *testing.T) {
+			r := fixtureReport(t, "UIDMismatch")
+			r["observationSeq"] = json.Number(number)
+			if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
+				t.Fatal("accepted fractional or overflowing sequence")
+			}
+		})
 	}
 }
 
@@ -158,20 +250,10 @@ func TestLegacyIgnoresCaseVariantsOfKnownFields(t *testing.T) {
 }
 
 func TestSchemaAndValidatorRejectMalformedEvidence(t *testing.T) {
-	fixtures := readJSON(t, "v1.1/conformance.json")["valid"].([]any)
 	schema := readJSON(t, "v1.1/pool-status.schema.json")
 	for _, edit := range []string{"empty-proof", "null-generation", "null-absent", "null-count", "unknown-absent", "wrong-reason", "empty-wasm-revision", "empty-wasm-evidence-revision"} {
 		t.Run(edit, func(t *testing.T) {
-			var r map[string]any
-			for _, raw := range fixtures {
-				f := raw.(map[string]any)
-				if f["name"] == "verified-absence-wasm" {
-					r = clone(t, f["report"].(map[string]any))
-				}
-			}
-			if r == nil {
-				t.Fatal("missing fixture")
-			}
+			r := fixtureReport(t, "verified-absence-wasm")
 			a := r["verifiedAbsence"].([]any)[0].(map[string]any)
 			switch edit {
 			case "empty-proof":

@@ -1378,6 +1378,108 @@
           }
         ]
       }
+    },
+    {
+      "name": "readAt-single-digit-hour",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-01-01T1:00:00Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "readAt-comma-fraction",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-01-01T00:00:00,5Z",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "readAt-offset-hour-24",
+      "report": {
+        "poolRef": {
+          "namespace": "shared-runtime",
+          "name": "falcone-pool-example"
+        },
+        "observedGeneration": 5,
+        "reporterEpoch": 2,
+        "observationSeq": 10,
+        "desiredReplicas": 0,
+        "readyReplicas": 0,
+        "revisions": [],
+        "readyCapacity": 0,
+        "draining": false,
+        "conditions": [],
+        "absenceVerified": true,
+        "runtimeMode": "wasm",
+        "contractRevision": "1.1",
+        "verifiedAbsence": [
+          {
+            "generation": 5,
+            "readAt": "2026-01-01T00:00:00+24:00",
+            "absent": {
+              "deployments": true,
+              "services": true,
+              "leases": true,
+              "replicaSets": true,
+              "pods": true
+            }
+          }
+        ]
+      }
     }
   ]
 }

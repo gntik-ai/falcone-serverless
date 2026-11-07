@@ -1,6 +1,7 @@
 package poolstatus_test
 
 import (
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -8,6 +9,33 @@ import (
 
 	"github.com/gntik-ai/falcone-serverless/controller/internal/status/poolstatus"
 )
+
+func TestContractReasonCodesMatchGoConstants(t *testing.T) {
+	data, err := os.ReadFile(contractDir + "../pool-status-report.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, table, ok := strings.Cut(string(data), "| Reason | Type |\n| --- | --- |\n")
+	if !ok {
+		t.Fatal("missing condition reason table")
+	}
+	table, _, _ = strings.Cut(table, "\n\n")
+	got := map[string]string{}
+	for _, row := range strings.Split(strings.TrimSpace(table), "\n") {
+		cells := strings.Split(row, "|")
+		if len(cells) != 4 {
+			t.Fatalf("malformed reason row: %s", row)
+		}
+		typ, reason := strings.TrimSpace(cells[2]), strings.TrimSpace(cells[1])
+		if _, exists := got[typ]; exists {
+			t.Fatalf("duplicate condition reason: %s", typ)
+		}
+		got[typ] = reason
+	}
+	if !reflect.DeepEqual(got, poolstatus.ConditionReasons) {
+		t.Fatalf("contract reason codes %v differ from Go %v", got, poolstatus.ConditionReasons)
+	}
+}
 
 func TestSchemaMatchesGoTypesAndConstants(t *testing.T) {
 	schema := readJSON(t, "v1.1/pool-status.schema.json")["$defs"].(map[string]any)["current"].(map[string]any)

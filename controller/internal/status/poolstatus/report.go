@@ -9,11 +9,19 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"math/big"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 )
 
 const ContractRevision = "1.1"
+
+// Match the published schema's syntax as well as parsing the calendar date:
+// time.Parse alone accepts a single-digit hour, comma fractions and +24:00.
+var readAtPattern = regexp.MustCompile(`^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$`)
+
 const (
 	UIDMismatch             = "UIDMismatch"
 	ResourceVersionMismatch = "ResourceVersionMismatch"
@@ -187,9 +195,8 @@ func (f field) check(v any, strict bool) error {
 		if !ok {
 			return errors.New("expected integer")
 		}
-		v, err := n.Float64()
-		if err != nil || math.IsInf(v, 0) || math.Trunc(v) != v {
-			return errors.New("expected integer")
+		if _, err := wireInteger(n); err != nil {
+			return err
 		}
 	case "boolean":
 		if _, ok := v.(bool); !ok {
@@ -199,25 +206,50 @@ func (f field) check(v any, strict bool) error {
 	return nil
 }
 
-// discardUnknown runs after shape checking. Go's struct decoder also matches
-// JSON tags case-insensitively; remove unknown v1 keys at every depth so those
-// keys cannot override the contract's exact, case-sensitive field names.
-func (f field) discardUnknown(v any) {
+// wireInteger accepts JSON Schema integer representations without float rounding.
+// Keep the typed report's int64 range; fractional and overflowing inputs fail.
+func wireInteger(n json.Number) (int64, error) {
+	if value, err := n.Int64(); err == nil {
+		return value, nil
+	}
+	mantissa, _, _ := strings.Cut(strings.ToLower(n.String()), "e")
+	if strings.Trim(mantissa, "-+.0") == "" {
+		return 0, nil
+	}
+	// Reject extreme exponents before allocating an exact rational. A nonzero
+	// value that underflows to zero cannot be an integer.
+	approx, err := n.Float64()
+	if err == nil && approx != 0 && !math.IsInf(approx, 0) && math.Trunc(approx) == approx {
+		if exact, ok := new(big.Rat).SetString(n.String()); ok && exact.IsInt() && exact.Num().IsInt64() {
+			return exact.Num().Int64(), nil
+		}
+	}
+	return 0, errors.New("expected int64 integer")
+}
+
+// canonicalValue runs after shape checking. Normalize integer representations
+// for Go's struct decoder and remove unknown v1 keys at every depth: its
+// case-insensitive tag matching must not override the exact contract names.
+func (f field) canonicalValue(v any, discardUnknown bool) any {
 	switch f.kind {
 	case "object":
 		obj := v.(map[string]any)
 		for key, value := range obj {
 			if child, ok := f.properties[key]; ok {
-				child.discardUnknown(value)
-			} else {
+				obj[key] = child.canonicalValue(value, discardUnknown)
+			} else if discardUnknown {
 				delete(obj, key)
 			}
 		}
 	case "array":
-		for _, item := range v.([]any) {
-			f.item.discardUnknown(item)
+		for i, item := range v.([]any) {
+			v.([]any)[i] = f.item.canonicalValue(item, discardUnknown)
 		}
+	case "integer":
+		value, _ := wireInteger(v.(json.Number)) // Shape checking already succeeded.
+		return value
 	}
+	return v
 }
 
 // ValidateJSON validates required keys, wire types, and revision-specific rules.
@@ -259,9 +291,7 @@ func ValidateJSON(data []byte) error {
 		}
 	}
 	// Unknown extension fields in v1 are ignored, including their wire types.
-	if !extended {
-		shape.discardUnknown(doc)
-	}
+	shape.canonicalValue(doc, !extended)
 	canonical, err := json.Marshal(doc)
 	if err != nil {
 		return err
@@ -342,6 +372,9 @@ func validate(r Report, extended bool) error {
 	for _, a := range r.VerifiedAbsence {
 		if a.Generation < 0 {
 			return errors.New("negative absence generation")
+		}
+		if !readAtPattern.MatchString(a.ReadAt) {
+			return errors.New("invalid readAt")
 		}
 		if _, err := time.Parse(time.RFC3339Nano, a.ReadAt); err != nil {
 			return errors.New("invalid readAt")
