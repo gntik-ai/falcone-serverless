@@ -210,6 +210,7 @@ type storeClient struct {
 	down                   bool             // every request fails with a transport error
 	fault                  map[string]error // per-operation error
 	hang                   chan struct{}    // when set, a request blocks until it is closed or cancelled
+	afterUpdate            func()           // when set, runs after an update was applied, before it returns
 	creates, updates, gets int
 }
 
@@ -310,6 +311,9 @@ func (c *storeClient) Update(ctx context.Context, l leader.Lease) (leader.Lease,
 	s.bump(&l)
 	stored := s.clone(l)
 	s.lease = &stored
+	if c.afterUpdate != nil {
+		defer c.afterUpdate()
+	}
 	return s.clone(l), nil
 }
 
@@ -328,6 +332,7 @@ type dutyProbe struct {
 	started   int
 	cancelled int
 	gates     []*leader.Gate
+	ctx       context.Context
 	stuck     bool // ignore cancellation until released
 	release   chan struct{}
 	changed   signal // notified whenever the duty starts or stops
@@ -342,8 +347,10 @@ func (p *dutyProbe) duty(ctx context.Context, g *leader.Gate) {
 	p.gates = append(p.gates, g)
 	stuck := p.stuck
 	p.mu.Unlock()
+	p.ctx = ctx
 	p.changed.notify()
 	<-ctx.Done()
+	p.changed.notify()
 	if stuck {
 		<-p.release
 	}
@@ -352,6 +359,13 @@ func (p *dutyProbe) duty(ctx context.Context, g *leader.Gate) {
 	p.cancelled++
 	p.mu.Unlock()
 	p.changed.notify()
+}
+
+// ctxDone reports whether the duty's context has been cancelled.
+func (p *dutyProbe) ctxDone() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.ctx != nil && p.ctx.Err() != nil
 }
 
 func (p *dutyProbe) snapshot() (running, started, cancelled int) {

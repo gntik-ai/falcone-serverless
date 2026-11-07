@@ -102,12 +102,19 @@ func (g *Gate) Token() (Token, bool) {
 // Open reports whether the gate is open now.
 func (g *Gate) Open() bool { _, ok := g.Token(); return ok }
 
-func (g *Gate) extend(deadline time.Time) {
+// extend moves the deadline forward and reports whether the gate was still open to
+// be extended. An expired gate is never reopened: a renewal that completes after the
+// old deadline cannot undo a closure that duties and standbys may already rely on.
+func (g *Gate) extend(deadline time.Time) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !g.closed && deadline.After(g.deadline) {
+	if g.closed || !g.clock.Now().Before(g.deadline) {
+		return false
+	}
+	if deadline.After(g.deadline) {
 		g.deadline = deadline
 	}
+	return true
 }
 
 func (g *Gate) close() {
@@ -275,9 +282,13 @@ func (e *Elector) secs() int64 { return int64(e.cfg.Timings.LeaseDuration / time
 
 func (e *Elector) stamp(t time.Time) string { return t.UTC().Format(microTimeLayout) }
 
+var errGateExpired = errors.New("the leadership gate expired while a request was pending")
+
 // call runs one Lease request with a timeout read from the injected clock, so a
-// hung request returns an error instead of holding the loop.
-func (e *Elector) call(ctx context.Context, fn func(context.Context) (Lease, error)) (Lease, error) {
+// hung request returns an error instead of holding the loop. A non-nil until ends
+// the wait early with errGateExpired, so a holder acts on its gate deadline instead
+// of waiting for the request timeout.
+func (e *Elector) call(ctx context.Context, until <-chan time.Time, fn func(context.Context) (Lease, error)) (Lease, error) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type result struct {
@@ -289,6 +300,8 @@ func (e *Elector) call(ctx context.Context, fn func(context.Context) (Lease, err
 	select {
 	case r := <-ch:
 		return r.l, r.err
+	case <-until:
+		return Lease{}, errGateExpired
 	case <-e.clock.After(e.cfg.Timings.RequestTimeout()):
 		return Lease{}, errors.New("lease request timed out")
 	case <-ctx.Done():
@@ -300,11 +313,16 @@ func (e *Elector) renew(ctx context.Context, g *Gate) {
 	start := e.clock.Now()
 	rec := e.rec
 	rec.RenewTime = e.stamp(start)
-	got, err := e.call(ctx, func(c context.Context) (Lease, error) { return e.client.Update(c, rec) })
+	// The gate deadline, not the request timeout, bounds the wait: the gate closes
+	// and the duties are cancelled at the deadline even while the request is pending.
+	got, err := e.call(ctx, e.clock.After(g.remaining()), func(c context.Context) (Lease, error) { return e.client.Update(c, rec) })
 	switch {
 	case err == nil && got.UID == e.rec.UID && got.Holder == e.cfg.Identity:
 		e.rec = got
-		g.extend(start.Add(e.cfg.Timings.RenewDeadline))
+		if !g.extend(start.Add(e.cfg.Timings.RenewDeadline)) {
+			e.stepDown("the renew deadline passed before the renewal completed")
+			return
+		}
 	case err == nil:
 		e.stepDown("another holder or Lease replaced ours")
 		return
@@ -318,7 +336,7 @@ func (e *Elector) renew(ctx context.Context, g *Gate) {
 }
 
 func (e *Elector) campaign(ctx context.Context) {
-	l, err := e.call(ctx, func(c context.Context) (Lease, error) { return e.client.Get(c) })
+	l, err := e.call(ctx, nil, func(c context.Context) (Lease, error) { return e.client.Get(c) })
 	now := e.clock.Now()
 	switch {
 	case err == nil:
@@ -418,7 +436,7 @@ func (e *Elector) create(ctx context.Context) {
 		RenewTime:            e.stamp(start),
 		LeaseTransitions:     transitions,
 	}
-	got, err := e.call(ctx, func(c context.Context) (Lease, error) { return e.client.Create(c, l) })
+	got, err := e.call(ctx, nil, func(c context.Context) (Lease, error) { return e.client.Create(c, l) })
 	switch {
 	case err == nil:
 		e.lead(got, start)
@@ -436,7 +454,7 @@ func (e *Elector) takeOver(ctx context.Context, l Lease) {
 	n.LeaseDurationSeconds = e.secs()
 	n.AcquireTime, n.RenewTime = e.stamp(start), e.stamp(start)
 	n.LeaseTransitions = max(l.LeaseTransitions, e.maxTransitions) + 1
-	got, err := e.call(ctx, func(c context.Context) (Lease, error) { return e.client.Update(c, n) })
+	got, err := e.call(ctx, nil, func(c context.Context) (Lease, error) { return e.client.Update(c, n) })
 	switch {
 	case err == nil:
 		e.lead(got, start)
@@ -528,7 +546,7 @@ func (e *Elector) Shutdown() {
 	rec := e.rec
 	rec.Holder = ""
 	rec.RenewTime = e.stamp(e.clock.Now())
-	if _, err := e.call(context.Background(), func(c context.Context) (Lease, error) { return e.client.Update(c, rec) }); err != nil {
+	if _, err := e.call(context.Background(), nil, func(c context.Context) (Lease, error) { return e.client.Update(c, rec) }); err != nil {
 		e.logf("leader: the Lease was not released; it will expire")
 	}
 }

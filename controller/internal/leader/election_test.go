@@ -381,6 +381,88 @@ func TestHungRenewalClosesTheGateAtItsDeadline(t *testing.T) {
 	<-done
 }
 
+// TestPendingRenewalDoesNotDelayCancellationPastTheGateDeadline runs the real Run
+// loop. A renewal starts 0.5s before the gate expires and hangs. The duty must be
+// cancelled at the deadline, not at the request timeout, and the late response must
+// not reopen the gate. A standby, which saw the unchanged record from the last
+// renewal, takes over no earlier than a lease duration later, after the old duty's
+// drain bound.
+func TestPendingRenewalDoesNotDelayCancellationPastTheGateDeadline(t *testing.T) {
+	clock, store := newFakeClock(), &fakeStore{}
+	a := newInstance(t, clock, store, "a", defaults)
+	b := newInstance(t, clock, store, "b", defaults)
+	a.duty.stuck = true // the duty ignores cancellation until released
+	holdFirst(t, clock, a)
+	t0 := clock.since() // the acquisition request started here
+	b.tick()            // b observes the record a wrote, at t0
+	a.client.hang = make(chan struct{})
+	clock.Advance(9500 * time.Millisecond) // 0.5s before the gate deadline, with no tick between
+	if !a.open() {
+		t.Fatal("gate closed before its deadline")
+	}
+	base := clock.pending()
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { a.el.Run(ctx); close(done) }()
+	clock.waitTimers(t, base+2) // the request timeout and the gate-expiry timer
+	clock.Advance(500 * time.Millisecond)
+	a.duty.await(t, "the duty to be cancelled at the deadline", func() bool {
+		running, _, cancelled := a.duty.snapshot()
+		return running == 1 && a.duty.ctxDone() && cancelled == 0
+	})
+	if a.open() {
+		t.Fatal("gate open at its deadline while the renewal was pending")
+	}
+	if got := clock.since() - t0; got != 10*sec {
+		t.Fatalf("test is out of step: %v after the last renewal, want 10s", got)
+	}
+	close(a.client.hang) // the late response arrives; a stale success must not reopen the gate
+	if a.open() {
+		t.Fatal("a response after the deadline reopened the gate")
+	}
+	// The standby must not take over before a lease duration after its observation.
+	clock.Advance(4 * sec) // t0+14s
+	b.tick()
+	if b.open() || a.open() {
+		t.Fatalf("t0+14s: a open=%v b open=%v", a.open(), b.open())
+	}
+	close(a.duty.release) // the old duty finishes inside the drain bound (t0+15s)
+	a.duty.await(t, "the old duty to finish", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
+	clock.Advance(sec) // t0+15s
+	b.tick()
+	if !b.open() {
+		t.Fatal("standby did not take over a lease duration after its observation")
+	}
+	if a.open() {
+		t.Fatal("both gates open")
+	}
+	stop()
+	<-done
+}
+
+// TestRenewalCompletingAfterTheOldDeadlineNeverReopensTheGate makes the renewal
+// succeed only after the clock passed the gate deadline.
+func TestRenewalCompletingAfterTheOldDeadlineNeverReopensTheGate(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		clock, store := newFakeClock(), &fakeStore{}
+		a := newInstance(t, clock, store, "a", defaults)
+		holdFirst(t, clock, a)
+		clock.Advance(9500 * time.Millisecond)
+		a.client.afterUpdate = func() { clock.Advance(sec) } // the response arrives at deadline + 0.5s
+		a.tick()
+		if a.open() {
+			t.Fatal("a renewal completing after the old deadline reopened the gate")
+		}
+		a.duty.await(t, "the duty to be cancelled", func() bool { r, _, c := a.duty.snapshot(); return r == 0 && c == 1 })
+		a.client.afterUpdate = nil
+		clock.Advance(2 * sec)
+		a.tick()
+		if a.open() {
+			t.Fatal("gate reopened without a new acquisition")
+		}
+	}
+}
+
 func TestForeignLeaseWithoutOwnershipMetadataIsNeverTakenOver(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
