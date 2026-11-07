@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -711,3 +712,82 @@ func (b bytesReader) Read(p []byte) (int, error) { copy(p, b); return len(p), ni
 
 var _ = errors.New
 var _ = context.Background
+
+// slowClient makes every successful request take d of fake time, as a slow but
+// healthy API server does, and records when each update was sent.
+type slowClient struct {
+	leader.Client
+	clock   *fakeClock
+	d       time.Duration
+	mu      sync.Mutex
+	updates []time.Duration
+}
+
+func (c *slowClient) firstUpdate() (time.Duration, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.updates) == 0 {
+		return 0, false
+	}
+	return c.updates[0], true
+}
+
+func (c *slowClient) Get(ctx context.Context) (leader.Lease, error) {
+	l, err := c.Client.Get(ctx)
+	c.clock.Advance(c.d)
+	return l, err
+}
+
+func (c *slowClient) Update(ctx context.Context, l leader.Lease) (leader.Lease, error) {
+	c.mu.Lock()
+	c.updates = append(c.updates, c.clock.since())
+	c.mu.Unlock()
+	return c.Client.Update(ctx, l)
+}
+
+// TestRunLoopTakeoverBoundHoldsWithSlowRequests: request latency is part of the
+// polling interval, not added to it. With every request taking 0.99s, B polls
+// every retry period (start to start), so it acquires no later than leaseDuration
+// + 2 x retryPeriod after A's last renewal.
+func TestRunLoopTakeoverBoundHoldsWithSlowRequests(t *testing.T) {
+	clock, store := newFakeClock(), &fakeStore{}
+	a := newInstance(t, clock, store, "a", defaults)
+	holdFirst(t, clock, a) // A never renews again after this acquisition
+	lastRenew := clock.since()
+	b := newInstance(t, clock, store, "b", defaults)
+	slow := &slowClient{Client: b.client, clock: clock, d: 990 * time.Millisecond}
+	el, err := leader.New(leader.Config{
+		Namespace: releaseNS, Identity: "b-0123abcd", Timings: defaults, Client: slow, Clock: clock,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(1500 * time.Millisecond) // B's polling phase relative to A's renewal
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { el.Run(ctx); close(done) }()
+	seen := 0
+	var sentAt time.Duration
+	for {
+		if at, ok := slow.firstUpdate(); ok {
+			sentAt = at
+			break
+		}
+		// Wait for Run to block on its polling wait: a new After call that is not
+		// a request timeout. Then let that wait elapse.
+		var d time.Duration
+		clock.changed.await(t, "the Run loop to wait for its next poll", func() bool {
+			n, last := clock.afterCalls()
+			d = last
+			return n > seen && last != defaults.RequestTimeout()
+		})
+		seen, _ = clock.afterCalls()
+		clock.Advance(d)
+	}
+	limit := defaults.LeaseDuration + 2*defaults.RetryPeriod
+	if got := sentAt - lastRenew; got > limit {
+		t.Fatalf("B sent its takeover %v after A's last renewal; want within %v", got, limit)
+	}
+	stop()
+	<-done
+}

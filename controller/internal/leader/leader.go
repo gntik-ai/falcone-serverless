@@ -241,11 +241,15 @@ func (e *Elector) Token() (Token, bool) {
 	return Token{}, false
 }
 
-// Run campaigns until ctx ends, then shuts down gracefully.
+// Run campaigns until ctx ends, then shuts down gracefully. Ticks start one
+// retry period apart, start to start: the time a tick took is part of that period
+// and never added to it, so slow requests cannot stretch the polling interval
+// that the takeover bound (leaseDuration + 2 x retryPeriod) is built on.
 func (e *Elector) Run(ctx context.Context) {
 	for ctx.Err() == nil {
+		started := e.clock.Now()
 		e.Tick(ctx)
-		wait := e.cfg.Timings.RetryPeriod
+		wait := max(e.cfg.Timings.RetryPeriod-e.clock.Now().Sub(started), 0)
 		if g := e.current.Load(); g != nil {
 			if rem := g.remaining(); rem < wait {
 				wait = max(rem, 0)

@@ -66,7 +66,8 @@ type fakeClock struct {
 	mu      sync.Mutex
 	now     time.Time
 	timers  []fakeTimer
-	changed signal // notified whenever a timer is registered
+	afters  []time.Duration // the duration of every After call, in order
+	changed signal          // notified whenever a timer is registered
 }
 
 type fakeTimer struct {
@@ -85,9 +86,11 @@ func (c *fakeClock) Now() time.Time {
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
 	ch := make(chan time.Time, 1)
+	c.afters = append(c.afters, d)
 	if d <= 0 {
 		ch <- c.now
 		c.mu.Unlock()
+		c.changed.notify()
 		return ch
 	}
 	c.timers = append(c.timers, fakeTimer{at: c.now.Add(d), ch: ch})
@@ -113,6 +116,16 @@ func (c *fakeClock) Advance(d time.Duration) {
 
 // since is the fake time elapsed since the start of the test.
 func (c *fakeClock) since() time.Duration { return c.Now().Sub(epoch0) }
+
+// afterCalls returns how many After calls have been made, and the last duration.
+func (c *fakeClock) afterCalls() (int, time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.afters) == 0 {
+		return 0, 0
+	}
+	return len(c.afters), c.afters[len(c.afters)-1]
+}
 
 func (c *fakeClock) pending() int {
 	c.mu.Lock()
@@ -346,8 +359,8 @@ func (p *dutyProbe) duty(ctx context.Context, g *leader.Gate) {
 	p.started++
 	p.gates = append(p.gates, g)
 	stuck := p.stuck
-	p.mu.Unlock()
 	p.ctx = ctx
+	p.mu.Unlock()
 	p.changed.notify()
 	<-ctx.Done()
 	p.changed.notify()
