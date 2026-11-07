@@ -98,6 +98,7 @@ retry rule above. Do not overwrite, adopt or delete a mismatching resource.
 | `UIDMismatch` | UID changed since the ownership-verified read in this attempt: keep the resource and block completion. |
 | `ResourceVersionMismatch` | A resourceVersion precondition conflict in this attempt: keep the resource and block completion; clear after a fresh read verifies the same UID and owner, then retry using that read's resourceVersion. |
 | `OwnershipMismatch` | Bound tenant/profile/revision, owner metadata or ownership format version differs or is missing: keep the resource and block completion. |
+| `MissingPreconditions` | A same-attempt ownership-verified UID or resourceVersion is unavailable: keep the resource and block completion; obtain a fresh read and full ownership verification before retrying. |
 
 ## OCI
 

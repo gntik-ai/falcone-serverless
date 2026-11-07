@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	contractDir   = "../../../docs/contracts/pool-preflight/v1"
-	prereqsDoc    = "../../../docs/operations/install-prerequisites.md"
-	staleContrDir = "../../../docs/contracts/pool-status"
+	contractDir           = "../../../docs/contracts/pool-preflight/v1"
+	prereqsDoc            = "../../../docs/operations/install-prerequisites.md"
+	poolStatusContractDir = "../../../docs/contracts/pool-status"
 )
 
 type conformanceReport struct {
@@ -275,9 +275,24 @@ func TestSchemaMatchesGoConstants(t *testing.T) {
 	}
 }
 
-func TestPoolStatusContractDirectoryDoesNotExist(t *testing.T) {
-	if _, err := os.Stat(staleContrDir); !os.IsNotExist(err) {
-		t.Fatalf("docs/contracts/pool-status must not exist (err=%v): the report is pool-preflight", err)
+func TestNoPreflightDocumentUnderPoolStatus(t *testing.T) {
+	err := filepath.WalkDir(poolStatusContractDir, func(path string, entry os.DirEntry, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		if strings.Contains(string(readFile(t, path)), "pool-preflight") {
+			t.Errorf("preflight document lives under pool-status: %s", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

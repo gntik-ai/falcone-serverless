@@ -3,6 +3,7 @@
 
 Contract: ctr-pool-status-report
 contractVersion: 1
+contractRevision: 1.1
 
 This is the report a namespaced pool controller sends to Falcone for DEP-03,
 implementing FR-DEP-05 (a restarted controller converges on one pool
@@ -51,6 +52,29 @@ status and tenant reason from the [Status mapping](#status-mapping) tables.
 | `runtimeMode` | `wasm` or `oci` | yes | tenant |
 | `revision` | string | oci | operator |
 | `materialized` | boolean | oci | operator |
+| `contractRevision` | string | no | operator |
+| `ownedObjects` | array | no | operator |
+| `ownedObjects[].kind` | string | entry | operator |
+| `ownedObjects[].namespace` | string | entry | operator |
+| `ownedObjects[].name` | string | entry | operator |
+| `ownedObjects[].uid` | string | entry | operator |
+| `ownedObjects[].resourceVersion` | string | entry | operator |
+| `conditions[].objectRef` | object | no | operator |
+| `conditions[].objectRef.kind` | string | entry | operator |
+| `conditions[].objectRef.name` | string | entry | operator |
+| `conditions[].remainingDescendants` | object | TerminationPending | operator |
+| `conditions[].remainingDescendants.replicaSets` | integer | entry | operator |
+| `conditions[].remainingDescendants.pods` | integer | entry | operator |
+| `verifiedAbsence` | array | no | operator |
+| `verifiedAbsence[].revision` | string | oci | operator |
+| `verifiedAbsence[].generation` | integer | entry | operator |
+| `verifiedAbsence[].readAt` | string | entry | operator |
+| `verifiedAbsence[].absent` | object | entry | operator |
+| `verifiedAbsence[].absent.deployments` | boolean | entry | operator |
+| `verifiedAbsence[].absent.services` | boolean | entry | operator |
+| `verifiedAbsence[].absent.leases` | boolean | entry | operator |
+| `verifiedAbsence[].absent.replicaSets` | boolean | entry | operator |
+| `verifiedAbsence[].absent.pods` | boolean | entry | operator |
 
 Notes:
 
@@ -65,6 +89,11 @@ Notes:
 - `conditions[]` has no free-text message field. Condition types are listed in
   [Repair conditions](#repair-conditions) and [Status mapping](#status-mapping).
   Tenant-visible text comes only from the mapping tables, never from a report field.
+
+These are report values only: they never replace the
+same-attempt fresh-read preconditions of resource ownership.
+Until a reviewed mechanism proves descendant absence, the controller must
+report absenceVerified=false.
 
 ## Transport
 
@@ -108,6 +137,8 @@ rules and never changes stored state.
   no such counter, so it reuses the Lease and fencing patterns: the controller
   keeps it in memory, restarts it when `reporterEpoch` rises, and never reuses a
   value within an epoch.
+- A changed `readAt` or `resourceVersion` is a different payload and requires
+  a new `observationSeq`.
 
 ## Ordering cases
 
@@ -153,6 +184,8 @@ it owned are absent.
 | `UIDMismatch` | Keep the resource and block completion; status stays deletion_pending |
 | `ResourceVersionMismatch` | Keep the resource and block completion; status stays deletion_pending |
 | `OwnershipMismatch` | Keep the resource and block completion; status stays deletion_pending |
+| `MissingPreconditions` | Keep the resource and block completion; status stays deletion_pending |
+| `TerminationPending` | Keep the resource and block completion while descendants remain; status stays deletion_pending |
 
 ## Status mapping
 

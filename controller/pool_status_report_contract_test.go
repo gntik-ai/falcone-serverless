@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -13,8 +16,8 @@ import (
 // It parses the Markdown contract and checks fields, sections, refusal rules, the
 // ordering table against a reference comparator, the status and OCI mappings and
 // field visibility. It reads repository files only and cannot judge whether the
-// prose is wise; reviewers still read the semantics. A change to the contract bumps
-// contractVersion and updates this checker and the comparator in the same change.
+// prose is wise; reviewers still read the semantics. Additive revisions retain
+// contractVersion; breaking changes bump it. Both update this gate.
 
 const (
 	poolStatusContractPath = "../docs/contracts/pool-status-report.md"
@@ -26,17 +29,24 @@ var (
 
 	// Phrases a section must contain, compared after collapsing whitespace.
 	poolStatusPhrases = map[string][]string{
-		"Fields":               {"no free-text message field", "exactly the entry named by `revision`"},
-		"Transport":            {"HTTP", "gRPC"},
-		"Authentication":       {"ctr-platform-service-identity"},
-		"Authorization":        {"ctr-namespace-bindings", "never from report fields", "namespaceMode", "ADR 0011", "alone does not establish tenant ownership", "before ordering"},
-		"Generation semantics": {"observedGeneration", "reporterEpoch", "observationSeq", "Lease", "fencing", "contractVersion"},
-		"Ordering cases":       {"lexicographic"},
-		"Repair conditions":    {"absenceVerified"},
-		"Status mapping":       {"readiness only"},
+		"Fields": {
+			"no free-text message field", "exactly the entry named by `revision`",
+			"Until a reviewed mechanism proves descendant absence, the controller must report absenceVerified=false.",
+			"These are report values only: they never replace the same-attempt fresh-read preconditions",
+		},
+		"Transport":      {"HTTP", "gRPC"},
+		"Authentication": {"ctr-platform-service-identity"},
+		"Authorization":  {"ctr-namespace-bindings", "never from report fields", "namespaceMode", "ADR 0011", "alone does not establish tenant ownership", "before ordering"},
+		"Generation semantics": {
+			"observedGeneration", "reporterEpoch", "observationSeq", "Lease", "fencing", "contractVersion",
+			"A changed `readAt` or `resourceVersion` is a different payload and requires a new `observationSeq`.",
+		},
+		"Ordering cases":    {"lexicographic"},
+		"Repair conditions": {"absenceVerified"},
+		"Status mapping":    {"readiness only"},
 	}
 
-	poolStatusFields = []struct{ name, typ, required string }{
+	poolStatusV1Fields = []struct{ name, typ, required string }{
 		{"poolRef", "object", "yes"},
 		{"poolRef.namespace", "string", "yes"},
 		{"poolRef.name", "string", "yes"},
@@ -59,8 +69,35 @@ var (
 		{"materialized", "boolean", "oci"},
 	}
 
+	poolStatusExtensionFields = []struct{ name, typ, required string }{
+		{"contractRevision", "string", "no"},
+		{"ownedObjects", "array", "no"},
+		{"ownedObjects[].kind", "string", "entry"},
+		{"ownedObjects[].namespace", "string", "entry"},
+		{"ownedObjects[].name", "string", "entry"},
+		{"ownedObjects[].uid", "string", "entry"},
+		{"ownedObjects[].resourceVersion", "string", "entry"},
+		{"conditions[].objectRef", "object", "no"},
+		{"conditions[].objectRef.kind", "string", "entry"},
+		{"conditions[].objectRef.name", "string", "entry"},
+		{"conditions[].remainingDescendants", "object", "TerminationPending"},
+		{"conditions[].remainingDescendants.replicaSets", "integer", "entry"},
+		{"conditions[].remainingDescendants.pods", "integer", "entry"},
+		{"verifiedAbsence", "array", "no"},
+		{"verifiedAbsence[].revision", "string", "oci"},
+		{"verifiedAbsence[].generation", "integer", "entry"},
+		{"verifiedAbsence[].readAt", "string", "entry"},
+		{"verifiedAbsence[].absent", "object", "entry"},
+		{"verifiedAbsence[].absent.deployments", "boolean", "entry"},
+		{"verifiedAbsence[].absent.services", "boolean", "entry"},
+		{"verifiedAbsence[].absent.leases", "boolean", "entry"},
+		{"verifiedAbsence[].absent.replicaSets", "boolean", "entry"},
+		{"verifiedAbsence[].absent.pods", "boolean", "entry"},
+	}
+	poolStatusFields = append(slices.Clone(poolStatusV1Fields), poolStatusExtensionFields...)
+
 	poolStatusAuthRules = []string{"unverified_identity", "unbound_namespace"}
-	poolStatusRepair    = []string{"UIDMismatch", "ResourceVersionMismatch", "OwnershipMismatch"}
+	poolStatusRepair    = []string{"UIDMismatch", "ResourceVersionMismatch", "OwnershipMismatch", "MissingPreconditions", "TerminationPending"}
 	poolStatusStatuses  = []string{"disabled", "unavailable", "deploying", "active", "deletion_pending"}
 	poolStatusOCIConds  = []string{"ImagePullFailed", "ContainerStartFailed", "ContractProbeFailed", "Dematerialized"}
 	poolStatusOutcomes  = []string{"applied", "replay_noop", "refused", "conflict_refused"}
@@ -300,7 +337,7 @@ var orderingScenarios = map[string]orderingScenario{
 func checkPoolStatusReport(doc string) []string {
 	var errs []string
 	lines := strings.Split(doc, "\n")
-	for _, want := range []string{"Contract: ctr-pool-status-report", "contractVersion: 1"} {
+	for _, want := range []string{"Contract: ctr-pool-status-report", "contractVersion: 1", "contractRevision: 1.1"} {
 		if !slices.Contains(lines, want) {
 			errs = append(errs, fmt.Sprintf("header: missing line %q", want))
 		}
@@ -660,6 +697,39 @@ func TestPoolStatusReportContract(t *testing.T) {
 	}
 }
 
+func TestPoolStatusDeletionPendingRequiresVerifiedEvidence(t *testing.T) {
+	tb, ok := findTable(poolStatusDoc(t), "Status")
+	if !ok {
+		t.Fatal("missing status mapping")
+	}
+	for _, row := range tb.rows {
+		if cellText(row[0]) != "deletion_pending" {
+			continue
+		}
+		for _, clause := range []string{"until", "contractRevision is 1.1", "absenceVerified=true", "nonempty verifiedAbsence", "together"} {
+			if !strings.Contains(cellText(row[1]), clause) {
+				t.Errorf("deletion_pending must require revision 1.1 and verified absence together: missing %q in %q", clause, cellText(row[1]))
+			}
+		}
+		return
+	}
+	t.Fatal("missing deletion_pending mapping")
+}
+
+func TestPoolStatusReportRequiresCleanupSafetyClauses(t *testing.T) {
+	doc := poolStatusDoc(t)
+	for _, clause := range []string{
+		"Until a reviewed mechanism proves descendant absence, the controller must\nreport absenceVerified=false.",
+		"These are report values only: they never replace the\nsame-attempt fresh-read preconditions",
+		"A changed `readAt` or `resourceVersion` is a different payload and requires\n  a new `observationSeq`.",
+	} {
+		t.Run(strings.Fields(clause)[0], func(t *testing.T) {
+			mutated := replaceOnce(t, doc, clause, "elided")
+			wantError(t, checkPoolStatusReport(mutated), "missing phrase")
+		})
+	}
+}
+
 func TestPoolStatusReportRejectsMissingHeader(t *testing.T) {
 	doc := poolStatusDoc(t)
 	wantError(t, checkPoolStatusReport(replaceOnce(t, doc, "contractVersion: 1\n", "contractVersion: 2\n")), "contractVersion: 1")
@@ -931,5 +1001,116 @@ func TestPoolStatusReportContractRejectsIncompleteFixture(t *testing.T) {
 	}
 	for _, parts := range want {
 		wantError(t, errs, parts...)
+	}
+}
+
+// The baseline is pinned independently to the original contractVersion 1 field
+// table, not to the extended schema. Mutations prove that weakening the baseline
+// cannot make the compatibility check pass.
+func baselineFieldTableErrors(schema map[string]any) []string {
+	type fieldRow struct{ name, typ, required string }
+	var got []fieldRow
+	var walk func(map[string]any, string)
+	walk = func(s map[string]any, prefix string) {
+		props, _ := s["properties"].(map[string]any)
+		req, _ := s["required"].([]any)
+		for name, raw := range props {
+			f := raw.(map[string]any)
+			path := prefix + name
+			required := "no"
+			for _, r := range req {
+				if r == name {
+					required = "yes"
+				}
+			}
+			if path == "revision" || path == "materialized" {
+				required = "oci"
+			}
+			typ, _ := f["type"].(string)
+			if path == "runtimeMode" {
+				if !reflect.DeepEqual(f["enum"], []any{"wasm", "oci"}) {
+					typ = "wrong enum"
+				} else {
+					typ = "wasm or oci"
+				}
+			}
+			got = append(got, fieldRow{path, typ, required})
+			if typ == "object" {
+				walk(f, path+".")
+			}
+			if typ == "array" {
+				walk(f["items"].(map[string]any), path+"[].")
+			}
+		}
+	}
+	walk(schema, "")
+	var errs []string
+	// The table's "oci" requirement is conditional, and cannot be inferred
+	// just from a property named revision being present in the schema.
+	const ociRule = `[{"if":{"properties":{"runtimeMode":{"const":"oci"}}},"then":{"required":["revision","materialized"],"properties":{"revisions":{"minItems":1,"maxItems":1}}},"else":{"not":{"anyOf":[{"required":["revision"]},{"required":["materialized"]}]}}}]`
+	var expectedOCI any
+	if err := json.Unmarshal([]byte(ociRule), &expectedOCI); err != nil {
+		panic(err)
+	}
+	if !reflect.DeepEqual(schema["allOf"], expectedOCI) {
+		errs = append(errs, "v1 OCI requirements differ from table")
+	}
+	if schema["type"] != "object" || schema["additionalProperties"] != true {
+		errs = append(errs, "v1 must be an extensible object")
+	}
+
+	if len(got) != len(poolStatusV1Fields) {
+		errs = append(errs, "v1 field count differs from table")
+	}
+	for _, want := range poolStatusV1Fields {
+		if !slices.Contains(got, fieldRow(want)) {
+			errs = append(errs, "v1 field differs from table: "+want.name)
+		}
+	}
+	return errs
+}
+func TestPoolStatusV1BaselineMatchesFieldTable(t *testing.T) {
+	data, err := os.ReadFile("../docs/contracts/pool-status/v1/pool-status.schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if errs := baselineFieldTableErrors(schema); len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	doc := readFile(t, poolStatusContractPath)
+	table, ok := findTable(splitSections(doc)["Fields"], "Name")
+	if !ok {
+		t.Fatal("missing table")
+	}
+	rows := rowsByKey(table)
+	for _, f := range poolStatusV1Fields {
+		row := rows[f.name]
+		if len(row) != 1 || cell(row[0], 1) != f.typ || cell(row[0], 2) != f.required {
+			t.Fatalf("v1 field table changed: %s", f.name)
+		}
+	}
+	for _, edit := range []string{"removed", "retyped", "optional", "oci-optional"} {
+		var mutant map[string]any
+		if err := json.Unmarshal(data, &mutant); err != nil {
+			t.Fatal(err)
+		}
+		props := mutant["properties"].(map[string]any)
+		switch edit {
+		case "removed":
+			delete(props, "readyCapacity")
+		case "retyped":
+			props["readyCapacity"] = map[string]any{"type": "string"}
+		case "optional":
+			mutant["required"] = []any{}
+		case "oci-optional":
+			delete(mutant, "allOf")
+		}
+		if len(baselineFieldTableErrors(mutant)) == 0 {
+			t.Fatalf("weakened baseline %s passed", edit)
+		}
 	}
 }
