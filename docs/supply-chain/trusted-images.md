@@ -51,8 +51,10 @@ The binary ignores arguments. At start-up it runs the read-only OPS-01 preflight
 `FALCONE_SERVERLESS_VALUES` (default `/etc/falcone-serverless/values.json`), sends
 only SelfSubjectAccessReviews to the Kubernetes API with its service account, and
 prints one `pool-preflight/v1` JSON report to stdout. It prints
-`falcone-serverless-controller 0.1.0` after the report and exits 0 only when the
-preflight passed; otherwise it exits 1 without starting. The image therefore exits 1
+`falcone-serverless-controller 0.1.0` after the report once the preflight passed and
+`POD_NAMESPACE` and `POD_NAME` are valid, then campaigns for the leader Lease in its
+release namespace and runs until SIGTERM or SIGINT, when it releases the Lease and
+exits 0; otherwise it exits 1 without starting. The image therefore exits 1
 outside a configured cluster, and a run job that checks it must expect that. Real
 flag parsing and `--help` output belong to DEP-03 (#23).
 

@@ -10,7 +10,21 @@ asks the Kubernetes API, with SelfSubjectAccessReviews only, whether its own
 identity holds the verbs below, and it reports whether the values file declares
 every prerequisite. It prints one `pool-preflight/v1` JSON report to stdout. When
 the result is `failed` it exits 1 and starts nothing; when it is `passed` it
-continues. The preflight creates, updates, adopts and deletes nothing.
+continues to the leader election (`docs/operations/degraded-behavior.md`). The
+preflight itself creates, updates, adopts and deletes nothing.
+
+## Pod environment for leader election
+
+After a passed preflight the controller needs two environment variables from the
+downward API. Without them, or with a wrong value, it exits 1 before it sends any
+Lease request, with the preflight report on stdout unchanged.
+
+| Variable | Source | Rule |
+| --- | --- | --- |
+| `POD_NAMESPACE` | `metadata.namespace` | Must equal `controllerNamespace`. The one Lease `falcone-pool-controller-leader` lives there and nowhere else. |
+| `POD_NAME` | `metadata.name` | A valid pod name; the holder identity adds a random suffix. |
+
+A passed controller then runs until SIGTERM or SIGINT instead of exiting 0.
 
 ## Values the controller reads
 

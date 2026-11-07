@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -46,6 +47,8 @@ type pfAPI struct {
 	requests []pfRequest
 	granted  map[preflight.Requirement]bool
 	respond  func(w http.ResponseWriter, r *http.Request) bool
+	// fail answers HTTP 500 to the review of the requirements it selects.
+	fail func(preflight.Requirement) bool
 }
 
 type pfRequest struct {
@@ -62,6 +65,7 @@ func newPFAPI(t *testing.T, table []preflight.Requirement) *pfAPI {
 	}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body)) // respond hooks read it again
 		rec := pfRequest{method: r.Method, path: r.URL.Path}
 		var review struct {
 			Spec struct {
@@ -76,6 +80,10 @@ func newPFAPI(t *testing.T, table []preflight.Requirement) *pfAPI {
 		f.mu.Lock()
 		f.requests = append(f.requests, rec)
 		f.mu.Unlock()
+		if f.fail != nil && f.fail(rec.attrs) {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		if f.respond != nil && f.respond(w, r) {
 			return
 		}
@@ -100,7 +108,9 @@ type pfEnv struct {
 	files map[string][]byte
 	calls int
 	out   bytes.Buffer
-	api   *pfAPI
+	// errOut collects the diagnostics written to stderr.
+	errOut bytes.Buffer
+	api    *pfAPI
 }
 
 func pfValues(edit func(m map[string]any)) []byte {
@@ -137,7 +147,10 @@ func pfNewEnv(t *testing.T, values []byte) *pfEnv {
 	}
 	return &pfEnv{
 		api: api,
-		env: map[string]string{"KUBERNETES_SERVICE_HOST": host, "KUBERNETES_SERVICE_PORT": port},
+		env: map[string]string{
+			"KUBERNETES_SERVICE_HOST": host, "KUBERNETES_SERVICE_PORT": port,
+			"POD_NAMESPACE": pfController, "POD_NAME": "controller-7d9f6c-abcde",
+		},
 		files: map[string][]byte{
 			pfValuesPath: values,
 			pfTokenPath:  []byte(pfToken + "\n"),
@@ -146,7 +159,11 @@ func pfNewEnv(t *testing.T, values []byte) *pfEnv {
 }
 
 func (e *pfEnv) run() int {
-	return run(deps{
+	// The start hook ends the context, as a SIGTERM right after start-up would: the
+	// run then shuts down without a single Lease request.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	return run(ctx, deps{
 		getenv: func(k string) string { return e.env[k] },
 		readFile: func(name string) ([]byte, error) {
 			if data, ok := e.files[name]; ok {
@@ -156,8 +173,9 @@ func (e *pfEnv) run() int {
 		},
 		client:  e.api.Client(),
 		timeout: 2 * time.Second,
-		start:   func() { e.calls++ },
+		start:   func() { e.calls++; cancel() },
 		stdout:  &e.out,
+		stderr:  &e.errOut,
 	})
 }
 
