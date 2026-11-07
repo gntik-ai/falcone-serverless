@@ -12,6 +12,7 @@
     (import "host" "memory" (memory 2 4))
     (import "host" "publish" (func $publish (param i32 i32 i32 i32 i32)))
     (data (i32.const 1024) "ordersother")
+    (func (export "spin") (loop br 0))
     (func (export "run") (param $mode i32) (result i32)
       (call $publish (i32.const 1024) (i32.const 6) (i32.const 4096) (local.get $mode) (i32.const 0))
       (if (result i32) (i32.load8_u (i32.const 0))
@@ -20,5 +21,6 @@
   (core instance $host
     (export "memory" (memory $memory)) (export "publish" (func $publish)))
   (core instance $guest (instantiate $guest (with "host" (instance $host))))
+  (func (export "spin") (canon lift (core func $guest "spin")))
   (func (export "run") (param "mode" u32) (result u32)
     (canon lift (core func $guest "run"))))

@@ -70,6 +70,7 @@ pub enum Invalid {
     Unbounded,
     AboveCeiling,
     Unknown,
+    Duplicate,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,35 +90,78 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+// Named, required fields let serde reject duplicate keys before constructing
+// values; a generic JSON object would silently overwrite the earlier value.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Document {
+    version: Value,
+    compile_cpu_seconds: Value,
+    compile_memory_bytes: Value,
+    compile_wall_clock_ms: Value,
+    compile_input_bytes: Value,
+    guest_memory_bytes: Value,
+    guest_to_host_bytes: Value,
+    host_to_guest_bytes: Value,
+    guest_deadline_ms: Value,
+    host_call_deadline_ms: Value,
+    termination_budget_ms: Value,
+}
+
+fn document_error(error: serde_json::Error) -> Error {
+    let message = error.to_string();
+    for (prefix, kind) in [
+        ("missing field `", Invalid::Missing),
+        ("unknown field `", Invalid::Unknown),
+        ("duplicate field `", Invalid::Duplicate),
+    ] {
+        if let Some(rest) = message.strip_prefix(prefix)
+            && let Some((field, _)) = rest.split_once('`')
+        {
+            return if field == "version" {
+                Error::Version
+            } else {
+                Error::Field {
+                    field: field.into(),
+                    kind,
+                }
+            };
+        }
+    }
+    Error::Document
+}
+
 /// Private values ensure only fully validated contracts can reach the host.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Limits([u64; 10]);
 impl Limits {
     pub fn parse(source: &str) -> Result<Self, Error> {
-        let document: Value = serde_json::from_str(source).map_err(|_| Error::Document)?;
-        let object = document.as_object().ok_or(Error::Document)?;
-        if object.get("version").and_then(Value::as_u64) != Some(1) {
+        if !source.trim_start().starts_with('{') {
+            return Err(Error::Document);
+        }
+        let document: Document = serde_json::from_str(source).map_err(document_error)?;
+        if document.version.as_u64() != Some(1) {
             return Err(Error::Version);
         }
-        for name in object.keys() {
-            if name != "version" && !Field::ALL.iter().any(|field| field.name() == name) {
-                return Err(Error::Field {
-                    field: name.clone(),
-                    kind: Invalid::Unknown,
-                });
-            }
-        }
+        let inputs = [
+            document.compile_cpu_seconds,
+            document.compile_memory_bytes,
+            document.compile_wall_clock_ms,
+            document.compile_input_bytes,
+            document.guest_memory_bytes,
+            document.guest_to_host_bytes,
+            document.host_to_guest_bytes,
+            document.guest_deadline_ms,
+            document.host_call_deadline_ms,
+            document.termination_budget_ms,
+        ];
         let mut values = [0; 10];
-        for field in Field::ALL {
+        for (field, input) in Field::ALL.into_iter().zip(inputs) {
             let error = |kind| Error::Field {
                 field: field.name().into(),
                 kind,
             };
-            let value = object
-                .get(field.name())
-                .ok_or_else(|| error(Invalid::Missing))?
-                .as_u64()
-                .ok_or_else(|| error(Invalid::WrongType))?;
+            let value = input.as_u64().ok_or_else(|| error(Invalid::WrongType))?;
             let invalid = match value {
                 0 => Some(Invalid::Zero),
                 u64::MAX => Some(Invalid::Unbounded),

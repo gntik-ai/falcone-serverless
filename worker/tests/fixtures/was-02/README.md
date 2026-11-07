@@ -129,7 +129,9 @@ The two buffer ceilings and host-call ceiling remain owned by
 `falcone:host@0.1.0`; this contract can lower them, never raise them. The other
 ceilings make this qualification contract finite and are not RUN-02 profiles.
 `Host::new` retains the earlier 256 MiB / 1 MiB / 30 s behavior.
-`Host::with_limits` consumes an already validated contract. The public timeout
+`Host::with_limits` consumes an already validated contract. Duplicate limit
+fields are rejected with a field-specific error, and duplicate versions are
+version errors. Every field accepts its exact ceiling. The public timeout
 override can shorten calls, but cannot raise the validated host-call ceiling.
 The guest deadline requires an epoch-enabled engine, fails closed without one,
 starts immediately before instantiation, and includes guest start functions. Its timer stops and
@@ -143,7 +145,9 @@ record per fixture: `compile_cpu`, `compile_memory`, `guest_memory`,
 `guest_to_host`, `storage_reply`, `http_reply`, `guest_deadline`,
 `host_call_deadline`, and `termination`. Any failure makes the mode exit
 nonzero; an unknown mode also exits nonzero. Missing execution or event evidence
-cannot pass. Sensitivity tests reject injected success on a cancelled call,
+cannot pass. Records carry observed host events and compiler diagnostics,
+not the expected values. Sensitivity tests exercise the runner record path and
+reject injected success on a cancelled call,
 a missing memory event, an over-budget duration, and a skipped fixture.
 
 The embedded `limits-v1.json` contains qualification values only. Compilation
@@ -171,7 +175,11 @@ than assumed after a sleep. The guest sees only WIT `timeout`; host evidence is
 `host-call-uncertain` while the binding remains blocked and
 `host-call-cancelled` only after helper exit/join is observed. Evidence stays
 uncertain for an earlier blocked call when a later timed-out binding exits;
-cancelled requires every timed-out binding to have exited. Finished tickets are
+cancelled requires every timed-out binding to have exited. `Host::host_call_outcome()`
+reports this evidence independently; the summary `Host::outcome()` prioritizes
+it over memory, buffer and interruption events. Combined-event WIT regressions
+keep a binding blocked while the guest handles a buffer rejection or loops
+until its epoch deadline. Neither event can hide uncertainty. Finished tickets are
 discarded on subsequent timeouts, so evidence retention is bounded by the helper
 budget. Stalling fixtures serialize and release their bindings, including during
 assertion unwinding.

@@ -59,7 +59,7 @@ fn compile_case(cpu: bool) -> Result<Value, String> {
         } else {
             "compile_memory_limit_exceeded"
         };
-        super::budget_case(
+        let observed = super::budget_case(
             &root.join("cache"),
             &child,
             &bytes,
@@ -68,7 +68,7 @@ fn compile_case(cpu: bool) -> Result<Value, String> {
             diagnostic,
         )?;
         Ok(
-            json!({"outcome":diagnostic,"reaped":true,"published_on_failure":false,"recovery_compiled":true}),
+            json!({"outcome":observed,"reaped":true,"published_on_failure":false,"recovery_compiled":true}),
         )
     })();
     std::fs::remove_dir_all(root).map_err(|_| "scratch_cleanup")?;
@@ -173,10 +173,22 @@ fn termination() -> Result<Value, String> {
     )
 }
 
-fn record(name: &str, expected: &str, execute: impl FnOnce() -> Result<Value, String>) -> bool {
+/// Execute one qualification fixture and return its externally emitted record.
+/// An absent executor represents a fixture that did not run, never a pass.
+pub fn run_fixture(
+    name: &str,
+    expected: &str,
+    execute: Option<impl FnOnce() -> Result<Value, String>>,
+) -> Value {
     let started = Instant::now();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute))
-        .unwrap_or_else(|_| Err("fixture assertion failed".into()));
+    let executed = execute.is_some();
+    let result = execute.map_or_else(
+        || Err("fixture did not execute".into()),
+        |execute| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute))
+                .unwrap_or_else(|_| Err("fixture assertion failed".into()))
+        },
+    );
     let evidence = result.as_ref().ok().cloned();
     let observed = evidence
         .as_ref()
@@ -205,7 +217,7 @@ fn record(name: &str, expected: &str, execute: impl FnOnce() -> Result<Value, St
         _ => None,
     };
     let status = limits_evidence::limits_fixture(
-        true,
+        executed,
         observed,
         expected,
         elapsed,
@@ -213,11 +225,15 @@ fn record(name: &str, expected: &str, execute: impl FnOnce() -> Result<Value, St
         result.map(|_| ()),
     );
     let mut value = serde_json::to_value(status).expect("outcome JSON");
-    let passed = value["status"] == "passed";
     value["check"] = json!(name);
     value["evidence"] = json!(evidence);
+    value
+}
+
+fn record(name: &str, expected: &str, execute: impl FnOnce() -> Result<Value, String>) -> bool {
+    let value = run_fixture(name, expected, Some(execute));
     println!("{value}");
-    passed
+    value["status"] == "passed"
 }
 
 pub fn run() -> std::process::ExitCode {
@@ -227,45 +243,42 @@ pub fn run() -> std::process::ExitCode {
     passed &= record("compile_memory", "compile_memory_limit_exceeded", || {
         compile_case(false)
     });
-    let cases: [(&str, fn(), &str); 6] = [
+    type GuestFixture = fn() -> Option<ExecutionOutcome>;
+    let cases: [(&str, GuestFixture, &str); 6] = [
         (
             "guest_memory",
-            fixtures::guest_memory_denial_records_a_host_event_even_when_the_guest_recovers,
+            fixtures::guest_memory_outcome,
             "guest-memory-limit",
         ),
         (
             "guest_to_host",
             || {
-                fixtures::configured_guest_buffer_checks_the_entire_aggregate_before_binding();
                 fixtures::configured_storage_keys_are_checked_before_copying_or_binding();
+                fixtures::guest_buffer_outcome()
             },
             "buffer-limit",
         ),
         (
             "storage_reply",
-            fixtures::configured_storage_reply_is_not_delivered_above_the_aggregate_limit,
+            fixtures::storage_reply_outcome,
             "buffer-limit",
         ),
-        (
-            "http_reply",
-            fixtures::configured_http_reply_is_not_delivered_above_the_aggregate_limit,
-            "buffer-limit",
-        ),
+        ("http_reply", fixtures::http_reply_outcome, "buffer-limit"),
         (
             "guest_deadline",
-            fixtures::configured_guest_deadline_interrupts_an_infinite_loop,
+            fixtures::guest_deadline_outcome,
             "guest-interrupted",
         ),
         (
             "host_call_deadline",
-            fixtures::host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed,
+            fixtures::host_call_deadline_outcome,
             "host-call-cancelled",
         ),
     ];
     for (name, execute, expected) in cases {
         passed &= record(name, expected, || {
-            execute();
-            Ok(json!({"outcome":expected}))
+            let observed = execute();
+            Ok(json!({"outcome":observed}))
         });
     }
     passed &= record("termination", "terminated", termination);
@@ -273,5 +286,55 @@ pub fn run() -> std::process::ExitCode {
         std::process::ExitCode::SUCCESS
     } else {
         std::process::ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runner_records_reject_injected_success_missing_events_and_unexecuted_fixtures() {
+        let success = run_fixture(
+            "host_call_deadline",
+            "host-call-cancelled",
+            Some(|| Ok(json!({"outcome":"success"}))),
+        );
+        assert_eq!(success["status"], "failed");
+        assert_eq!(success["evidence"]["outcome"], "success");
+        let missing = run_fixture(
+            "guest_memory",
+            "guest-memory-limit",
+            Some(|| Ok(json!({"outcome":null}))),
+        );
+        assert_eq!(missing["status"], "failed");
+        let skipped = run_fixture(
+            "guest_memory",
+            "guest-memory-limit",
+            None::<fn() -> Result<Value, String>>,
+        );
+        assert_eq!(skipped["status"], "failed");
+        assert!(
+            skipped["reason"]
+                .as_str()
+                .unwrap()
+                .contains("did not execute")
+        );
+    }
+
+    #[test]
+    fn runner_records_measure_termination_from_cancel_request() {
+        let value = run_fixture(
+            "termination",
+            "terminated",
+            Some(|| Ok(json!({"outcome":"terminated", "cancel_elapsed_ms":7001}))),
+        );
+        assert_eq!(value["status"], "failed");
+        assert!(
+            value["reason"]
+                .as_str()
+                .unwrap()
+                .contains("deadline plus tolerance")
+        );
     }
 }

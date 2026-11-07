@@ -193,22 +193,38 @@ impl Helper {
     }
 }
 
-struct Bytes(usize, usize, Arc<AtomicBool>);
+struct Bytes {
+    total: usize,
+    limit: usize,
+    exceeded: Arc<AtomicBool>,
+}
 impl Bytes {
     fn input(host: &Host) -> Self {
-        Self(0, host.guest_to_host_bytes, host.buffer_denied.clone())
+        Self {
+            total: 0,
+            limit: host.guest_to_host_bytes,
+            exceeded: host.buffer_denied.clone(),
+        }
     }
     fn output(host: &Host) -> Self {
-        Self(0, host.host_to_guest_bytes, host.buffer_denied.clone())
+        Self {
+            total: 0,
+            limit: host.host_to_guest_bytes,
+            exceeded: host.buffer_denied.clone(),
+        }
     }
 }
 impl Bytes {
     fn add(&mut self, bytes: usize) -> Result<(), HostError> {
-        if self.0.checked_add(bytes).is_none_or(|sum| sum > self.1) {
-            self.2.store(true, Ordering::Release);
+        if self
+            .total
+            .checked_add(bytes)
+            .is_none_or(|sum| sum > self.limit)
+        {
+            self.exceeded.store(true, Ordering::Release);
             return Err(HostError::LimitExceeded);
         }
-        self.0 += bytes;
+        self.total += bytes;
         Ok(())
     }
 }
@@ -411,25 +427,36 @@ impl Host {
         host
     }
 
+    /// Summary evidence prioritizes timed-out bindings: guest events cannot make
+    /// their external effects certain. Callers can inspect host calls separately.
     pub fn outcome(&self) -> Option<super::ExecutionOutcome> {
-        if self.memory_denied {
-            Some(super::ExecutionOutcome::GuestMemoryLimit)
-        } else if self.buffer_denied.load(Ordering::Acquire) {
-            Some(super::ExecutionOutcome::BufferLimit)
-        } else if self.interrupted {
-            Some(super::ExecutionOutcome::GuestInterrupted)
-        } else {
-            let calls = self
-                .cancelled_calls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if calls.iter().any(|ticket| !ticket.finished()) {
-                Some(super::ExecutionOutcome::HostCallUncertain)
-            } else if !calls.is_empty() {
-                Some(super::ExecutionOutcome::HostCallCancelled)
+        self.host_call_outcome().or_else(|| {
+            if self.memory_denied {
+                Some(super::ExecutionOutcome::GuestMemoryLimit)
+            } else if self.buffer_denied.load(Ordering::Acquire) {
+                Some(super::ExecutionOutcome::BufferLimit)
+            } else if self.interrupted {
+                Some(super::ExecutionOutcome::GuestInterrupted)
             } else {
                 None
             }
+        })
+    }
+
+    /// Independent evidence of timed-out calls, regardless of guest limits or
+    /// traps. Cancelled means every recorded binding exit/join was observed;
+    /// neither cancelled nor uncertain implies rollback or safe replay.
+    pub fn host_call_outcome(&self) -> Option<super::ExecutionOutcome> {
+        let calls = self
+            .cancelled_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if calls.iter().any(|ticket| !ticket.finished()) {
+            Some(super::ExecutionOutcome::HostCallUncertain)
+        } else if !calls.is_empty() {
+            Some(super::ExecutionOutcome::HostCallCancelled)
+        } else {
+            None
         }
     }
 

@@ -14,6 +14,7 @@ fn complete_contract_parses_without_defaults() {
     let limits = Limits::parse(&config().to_string()).unwrap();
     assert_eq!(limits.get(Field::GuestDeadlineMs), 1000);
     for field in Field::ALL {
+        assert_eq!(limits.get(field), config()[field.name()].as_u64().unwrap());
         let mut value = config();
         value.as_object_mut().unwrap().remove(field.name());
         assert_eq!(
@@ -40,6 +41,10 @@ fn invalid_values_name_each_field_and_reason() {
         (Field::HostCallDeadlineMs, 30000),
         (Field::TerminationBudgetMs, 30000),
     ] {
+        let mut at_ceiling = config();
+        at_ceiling[field.name()] = json!(ceiling);
+        let limits = Limits::parse(&at_ceiling.to_string()).unwrap();
+        assert_eq!(limits.get(field), ceiling);
         for (value, kind) in [
             (json!(0), Invalid::Zero),
             (json!(u64::MAX), Invalid::Unbounded),
@@ -86,4 +91,35 @@ fn version_and_document_errors_are_typed() {
     assert_eq!(Limits::parse(&config.to_string()), Err(Error::Version));
     assert_eq!(Limits::parse("[]"), Err(Error::Document));
     assert_eq!(Limits::parse("{"), Err(Error::Document));
+}
+
+#[test]
+fn duplicate_fields_are_rejected_instead_of_overwritten() {
+    for field in Field::ALL {
+        for value in [0, 1] {
+            let source =
+                config()
+                    .to_string()
+                    .replacen('{', &format!("{{\"{}\":{value},", field.name()), 1);
+            assert_eq!(
+                Limits::parse(&source),
+                Err(Error::Field {
+                    field: field.name().into(),
+                    kind: Invalid::Duplicate,
+                })
+            );
+        }
+    }
+    let source = config().to_string().replacen('{', "{\"version\":1,", 1);
+    assert_eq!(Limits::parse(&source), Err(Error::Version));
+}
+
+#[test]
+fn positional_documents_are_not_a_closed_named_contract() {
+    assert_eq!(
+        Limits::parse(
+            "[1,120,4294967296,300000,67108864,268435456,1048576,1048576,1000,30000,5000]"
+        ),
+        Err(Error::Document)
+    );
 }

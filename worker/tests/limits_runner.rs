@@ -31,13 +31,28 @@ fn runner_executes_every_fixture_and_reaps_the_cancel_ignoring_child() {
         "termination",
     ];
     assert_eq!(records.len(), expected.len());
-    for name in expected {
+    let outcomes = [
+        "compile_cpu_limit_exceeded",
+        "compile_memory_limit_exceeded",
+        "guest-memory-limit",
+        "buffer-limit",
+        "buffer-limit",
+        "buffer-limit",
+        "guest-interrupted",
+        "host-call-cancelled",
+        "terminated",
+    ];
+    for (name, outcome) in expected.into_iter().zip(outcomes) {
         let matching: Vec<_> = records
             .iter()
             .filter(|record| record["check"] == name)
             .collect();
         assert_eq!(matching.len(), 1, "{name}: {records:?}");
         assert_eq!(matching[0]["status"], "passed", "{name}: {records:?}");
+        assert_eq!(
+            matching[0]["evidence"]["outcome"], outcome,
+            "{name}: {records:?}"
+        );
     }
     let termination = records
         .iter()

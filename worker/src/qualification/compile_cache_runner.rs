@@ -40,11 +40,12 @@ fn budget_case(
     failure: CompileLimits,
     control: CompileLimits,
     diagnostic: &str,
-) -> Result<(), String> {
+) -> Result<&'static str, String> {
     let mut cache = Cache::new(root, child).map_err(|error| error.code.to_owned())?;
     let result = cache.compile(3, bytes, failure, &AtomicBool::new(false));
+    let verdict = cache::verdict(&result);
     check(
-        cache::verdict(&result) == ("rejected", Some(diagnostic)),
+        verdict == ("rejected", Some(diagnostic)),
         "wrong_resource_outcome",
     )?;
     check(
@@ -62,7 +63,10 @@ fn budget_case(
     check(
         !control.cache_hit && cache.spawn_count() == 2,
         "control_not_compiled",
-    )
+    )?;
+    verdict
+        .1
+        .ok_or_else(|| "missing_resource_diagnostic".into())
 }
 
 fn qualify(root: &Path, child: &Path) -> Result<(), String> {
@@ -128,6 +132,7 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
         limits(),
         "compile_memory_limit_exceeded",
     )
+    .map(|_| ())
 }
 
 fn main() -> std::process::ExitCode {

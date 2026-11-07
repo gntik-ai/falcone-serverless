@@ -1367,10 +1367,16 @@ fn execution_limits() -> falcone_serverless_worker::limits::Limits {
         .unwrap()
 }
 
-#[cfg_attr(test, test)]
-pub fn configured_guest_buffer_checks_the_entire_aggregate_before_binding() {
+#[cfg(test)]
+#[test]
+fn configured_guest_buffer_checks_the_entire_aggregate_before_binding() {
+    guest_buffer_outcome();
+}
+
+pub fn guest_buffer_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     let engine = limits_engine();
+    let mut observed = None;
     for (payload, expected, calls) in [(50, 0, 1), (51, 2, 0)] {
         let binding = Arc::new(Recording::default());
         let context = Context {
@@ -1391,8 +1397,9 @@ pub fn configured_guest_buffer_checks_the_entire_aggregate_before_binding() {
             .unwrap();
         assert_eq!(run.call(&mut store, (payload,)).unwrap(), (expected,));
         assert_eq!(binding.0.load(Ordering::SeqCst), calls);
+        observed = store.data().outcome();
         assert_eq!(
-            store.data().outcome(),
+            observed,
             if calls == 0 {
                 Some(host::ExecutionOutcome::BufferLimit)
             } else {
@@ -1400,10 +1407,16 @@ pub fn configured_guest_buffer_checks_the_entire_aggregate_before_binding() {
             }
         );
     }
+    observed
 }
 
-#[cfg_attr(test, test)]
-pub fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
+#[cfg(test)]
+#[test]
+fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
+    storage_reply_outcome();
+}
+
+pub fn storage_reply_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     struct Storage {
         calls: AtomicUsize,
@@ -1417,6 +1430,7 @@ pub fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
         }
     }
     let engine = limits_engine();
+    let mut observed = None;
     for (bytes, expected, delivered) in [(60, 0, 60), (61, 2, 0)] {
         let binding = Arc::new(Storage {
             calls: AtomicUsize::new(0),
@@ -1452,8 +1466,9 @@ pub fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
             .unwrap();
         assert_eq!(allocated.call(&mut store, ()).unwrap(), (delivered,));
         assert_eq!(binding.calls.load(Ordering::SeqCst), 1);
+        observed = store.data().outcome();
         assert_eq!(
-            store.data().outcome(),
+            observed,
             if expected == 2 {
                 Some(host::ExecutionOutcome::BufferLimit)
             } else {
@@ -1461,10 +1476,16 @@ pub fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
             }
         );
     }
+    observed
 }
 
-#[cfg_attr(test, test)]
-pub fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
+#[cfg(test)]
+#[test]
+fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
+    http_reply_outcome();
+}
+
+pub fn http_reply_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     struct Http {
         calls: AtomicUsize,
@@ -1491,6 +1512,7 @@ pub fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
         }
     }
     let engine = limits_engine();
+    let mut observed = None;
     for (bytes, expected, delivered) in [(54, 0, 54), (55, 2, 0)] {
         let binding = Arc::new(Http {
             calls: AtomicUsize::new(0),
@@ -1518,8 +1540,9 @@ pub fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
             .unwrap();
         assert_eq!(allocated.call(&mut store, ()).unwrap(), (delivered,));
         assert_eq!(binding.calls.load(Ordering::SeqCst), 1);
+        observed = store.data().outcome();
         assert_eq!(
-            store.data().outcome(),
+            observed,
             if expected == 2 {
                 Some(host::ExecutionOutcome::BufferLimit)
             } else {
@@ -1527,10 +1550,16 @@ pub fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
             }
         );
     }
+    observed
 }
 
-#[cfg_attr(test, test)]
-pub fn guest_memory_denial_records_a_host_event_even_when_the_guest_recovers() {
+#[cfg(test)]
+#[test]
+fn guest_memory_denial_records_a_host_event_even_when_the_guest_recovers() {
+    guest_memory_outcome();
+}
+
+pub fn guest_memory_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     let engine = limits_engine();
     let limits = falcone_serverless_worker::limits::Limits::parse(
@@ -1547,10 +1576,8 @@ pub fn guest_memory_denial_records_a_host_event_even_when_the_guest_recovers() {
         .get_typed_func::<(u32,), (i32,)>(&mut store, "run")
         .unwrap();
     assert_eq!(run.call(&mut store, (2,)).unwrap(), (-1,));
-    assert_eq!(
-        store.data().outcome(),
-        Some(host::ExecutionOutcome::GuestMemoryLimit)
-    );
+    let observed = store.data().outcome();
+    assert_eq!(observed, Some(host::ExecutionOutcome::GuestMemoryLimit));
     // The worker and the existing guest survive, and a later valid fixture succeeds.
     assert_eq!(run.call(&mut store, (1,)).unwrap(), (2,));
     let (mut valid, instance) = host::instantiate(
@@ -1565,18 +1592,27 @@ pub fn guest_memory_denial_records_a_host_event_even_when_the_guest_recovers() {
     assert_eq!(run.call(&mut valid, (1,)).unwrap(), (2,));
     assert_eq!(valid.data().outcome(), None);
     let oversized = include_str!("fixtures/limits-memory.wat").replace(" 2 16", " 4 16");
+    let error = host::instantiate(
+        &engine,
+        oversized,
+        Host::with_limits(Context::default(), Arc::new(Recording::default()), &limits),
+    )
+    .err()
+    .expect("oversized initial memory must be rejected");
     assert!(
-        host::instantiate(
-            &engine,
-            oversized,
-            Host::with_limits(Context::default(), Arc::new(Recording::default()), &limits)
-        )
-        .is_err()
+        format!("{error:#}").contains("memory minimum size of 4 pages exceeds memory limits"),
+        "{error:#}"
     );
+    observed
 }
 
-#[cfg_attr(test, test)]
-pub fn configured_guest_deadline_interrupts_an_infinite_loop() {
+#[cfg(test)]
+#[test]
+fn configured_guest_deadline_interrupts_an_infinite_loop() {
+    guest_deadline_outcome();
+}
+
+pub fn guest_deadline_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     let mut config = wasmtime::Config::new();
     config.epoch_interruption(true).consume_fuel(false);
@@ -1605,10 +1641,16 @@ pub fn configured_guest_deadline_interrupts_an_infinite_loop() {
         Some(host::ExecutionOutcome::GuestInterrupted)
     );
     assert!(start.elapsed() <= std::time::Duration::from_secs(3));
+    store.data().outcome()
 }
 
-#[cfg_attr(test, test)]
-pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed() {
+#[cfg(test)]
+#[test]
+fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed() {
+    host_call_deadline_outcome();
+}
+
+pub fn host_call_deadline_outcome() -> Option<host::ExecutionOutcome> {
     let _case = crate::capability_support::serial_case();
     use std::sync::atomic::AtomicBool;
     use std::sync::{Condvar, Mutex};
@@ -1692,6 +1734,109 @@ pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed
     wait_for("binding exit observed", || {
         store.data().outcome() == Some(host::ExecutionOutcome::HostCallCancelled)
     });
+    store.data().host_call_outcome()
+}
+
+// Exercise combined events through the same WIT boundary as the blocked-call fixture.
+#[cfg(test)]
+fn unresolved_call_with_guest_event(interrupt: bool) {
+    let _case = crate::capability_support::serial_case();
+    use std::sync::{Condvar, Mutex};
+    struct Blocked {
+        entered: std::sync::atomic::AtomicBool,
+        release: (Mutex<bool>, Condvar),
+    }
+    impl Bindings for Blocked {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.entered.store(true, Ordering::Release);
+            let (lock, wake) = &self.release;
+            drop(
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
+            Ok(Reply::Empty)
+        }
+    }
+    struct Release(Arc<Blocked>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.release.0.lock().unwrap() = true;
+            self.0.release.1.notify_all();
+        }
+    }
+    let binding = Arc::new(Blocked {
+        entered: Default::default(),
+        release: (Mutex::new(false), Condvar::new()),
+    });
+    let release = Release(binding.clone());
+    let context = Context {
+        grants: Grants {
+            topics: vec!["orders".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let engine = limits_engine();
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/limits-events.wat"),
+        Host::with_limits(context, binding.clone(), &execution_limits()),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    if !interrupt {
+        // The guest handles the rejected limit+1 aggregate before starting a binding.
+        assert_eq!(run.call(&mut store, (51,)).unwrap(), (2,));
+        assert!(!binding.entered.load(Ordering::Acquire));
+        assert_eq!(
+            store.data().outcome(),
+            Some(host::ExecutionOutcome::BufferLimit)
+        );
+    }
+    let guest = std::thread::spawn(move || {
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (3,));
+        if interrupt {
+            let spin = instance
+                .get_typed_func::<(), ()>(&mut store, "spin")
+                .unwrap();
+            let error = spin.call(&mut store, ()).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<wasmtime::Trap>(),
+                Some(&wasmtime::Trap::Interrupt)
+            );
+        }
+        store
+    });
+    wait_for("combined-event binding entry", || {
+        binding.entered.load(Ordering::Acquire)
+    });
+    let store = guest.join().unwrap();
+    assert_eq!(
+        store.data().outcome(),
+        Some(host::ExecutionOutcome::HostCallUncertain)
+    );
+    assert_eq!(
+        store.data().host_call_outcome(),
+        Some(host::ExecutionOutcome::HostCallUncertain)
+    );
+    drop(release);
+    wait_for("combined-event binding exit", || {
+        store.data().outcome() == Some(host::ExecutionOutcome::HostCallCancelled)
+    });
+}
+
+#[cfg(test)]
+#[test]
+fn unresolved_call_is_not_hidden_by_guest_interruption() {
+    unresolved_call_with_guest_event(true);
+}
+
+#[cfg(test)]
+#[test]
+fn unresolved_call_is_not_hidden_by_a_handled_buffer_limit() {
+    unresolved_call_with_guest_event(false);
 }
 
 /// Trusted qualification child: guest computation deliberately ignores host cancellation.
