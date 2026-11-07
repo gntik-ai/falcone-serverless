@@ -1,0 +1,1 @@
+{"version":1,"compile_cpu_seconds":120,"compile_memory_bytes":4294967296,"compile_wall_clock_ms":300000,"compile_input_bytes":67108864,"guest_memory_bytes":268435456,"guest_to_host_bytes":64,"host_to_guest_bytes":64,"guest_deadline_ms":1000,"host_call_deadline_ms":100,"termination_budget_ms":5000}

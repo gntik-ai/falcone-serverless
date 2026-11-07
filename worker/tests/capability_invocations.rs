@@ -6,4 +6,4 @@ mod capability_support;
 mod counting_alloc;
 
 #[path = "../src/qualification/capability_invocations.rs"]
-mod qualification;
+pub mod qualification;

@@ -15,7 +15,7 @@ use wasmtime::component::{
     Component, ComponentType, Instance, Lift, Linker, LinkerInstance, Resource, ResourceType,
     WasmList, WasmStr,
 };
-use wasmtime::{Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
 pub const BUFFER_BYTES: usize = 1_048_576;
 pub const GUEST_MEMORY_BYTES: usize = 256 * 1024 * 1024;
@@ -160,6 +160,9 @@ struct Helper {
     operation: Option<Operation>,
     send: mpsc::SyncSender<Result<Reply, HostError>>,
     deadline: Instant,
+    guest_to_host_bytes: usize,
+    host_to_guest_bytes: usize,
+    buffer_denied: Arc<AtomicBool>,
 }
 impl Helper {
     fn run(mut self) {
@@ -170,6 +173,11 @@ impl Helper {
                 request,
                 self.deadline,
                 self.cancelled.clone(),
+                super::net::BufferLimits {
+                    input: self.guest_to_host_bytes,
+                    output: self.host_to_guest_bytes,
+                    exceeded: self.buffer_denied.clone(),
+                },
             )
             .map(Reply::Http),
             operation => self.binding.call(&self.context, operation),
@@ -178,11 +186,19 @@ impl Helper {
     }
 }
 
-#[derive(Default)]
-struct Bytes(usize);
+struct Bytes(usize, usize, Arc<AtomicBool>);
+impl Bytes {
+    fn input(host: &Host) -> Self {
+        Self(0, host.guest_to_host_bytes, host.buffer_denied.clone())
+    }
+    fn output(host: &Host) -> Self {
+        Self(0, host.host_to_guest_bytes, host.buffer_denied.clone())
+    }
+}
 impl Bytes {
     fn add(&mut self, bytes: usize) -> Result<(), HostError> {
-        if !super::aggregate_within_limit(&[self.0, bytes]) {
+        if self.0.checked_add(bytes).is_none_or(|sum| sum > self.1) {
+            self.2.store(true, Ordering::Release);
             return Err(HostError::LimitExceeded);
         }
         self.0 += bytes;
@@ -266,7 +282,7 @@ fn preflight(
     fields: Option<&WasmList<LazyPair>>,
     overhead: usize,
 ) -> Result<(), HostError> {
-    let mut bytes = Bytes::default();
+    let mut bytes = Bytes::input(store.data());
     bytes.add(overhead)?;
     for list in lists {
         bytes.add(4)?;
@@ -301,10 +317,33 @@ fn preflight(
     Ok(())
 }
 
+// Dropping the store stops and joins its timer; no delayed epoch tick survives it.
+struct DeadlineTimer {
+    stop: mpsc::SyncSender<()>,
+    join: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for DeadlineTimer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
+    }
+}
+
 pub struct Host {
     pub context: Context,
     pub bindings: Arc<dyn Bindings>,
     limits: StoreLimits,
+    memory_denied: bool,
+    buffer_denied: Arc<AtomicBool>,
+    interrupted: bool,
+    cancelled_call: Mutex<Option<Arc<CallTicket>>>,
+    guest_deadline: Option<Duration>,
+    deadline_timer: Option<DeadlineTimer>,
+    guest_memory_bytes: usize,
+    guest_to_host_bytes: usize,
+    host_to_guest_bytes: usize,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
     keys: BTreeMap<u32, (bool, String)>,
@@ -317,18 +356,82 @@ impl Host {
         Self {
             context,
             bindings,
+            memory_denied: false,
+            buffer_denied: Arc::new(AtomicBool::new(false)),
+            interrupted: false,
+            cancelled_call: Mutex::new(None),
+            guest_deadline: None,
+            deadline_timer: None,
             limits: StoreLimitsBuilder::new()
                 .memory_size(GUEST_MEMORY_BYTES)
                 .memories(1)
                 .tables(4)
                 .table_elements(GUEST_TABLE_ELEMENTS)
                 .build(),
+            guest_memory_bytes: GUEST_MEMORY_BYTES,
+            guest_to_host_bytes: BUFFER_BYTES,
+            host_to_guest_bytes: BUFFER_BYTES,
             call_timeout: Duration::from_secs(30),
             cancelled: Arc::new(AtomicBool::new(false)),
             keys: BTreeMap::new(),
             next_handle: 0,
             executions: BTreeMap::new(),
         }
+    }
+
+    /// Qualification constructor; no production profile defaults are inferred.
+    pub fn with_limits(
+        context: Context,
+        bindings: Arc<dyn Bindings>,
+        limits: &crate::limits::Limits,
+    ) -> Self {
+        use crate::limits::Field;
+        let mut host = Self::new(context, bindings);
+        host.guest_memory_bytes = limits.get(Field::GuestMemoryBytes) as usize;
+        host.guest_to_host_bytes = limits.get(Field::GuestToHostBytes) as usize;
+        host.host_to_guest_bytes = limits.get(Field::HostToGuestBytes) as usize;
+        host.guest_deadline = Some(Duration::from_millis(limits.get(Field::GuestDeadlineMs)));
+        host.call_timeout = Duration::from_millis(limits.get(Field::HostCallDeadlineMs));
+        host.limits = StoreLimitsBuilder::new()
+            .memory_size(host.guest_memory_bytes)
+            .memories(1)
+            .tables(4)
+            .table_elements(GUEST_TABLE_ELEMENTS)
+            .build();
+        host
+    }
+
+    pub fn outcome(&self) -> Option<super::ExecutionOutcome> {
+        if self.memory_denied {
+            Some(super::ExecutionOutcome::GuestMemoryLimit)
+        } else if self.buffer_denied.load(Ordering::Acquire) {
+            Some(super::ExecutionOutcome::BufferLimit)
+        } else if self.interrupted {
+            Some(super::ExecutionOutcome::GuestInterrupted)
+        } else {
+            self.cancelled_call
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .map(|ticket| {
+                    if ticket
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .finished
+                    {
+                        super::ExecutionOutcome::HostCallCancelled
+                    } else {
+                        super::ExecutionOutcome::HostCallUncertain
+                    }
+                })
+        }
+    }
+
+    /// Only the independent blocked-host-call fixture disables guest interruption.
+    pub fn without_guest_deadline_for_qualification(mut self) -> Self {
+        self.guest_deadline = None;
+        self
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
@@ -374,6 +477,9 @@ impl Host {
             operation: Some(operation),
             send,
             deadline,
+            guest_to_host_bytes: self.guest_to_host_bytes,
+            host_to_guest_bytes: self.host_to_guest_bytes,
+            buffer_denied: self.buffer_denied.clone(),
         };
         // Each permit covers one helper and its joiner. If the helper cannot be
         // spawned, its closure, and with it the reply sender, is dropped, so the
@@ -393,19 +499,67 @@ impl Host {
         loop {
             if self.cancelled.load(Ordering::Acquire) {
                 ticket.detach();
+                *self
+                    .cancelled_call
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket.clone());
                 return Err(HostError::Cancelled);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 ticket.detach();
+                *self
+                    .cancelled_call
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(ticket.clone());
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
-                Ok(reply) => return reply,
+                Ok(reply) => {
+                    if matches!(reply, Err(HostError::Timeout | HostError::Cancelled)) {
+                        *self
+                            .cancelled_call
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(ticket.clone());
+                    }
+                    return reply;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HostError::Denied),
             }
         }
+    }
+}
+
+impl ResourceLimiter for Host {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if desired > self.guest_memory_bytes {
+            self.memory_denied = true;
+        }
+        self.limits.memory_growing(current, desired, maximum)
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+    fn memories(&self) -> usize {
+        self.limits.memories()
     }
 }
 
@@ -423,6 +577,9 @@ fn storage_resource<T: Send + 'static>(
         move |mut store: StoreContextMut<'_, Host>, (key,): (WasmStr,)| {
             let result: Result<Resource<T>, HostError> = (|| {
                 let key = key.to_str(&store).map_err(|_| HostError::Denied)?;
+                let mut bytes = Bytes::input(store.data());
+                bytes.add(4)?;
+                bytes.add(key.len())?;
                 if key.len() > STORAGE_KEY_BYTES {
                     return Err(HostError::LimitExceeded);
                 }
@@ -446,7 +603,7 @@ fn storage_resource<T: Send + 'static>(
                 else {
                     return Err(HostError::Denied);
                 };
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::output(store.data());
                 bytes.add(4)?;
                 bytes.add(data.len())?;
                 Ok(data)
@@ -461,7 +618,7 @@ fn storage_resource<T: Send + 'static>(
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[], &[&data_arg], None, 4)?;
                 let key = store.data().key(handle.rep(), checkpoint)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::input(store.data());
                 bytes.add(4)?;
                 let data = data(&data_arg, &mut store, &mut bytes)?;
                 empty(store.data().call(Operation::Write {
@@ -483,7 +640,7 @@ pub fn instantiate(
     source: impl AsRef<[u8]>,
     host: Host,
 ) -> wasmtime::Result<(Store<Host>, Instance)> {
-    let mut context_bytes = Bytes::default();
+    let mut context_bytes = Bytes::output(&host);
     for value in [
         &host.context.invocation_key,
         &host.context.attempt_id,
@@ -538,7 +695,7 @@ pub fn instantiate(
         "report",
         |store: StoreContextMut<'_, Host>, (completed, total, message): (u64, u64, WasmStr)| {
             let result: Result<(), HostError> = (|| {
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::input(store.data());
                 bytes.add(16)?;
                 let message = string(&message, &store, &mut bytes)?;
                 empty(store.data().call(Operation::Progress {
@@ -567,7 +724,7 @@ pub fn instantiate(
              (destination, payload): (WasmStr, WasmList<u8>)| {
                 let result = (|| {
                     preflight(&mut store, &[&destination], &[&payload], None, 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::input(store.data());
                     let destination = string(&destination, &store, &mut bytes)?;
                     // Check list length before reading or copying even one element.
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -596,7 +753,7 @@ pub fn instantiate(
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[&message], &[], Some(&fields), 1)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::input(store.data());
                 bytes.add(1)?;
                 let message = string(&message, &store, &mut bytes)?;
                 let mut fields = pairs(&fields, &mut store, &mut bytes)?;
@@ -659,7 +816,7 @@ pub fn instantiate(
                     {
                         return Err(HostError::LimitExceeded);
                     }
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::input(store.data());
                     let workflow = string(&workflow, &store, &mut bytes)?;
                     let input = data(&input, &mut store, &mut bytes)?;
                     if !store
@@ -700,7 +857,7 @@ pub fn instantiate(
              (handle, name, payload): (Resource<Execution>, WasmStr, WasmList<u8>)| {
                 let result: Result<(), HostError> = (|| {
                     preflight(&mut store, &[&name], &[&payload], None, 4)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::input(store.data());
                     bytes.add(4)?;
                     let name = string(&name, &store, &mut bytes)?;
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -736,7 +893,7 @@ pub fn instantiate(
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
                 let result: Result<super::net::Response, HostError> = (|| {
                     preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::input(store.data());
                     let url = string(&url, &store, &mut bytes)?;
                     let method = string(&method, &store, &mut bytes)?;
                     let headers = pairs(&headers, &mut store, &mut bytes)?;
@@ -752,12 +909,43 @@ pub fn instantiate(
             },
         )?;
     }
+    let hostcall_fuel = host.guest_memory_bytes.saturating_mul(16);
     let mut store = Store::new(engine, host);
-    store.limiter(|host| &mut host.limits);
+    store.limiter(|host| host);
     // Wasmtime charges lazy cursors as if eagerly lifted. Keep that finite
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
-    store.set_hostcall_fuel(GUEST_MEMORY_BYTES * 16);
+    store.set_hostcall_fuel(hostcall_fuel);
+    if let Some(duration) = store.data().guest_deadline {
+        if !engine.get_epoch_interruption() {
+            return Err(wasmtime::Error::msg(
+                "guest deadline requires epoch interruption",
+            ));
+        }
+        let deadline = Instant::now() + duration;
+        store.set_epoch_deadline(1);
+        store.epoch_deadline_callback(move |mut store| {
+            if Instant::now() >= deadline {
+                store.data_mut().interrupted = true;
+                Err(wasmtime::Trap::Interrupt.into())
+            } else {
+                Ok(wasmtime::UpdateDeadline::Continue(1))
+            }
+        });
+        let (stop, receive) = mpsc::sync_channel(1);
+        let engine = engine.clone();
+        let join = std::thread::Builder::new()
+            .name("guest-deadline".into())
+            .spawn(move || {
+                if receive.recv_timeout(duration) == Err(mpsc::RecvTimeoutError::Timeout) {
+                    engine.increment_epoch();
+                }
+            })?;
+        store.data_mut().deadline_timer = Some(DeadlineTimer {
+            stop,
+            join: Some(join),
+        });
+    }
     let instance = linker.instantiate(&mut store, &component)?;
     Ok((store, instance))
 }

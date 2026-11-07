@@ -103,3 +103,98 @@ existing namespace guard and `FS_TEST_NAMESPACE_MODE`/`FS_TEST_NAMESPACE` rules.
 No live cluster evidence is claimed by the in-process suite. Sandbox socket
 checks report `NOT RUN: EPERM (sandbox), PR CI runs them`; the pod mode fails
 closed if it cannot create its required listeners.
+
+## Limits and cancellation contract (#125)
+
+The library exports `limits::Limits::parse` for the closed JSON contract with
+`version: 1`. All ten fields are required unsigned integers. Missing fields,
+wrong types, zero, `u64::MAX`, values above the validation ceiling, unknown
+fields and unsupported versions fail with typed errors. No contract field has
+a default. The ceilings are validation bounds, not production profile budgets:
+
+| Field | v1 validation ceiling |
+| --- | ---: |
+| compile_cpu_seconds | 3600 |
+| compile_memory_bytes | 68719476736 |
+| compile_wall_clock_ms | 3600000 |
+| compile_input_bytes | 67108864 |
+| guest_memory_bytes | 536870912 |
+| guest_to_host_bytes | 1048576 |
+| host_to_guest_bytes | 1048576 |
+| guest_deadline_ms | 300000 |
+| host_call_deadline_ms | 30000 |
+| termination_budget_ms | 30000 |
+
+The two buffer ceilings and host-call ceiling remain owned by
+`falcone:host@0.1.0`; this contract can lower them, never raise them. The other
+ceilings make this qualification contract finite and are not RUN-02 profiles.
+`Host::new` retains the earlier 256 MiB / 1 MiB / 30 s behavior.
+`Host::with_limits` consumes an already validated contract. Its guest deadline
+requires an epoch-enabled engine, fails closed without one, starts immediately
+before instantiation, and includes guest start functions. Its timer stops and
+joins when the store drops. Shared-engine epoch ticks check each store's own
+wall deadline before interrupting it. The blocked-call fixture explicitly opts
+out of guest interruption through the qualification-only constructor modifier.
+No production invocation path consumes this contract.
+
+`compile-cache-qualification --limits-cancellation` emits exactly one JSON
+record per fixture: `compile_cpu`, `compile_memory`, `guest_memory`,
+`guest_to_host`, `storage_reply`, `http_reply`, `guest_deadline`,
+`host_call_deadline`, and `termination`. Any failure makes the mode exit
+nonzero; an unknown mode also exits nonzero. Missing execution or event evidence
+cannot pass. Sensitivity tests reject injected success on a cancelled call,
+a missing memory event, an over-budget duration, and a skipped fixture.
+
+The embedded `limits-v1.json` contains qualification values only. Compilation
+uses the existing CPU and memory fixtures and budgets above, converted to
+`CompileLimits` in the binary. RLIMIT_AS measures virtual address space, not
+RSS; CPU accounting has whole-second granularity. Each failure asserts the
+specific typed diagnostic, an empty cache directory, a reaped compiler, and a
+subsequent successful control compilation.
+
+The source-only image embeds `limits-*.wat`. The memory fixture begins at two
+64 KiB pages with a lowered three-page host cap, handles a failed two-page grow,
+and still produces a host-side `guest-memory-limit` event. A one-page grow and
+a fresh valid fixture then succeed; a four-page initial memory is rejected.
+The event fixture sends 50 and 51 bytes with 14 bytes of aggregate overhead to
+a 64-byte guest-to-host limit. The reply fixtures count canonical allocations
+inside guest memory: storage delivers 60 bytes plus four bytes of overhead;
+HTTP delivers 54 bytes plus ten bytes of status/list overhead. One byte more
+returns `limit-exceeded` and allocates no guest data, after the binding ran.
+Storage-key metadata also respects the configured aggregate before copying.
+
+The guest loop uses a 1000 ms epoch deadline. The blocked call uses a 100 ms
+host-call deadline with epoch and fuel disabled and the cancellation flag unset.
+Both allow a **2000 ms scheduling tolerance**. Binding entry is observed rather
+than assumed after a sleep. The guest sees only WIT `timeout`; host evidence is
+`host-call-uncertain` while the binding remains blocked and
+`host-call-cancelled` only after helper exit/join is observed. Stalling fixtures
+serialize and release their bindings, including during assertion unwinding.
+
+The termination fixture re-execs only the trusted `current_exe`. Its embedded
+loop ignores the host cancellation flag; a pipe handshake proves the child
+received the cancellation request. Starting at that request, the parent waits
+the 5000 ms termination budget, calls `Child::kill` (SIGKILL on Linux), waits,
+and checks the reaped signal-9 status within the budget plus the same 2000 ms
+tolerance. Another valid guest is held inside its own binding across the kill
+and then completes. A drop guard kills and reaps the child on error paths.
+This is a test-only fallback, does not select ADR 0004's production process
+model, and does not imply rollback of external effects or safe replay.
+
+The new cluster suite reuses the existing `FS_TEST_*` gates and namespace
+ownership guard. It requires all nine distinct passing fixture records from a
+successful restricted pod; missing, duplicate, failed and unverified records
+are rejected. The live test is ignored by default with
+`not run: FS_TEST_CLUSTER unset`. Explicitly requesting it without valid opt-in
+inputs fails as UNVERIFIED. Fake-cluster tests cover the gates, posture,
+create/shared ownership and cleanup after failure without constructing a client.
+Operator only, after the R3 merge gate, with valid KUBECONFIG and a digest-pinned
+FS_TEST_WAS02_IMAGE already supplied:
+
+```sh
+FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_limits_cancellation -- --ignored --nocapture
+```
+
+Agents do not run that command. Cluster evidence remains unverified until the
+operator records the run on #52; no images or runtime resources are published
+by this source change.

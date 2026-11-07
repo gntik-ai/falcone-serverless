@@ -13,6 +13,18 @@ pub fn aggregate_within_limit(parts: &[usize]) -> bool {
         .is_some_and(|sum| sum <= BUFFER_BYTES)
 }
 
+/// Host evidence is independent of the guest's return value and WIT errors.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionOutcome {
+    BufferLimit,
+    GuestMemoryLimit,
+    GuestInterrupted,
+    HostCallCancelled,
+    HostCallUncertain,
+    Terminated,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ComponentType, Lift, Lower)]
 #[component(variant)]
 pub enum HostError {

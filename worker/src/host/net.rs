@@ -1,5 +1,5 @@
 //! Host-layer destination gate while ADR 0005 remains Proposed.
-use super::{BUFFER_BYTES, Bindings, Context, HostError, Pair};
+use super::{Bindings, Context, HostError, Pair};
 use std::net::{IpAddr, Ipv4Addr};
 use std::{
     net::{SocketAddr, TcpStream},
@@ -92,12 +92,12 @@ fn check_call(deadline: Instant, cancelled: &AtomicBool) -> Result<(), HostError
     }
 }
 
-fn size(headers: &[Pair], body: &[u8], initial: usize) -> Result<(), HostError> {
+fn size(headers: &[Pair], body: &[u8], initial: usize, limit: usize) -> Result<(), HostError> {
     let mut total = initial
         .checked_add(8)
         .and_then(|n| n.checked_add(body.len()))
         .ok_or(HostError::LimitExceeded)?;
-    if headers.len() > BUFFER_BYTES / 8 || total > BUFFER_BYTES {
+    if headers.len() > limit / 8 || total > limit {
         return Err(HostError::LimitExceeded);
     }
     for pair in headers {
@@ -105,7 +105,7 @@ fn size(headers: &[Pair], body: &[u8], initial: usize) -> Result<(), HostError> 
             .checked_add(8)
             .and_then(|n| n.checked_add(pair.name.len()))
             .and_then(|n| n.checked_add(pair.value.len()))
-            .filter(|n| *n <= BUFFER_BYTES)
+            .filter(|n| *n <= limit)
             .ok_or(HostError::LimitExceeded)?;
     }
     Ok(())
@@ -185,12 +185,19 @@ fn parse_url(url: &str) -> Result<Url, HostError> {
     })
 }
 
+pub(super) struct BufferLimits {
+    pub input: usize,
+    pub output: usize,
+    pub exceeded: Arc<AtomicBool>,
+}
+
 pub(super) fn request(
     binding: &dyn Bindings,
     context: &Context,
     mut request: Request,
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
+    buffers: BufferLimits,
 ) -> Result<Response, HostError> {
     if request.method.is_empty() || !request.method.bytes().all(|byte| byte.is_ascii_uppercase()) {
         return Err(HostError::Denied);
@@ -226,7 +233,9 @@ pub(super) fn request(
                 .checked_add(request.method.len())
                 .and_then(|n| n.checked_add(8))
                 .ok_or(HostError::LimitExceeded)?,
-        )?;
+            buffers.input,
+        )
+        .inspect_err(|_| buffers.exceeded.store(true, Ordering::Release))?;
         let url = parse_url(&request.url)?;
         if !context
             .grants
@@ -257,7 +266,8 @@ pub(super) fn request(
         };
         let response = binding.http(context, &pinned)?;
         check_call(deadline, &cancelled)?;
-        size(&response.headers, &response.body, 2)?;
+        size(&response.headers, &response.body, 2, buffers.output)
+            .inspect_err(|_| buffers.exceeded.store(true, Ordering::Release))?;
         if ![301, 302, 303, 307, 308].contains(&response.status) {
             return Ok(response);
         }

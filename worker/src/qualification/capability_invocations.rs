@@ -1355,3 +1355,452 @@ pub fn helper_permits_cover_thread_local_destructors() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn limits_engine() -> wasmtime::Engine {
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true);
+    wasmtime::Engine::new(&config).unwrap()
+}
+
+fn execution_limits() -> falcone_serverless_worker::limits::Limits {
+    falcone_serverless_worker::limits::Limits::parse(include_str!("fixtures/limits-v1.json"))
+        .unwrap()
+}
+
+#[cfg_attr(test, test)]
+pub fn configured_guest_buffer_checks_the_entire_aggregate_before_binding() {
+    let _case = crate::capability_support::serial_case();
+    let engine = limits_engine();
+    for (payload, expected, calls) in [(50, 0, 1), (51, 2, 0)] {
+        let binding = Arc::new(Recording::default());
+        let context = Context {
+            grants: Grants {
+                topics: vec!["orders".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/limits-events.wat"),
+            Host::with_limits(context, binding.clone(), &execution_limits()),
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(run.call(&mut store, (payload,)).unwrap(), (expected,));
+        assert_eq!(binding.0.load(Ordering::SeqCst), calls);
+        assert_eq!(
+            store.data().outcome(),
+            if calls == 0 {
+                Some(host::ExecutionOutcome::BufferLimit)
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn configured_storage_reply_is_not_delivered_above_the_aggregate_limit() {
+    let _case = crate::capability_support::serial_case();
+    struct Storage {
+        calls: AtomicUsize,
+        bytes: usize,
+    }
+    impl Bindings for Storage {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            assert!(matches!(operation, Operation::Read { .. }));
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Reply::Data(vec![42; self.bytes]))
+        }
+    }
+    let engine = limits_engine();
+    for (bytes, expected, delivered) in [(60, 0, 60), (61, 2, 0)] {
+        let binding = Arc::new(Storage {
+            calls: AtomicUsize::new(0),
+            bytes,
+        });
+        let context = Context {
+            grants: Grants {
+                prefixes: vec!["objects/".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/limits-storage.wat"),
+            Host::with_limits(
+                context,
+                binding.clone(),
+                &falcone_serverless_worker::limits::Limits::parse(
+                    &include_str!("fixtures/limits-v1.json")
+                        .replace("\"guest_to_host_bytes\":64", "\"guest_to_host_bytes\":128"),
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (expected,));
+        let allocated = instance
+            .get_typed_func::<(), (u32,)>(&mut store, "allocated")
+            .unwrap();
+        assert_eq!(allocated.call(&mut store, ()).unwrap(), (delivered,));
+        assert_eq!(binding.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.data().outcome(),
+            if expected == 2 {
+                Some(host::ExecutionOutcome::BufferLimit)
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn configured_http_reply_is_not_delivered_above_the_aggregate_limit() {
+    let _case = crate::capability_support::serial_case();
+    struct Http {
+        calls: AtomicUsize,
+        bytes: usize,
+    }
+    impl Bindings for Http {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            unreachable!()
+        }
+        fn resolve(&self, _: &str) -> Result<Vec<std::net::IpAddr>, HostError> {
+            Ok(vec!["93.184.216.34".parse().unwrap()])
+        }
+        fn http(
+            &self,
+            _: &Context,
+            _: &host::net::PinnedRequest,
+        ) -> Result<host::net::Response, HostError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(host::net::Response {
+                status: 200,
+                headers: vec![],
+                body: vec![42; self.bytes],
+            })
+        }
+    }
+    let engine = limits_engine();
+    for (bytes, expected, delivered) in [(54, 0, 54), (55, 2, 0)] {
+        let binding = Arc::new(Http {
+            calls: AtomicUsize::new(0),
+            bytes,
+        });
+        let context = Context {
+            grants: Grants {
+                hosts: vec!["allowed.test".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/limits-http.wat"),
+            Host::with_limits(context, binding.clone(), &execution_limits()),
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(run.call(&mut store, (0,)).unwrap(), (expected,));
+        let allocated = instance
+            .get_typed_func::<(), (u32,)>(&mut store, "allocated")
+            .unwrap();
+        assert_eq!(allocated.call(&mut store, ()).unwrap(), (delivered,));
+        assert_eq!(binding.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.data().outcome(),
+            if expected == 2 {
+                Some(host::ExecutionOutcome::BufferLimit)
+            } else {
+                None
+            }
+        );
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn guest_memory_denial_records_a_host_event_even_when_the_guest_recovers() {
+    let _case = crate::capability_support::serial_case();
+    let engine = limits_engine();
+    let limits = falcone_serverless_worker::limits::Limits::parse(
+        &include_str!("fixtures/limits-v1.json").replace("268435456", "196608"),
+    )
+    .unwrap();
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/limits-memory.wat"),
+        Host::with_limits(Context::default(), Arc::new(Recording::default()), &limits),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (i32,)>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, (2,)).unwrap(), (-1,));
+    assert_eq!(
+        store.data().outcome(),
+        Some(host::ExecutionOutcome::GuestMemoryLimit)
+    );
+    // The worker and the existing guest survive, and a later valid fixture succeeds.
+    assert_eq!(run.call(&mut store, (1,)).unwrap(), (2,));
+    let (mut valid, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/limits-memory.wat"),
+        Host::with_limits(Context::default(), Arc::new(Recording::default()), &limits),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (i32,)>(&mut valid, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut valid, (1,)).unwrap(), (2,));
+    assert_eq!(valid.data().outcome(), None);
+    let oversized = include_str!("fixtures/limits-memory.wat").replace(" 2 16", " 4 16");
+    assert!(
+        host::instantiate(
+            &engine,
+            oversized,
+            Host::with_limits(Context::default(), Arc::new(Recording::default()), &limits)
+        )
+        .is_err()
+    );
+}
+
+#[cfg_attr(test, test)]
+pub fn configured_guest_deadline_interrupts_an_infinite_loop() {
+    let _case = crate::capability_support::serial_case();
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true).consume_fuel(false);
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/limits-loop.wat"),
+        Host::with_limits(
+            Context::default(),
+            Arc::new(Recording::default()),
+            &execution_limits(),
+        ),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(), (i32,)>(&mut store, "run")
+        .unwrap();
+    let start = std::time::Instant::now();
+    let error = run.call(&mut store, ()).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<wasmtime::Trap>(),
+        Some(&wasmtime::Trap::Interrupt)
+    );
+    assert_eq!(
+        store.data().outcome(),
+        Some(host::ExecutionOutcome::GuestInterrupted)
+    );
+    assert!(start.elapsed() <= std::time::Duration::from_secs(3));
+}
+
+#[cfg_attr(test, test)]
+pub fn host_call_deadline_alone_records_uncertain_until_binding_exit_is_observed() {
+    let _case = crate::capability_support::serial_case();
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Condvar, Mutex};
+    struct Blocked {
+        entered: AtomicBool,
+        release: (Mutex<bool>, Condvar),
+    }
+    impl Bindings for Blocked {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.entered.store(true, Ordering::Release);
+            let (lock, wake) = &self.release;
+            drop(
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
+            Ok(Reply::Empty)
+        }
+    }
+    struct Release(Arc<Blocked>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.release.0.lock().unwrap() = true;
+            self.0.release.1.notify_all();
+        }
+    }
+    let binding = Arc::new(Blocked {
+        entered: AtomicBool::new(false),
+        release: (Mutex::new(false), Condvar::new()),
+    });
+    let release = Release(binding.clone());
+    let engine = wasmtime::Engine::default();
+    assert!(!engine.get_epoch_interruption() && !engine.get_consume_fuel());
+    let context = Context {
+        grants: Grants {
+            topics: vec!["orders".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let host = Host::with_limits(context, binding.clone(), &execution_limits())
+        .without_guest_deadline_for_qualification();
+    let cancelled = host.cancellation();
+    let (mut store, instance) =
+        host::instantiate(&engine, include_str!("fixtures/limits-events.wat"), host).unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    let start = std::time::Instant::now();
+    let guest = std::thread::spawn(move || {
+        let result = run.call(&mut store, (0,)).unwrap();
+        (store, result)
+    });
+    wait_for("blocked binding entry", || {
+        binding.entered.load(Ordering::Acquire)
+    });
+    let (store, result) = guest.join().unwrap();
+    assert_eq!(result, (3,)); // WIT timeout, never success.
+    assert!(start.elapsed() <= std::time::Duration::from_millis(2100));
+    assert!(!cancelled.load(Ordering::Acquire));
+    assert_eq!(
+        store.data().outcome(),
+        Some(host::ExecutionOutcome::HostCallUncertain)
+    );
+    drop(release);
+    wait_for("binding exit observed", || {
+        store.data().outcome() == Some(host::ExecutionOutcome::HostCallCancelled)
+    });
+}
+
+/// Trusted qualification child: guest computation deliberately ignores host cancellation.
+pub fn cancellation_ignoring_child() -> ! {
+    use std::io::{Read, Write};
+    let engine = wasmtime::Engine::default();
+    let host = Host::new(Context::default(), Arc::new(Recording::default()));
+    let cancelled = host.cancellation();
+    let (mut store, instance) =
+        host::instantiate(&engine, include_str!("fixtures/limits-loop.wat"), host).unwrap();
+    let run = instance
+        .get_typed_func::<(), (i32,)>(&mut store, "run")
+        .unwrap();
+    std::thread::spawn(move || {
+        let mut request = [0; 7];
+        if std::io::stdin().read_exact(&mut request).is_ok() && request == *b"cancel\n" {
+            cancelled.store(true, Ordering::Release);
+            println!("cancel-received");
+            std::io::stdout().flush().unwrap();
+        }
+    });
+    println!("limits-child-ready");
+    std::io::stdout().flush().unwrap();
+    let _ = run.call(&mut store, ());
+    // Returning would invalidate this fixture, so a surprising engine return fails closed.
+    std::process::exit(1)
+}
+
+/// Hold a valid guest inside a binding across the kill, then let it finish.
+pub fn valid_guest_overlapping_termination(
+    action: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let _case = crate::capability_support::serial_case();
+    use std::sync::{Condvar, Mutex};
+    struct Gate {
+        entered: std::sync::atomic::AtomicBool,
+        release: (Mutex<bool>, Condvar),
+    }
+    impl Bindings for Gate {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.entered.store(true, Ordering::Release);
+            let (lock, wake) = &self.release;
+            drop(
+                wake.wait_while(lock.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
+            Ok(Reply::Empty)
+        }
+    }
+    struct Release(Arc<Gate>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            *self.0.release.0.lock().unwrap() = true;
+            self.0.release.1.notify_all();
+        }
+    }
+    let binding = Arc::new(Gate {
+        entered: Default::default(),
+        release: (Mutex::new(false), Condvar::new()),
+    });
+    let release = Release(binding.clone());
+    let guest = std::thread::spawn(move || {
+        let engine = wasmtime::Engine::default();
+        let context = Context {
+            grants: Grants {
+                topics: vec!["orders".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/limits-events.wat"),
+            Host::new(context, binding),
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        run.call(&mut store, (0,)).unwrap()
+    });
+    wait_for("overlapping valid guest binding entry", || {
+        release.0.entered.load(Ordering::Acquire)
+    });
+    let result = action();
+    drop(release);
+    let output = guest.join().map_err(|_| "overlapping guest panicked")?;
+    if output != (0,) {
+        return Err("overlapping valid guest failed".into());
+    }
+    result
+}
+
+#[cfg_attr(test, test)]
+pub fn configured_storage_keys_are_checked_before_copying_or_binding() {
+    let _case = crate::capability_support::serial_case();
+    struct Storage(AtomicUsize);
+    impl Bindings for Storage {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Reply::Data(vec![]))
+        }
+    }
+    let limits = falcone_serverless_worker::limits::Limits::parse(
+        &include_str!("fixtures/limits-v1.json")
+            .replace("\"guest_to_host_bytes\":64", "\"guest_to_host_bytes\":15"),
+    )
+    .unwrap();
+    let binding = Arc::new(Storage(AtomicUsize::new(0)));
+    let context = Context {
+        grants: Grants {
+            prefixes: vec!["objects/".into()],
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let (mut store, instance) = host::instantiate(
+        &limits_engine(),
+        include_str!("fixtures/limits-storage.wat"),
+        Host::with_limits(context, binding.clone(), &limits),
+    )
+    .unwrap();
+    let run = instance
+        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        .unwrap();
+    assert_eq!(run.call(&mut store, (0,)).unwrap(), (2,));
+    assert_eq!(binding.0.load(Ordering::SeqCst), 0);
+}

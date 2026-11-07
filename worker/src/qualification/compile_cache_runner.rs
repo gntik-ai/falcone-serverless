@@ -8,6 +8,9 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod limits_cancellation;
+mod limits_evidence;
+pub mod outcome;
 pub use falcone_serverless_worker::host;
 
 use artifact::supervisor::CompileLimits;
@@ -35,6 +38,7 @@ fn budget_case(
     child: &Path,
     bytes: &[u8],
     failure: CompileLimits,
+    control: CompileLimits,
     diagnostic: &str,
 ) -> Result<(), String> {
     let mut cache = Cache::new(root, child).map_err(|error| error.code.to_owned())?;
@@ -54,7 +58,7 @@ fn budget_case(
             .is_some(),
         "child_not_reaped",
     )?;
-    let control = compiled(&mut cache, bytes, limits())?;
+    let control = compiled(&mut cache, bytes, control)?;
     check(
         !control.cache_hit && cache.spawn_count() == 2,
         "control_not_compiled",
@@ -109,6 +113,7 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
         child,
         &cpu,
         cpu_limits,
+        limits(),
         "compile_cpu_limit_exceeded",
     )?;
     let memory = compile_cache_fixtures::memory();
@@ -120,12 +125,15 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
         child,
         &memory,
         memory_limits,
+        limits(),
         "compile_memory_limit_exceeded",
     )
 }
 
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
+        Some("--limits-cancellation") => return limits_cancellation::run(),
+        Some("--limits-stubborn-child") => capability_invocations::cancellation_ignoring_child(),
         Some("binding_drop_probe") => {
             capability_invocations::binding_drop_probe();
             return std::process::ExitCode::SUCCESS;

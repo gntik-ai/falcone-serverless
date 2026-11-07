@@ -98,6 +98,12 @@ fn fixture_names_valid(names: &[String]) -> bool {
             "capability-table.wat",
             "capability-workflows.wat",
             "infinite_loop.wat",
+            "limits-events.wat",
+            "limits-http.wat",
+            "limits-loop.wat",
+            "limits-memory.wat",
+            "limits-storage.wat",
+            "limits-v1.json",
             "valid.wat",
         ]
 }
