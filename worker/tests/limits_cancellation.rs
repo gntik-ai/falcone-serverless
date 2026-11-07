@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 const RACE_CHILD: &str = "WAS02_RACE_CHILD";
-const RACE_TEST: &str = "lost_tick_race_cannot_strand_a_never_yielding_guest";
+const RACE_TEST: &str = "race_scenario_child";
 /// Far above the few milliseconds a healthy child needs; only a stranded guest reaches it.
 const WATCHDOG: Duration = Duration::from_secs(60);
 
@@ -165,6 +165,36 @@ fn an_unknown_termination_child_mode_fails_closed() {
     );
 }
 
+#[test]
+fn invocation_context_results_are_checked_against_the_host_to_guest_limit() {
+    // Asymmetric limits: a key past 64 bytes of results fits guest-to-host (1024) but not host-to-guest (64).
+    let limits = Limits::qualification()
+        .replace(Field::GuestToHostBufferBytes, 1024)
+        .unwrap()
+        .replace(Field::HostToGuestBufferBytes, 64)
+        .unwrap();
+    let engine = wasmtime::Engine::default();
+    let wat = fixtures().complete;
+    let with_key = |len: usize| {
+        let context = host::Context {
+            invocation_key: "k".repeat(len),
+            ..host::Context::default()
+        };
+        host::instantiate(
+            &engine,
+            wat.as_str(),
+            host::Host::with_limits(context, Arc::new(Denying), limits),
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    };
+    // Three values with a 4-byte prefix each (the other two empty) plus 52 key bytes
+    // reach 64 exactly.
+    assert_eq!(with_key(52), Ok(()));
+    let error = with_key(53).unwrap_err();
+    assert!(error.contains("limit-exceeded"), "{error}");
+}
+
 /// A wall clock the test advances by hand.
 struct ManualClock {
     base: Instant,
@@ -177,25 +207,84 @@ impl Clock for ManualClock {
     }
 }
 
-/// On the first callback, after the wall-clock check found the deadline not yet reached
-/// and before the callback re-arms, this store's own timer ticks once more and the wall
-/// clock then passes the deadline. The old single-shot design had no tick left after this.
+/// Which deadline design the race scenario runs against.
+#[derive(Clone, Copy, PartialEq)]
+enum Design {
+    /// The shipped design: one recurring ticker while any registration is pending.
+    Recurring,
+    /// Negative control, the superseded design: each store has one single-shot timer.
+    SingleShot,
+}
+
+/// The neighbour is interrupted this soon after it arms.
+const NEIGHBOUR_DEADLINE: Duration = Duration::from_millis(200);
+/// The target's own single-shot timer in the control; it never fires inside the window,
+/// because the probe stands in for it.
+const TARGET_TIMER: Duration = Duration::from_secs(3_600);
+/// The control must still be stranded this long after the injection.
+const STRAND_WINDOW: Duration = Duration::from_secs(5);
+
+/// The first callback of the target store is the early "another store's tick". The probe
+/// waits until the neighbour's guest has ended, which consumes the neighbour's final tick
+/// (in the control, its only one). Then, between the wall-clock check and the re-arm, the
+/// target's own timer ticks once and the wall clock passes the deadline. No tick from any
+/// other store can follow, so only a design that keeps ticking can still interrupt.
 struct RacingTick {
     engine: wasmtime::Engine,
     clock: Arc<ManualClock>,
+    neighbour_done: Arc<AtomicBool>,
     fired: AtomicBool,
 }
 
 impl Probe for RacingTick {
     fn between_check_and_rearm(&self) {
-        if !self.fired.swap(true, Ordering::AcqRel) {
-            self.engine.increment_epoch();
-            self.clock.advanced_ms.store(60_000, Ordering::Release);
+        if self.fired.swap(true, Ordering::AcqRel) {
+            return;
         }
+        let waiting = Instant::now();
+        while !self.neighbour_done.load(Ordering::Acquire) && waiting.elapsed() < WATCHDOG {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let neighbour_done = self.neighbour_done.load(Ordering::Acquire);
+        self.engine.increment_epoch();
+        self.clock.advanced_ms.store(60_000, Ordering::Release);
+        println!("RACE_INJECTED neighbour_done={neighbour_done}");
     }
 }
 
-fn race_child() {
+/// The superseded arming: a single timer tick at `timer`, and a callback that re-arms
+/// whenever the wall clock has not reached the limit yet.
+fn arm_single_shot(
+    engine: &wasmtime::Engine,
+    store: &mut wasmtime::Store<host::Host>,
+    deadline: Duration,
+    timer: Duration,
+    clock: Arc<dyn Clock>,
+    probe: Arc<dyn Probe>,
+) {
+    let limit = clock.now() + deadline;
+    let ticking = engine.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(timer);
+        ticking.increment_epoch();
+    });
+    store.epoch_deadline_callback(move |_| {
+        Ok(if clock.now() >= limit {
+            wasmtime::UpdateDeadline::Interrupt
+        } else {
+            probe.between_check_and_rearm();
+            wasmtime::UpdateDeadline::Continue(1)
+        })
+    });
+    store.set_epoch_deadline(1);
+}
+
+struct NoProbe;
+impl Probe for NoProbe {
+    fn between_check_and_rearm(&self) {}
+}
+
+fn race_child(design: Design) {
     let fixtures = fixtures();
     let limits = Limits::qualification()
         .replace(Field::GuestDeadlineMs, 30_000)
@@ -211,27 +300,65 @@ fn race_child() {
             .unwrap();
         (store, run)
     };
+    let ready = std::sync::Barrier::new(2);
+    let neighbour_done = Arc::new(AtomicBool::new(false));
+    let clock = Arc::new(ManualClock {
+        base: Instant::now(),
+        advanced_ms: AtomicU64::new(0),
+    });
+    let probe = Arc::new(RacingTick {
+        engine: engine.clone(),
+        clock: clock.clone(),
+        neighbour_done: neighbour_done.clone(),
+        fired: AtomicBool::new(false),
+    });
     std::thread::scope(|scope| {
         // Another store on the shared engine, running its own never-yielding guest.
         let neighbour = scope.spawn(|| {
             let (mut store, run) = instantiate();
-            let _armed = ticker.arm(&mut store, Duration::from_millis(1_500));
+            let _armed = match design {
+                Design::Recurring => Some(ticker.arm(&mut store, NEIGHBOUR_DEADLINE)),
+                Design::SingleShot => {
+                    arm_single_shot(
+                        &engine,
+                        &mut store,
+                        NEIGHBOUR_DEADLINE,
+                        NEIGHBOUR_DEADLINE,
+                        Arc::new(host::SystemClock),
+                        Arc::new(NoProbe),
+                    );
+                    None
+                }
+            };
+            ready.wait();
             let result = run.call(&mut store, ());
-            host::classify(store.data(), &result)
-        });
-        let clock = Arc::new(ManualClock {
-            base: Instant::now(),
-            advanced_ms: AtomicU64::new(0),
-        });
-        let probe = Arc::new(RacingTick {
-            engine: engine.clone(),
-            clock: clock.clone(),
-            fired: AtomicBool::new(false),
+            let outcome = host::classify(store.data(), &result);
+            neighbour_done.store(true, Ordering::Release);
+            outcome
         });
         let (mut store, run) = instantiate();
-        let armed = ticker.arm_with(&mut store, Duration::from_secs(30), clock, probe.clone());
-        // Another store's tick: it reaches this store's callback before its deadline.
-        engine.increment_epoch();
+        let armed = match design {
+            Design::Recurring => Some(ticker.arm_with(
+                &mut store,
+                Duration::from_secs(30),
+                clock.clone(),
+                probe.clone(),
+            )),
+            Design::SingleShot => {
+                arm_single_shot(
+                    &engine,
+                    &mut store,
+                    Duration::from_secs(30),
+                    TARGET_TIMER,
+                    clock.clone(),
+                    probe.clone(),
+                );
+                None
+            }
+        };
+        // Both stores are armed before either guest runs, so the neighbour's tick lands
+        // while the target is already inside its guest.
+        ready.wait();
         let started = Instant::now();
         let result = run.call(&mut store, ());
         assert_eq!(
@@ -254,26 +381,23 @@ fn race_child() {
     println!("RACE_OK");
 }
 
-struct Denying;
-impl host::Bindings for Denying {
-    fn call(&self, _: &host::Context, _: host::Operation) -> Result<host::Reply, host::HostError> {
-        Err(host::HostError::Denied)
+/// Entry point of the re-exec child. It does nothing outside the parent tests below.
+#[test]
+fn race_scenario_child() {
+    match std::env::var(RACE_CHILD).as_deref() {
+        Ok("recurring") => race_child(Design::Recurring),
+        Ok("single-shot") => race_child(Design::SingleShot),
+        _ => {}
     }
 }
 
-/// Deterministic interleaving on a shared engine: another store's tick reaches this
-/// store's callback early, then this store's own tick lands between the wall-clock check
-/// and the re-arm. The guest must still be interrupted. The body runs in a re-exec child
-/// under a watchdog that never touches the epoch, so a regression fails instead of hanging.
-#[test]
-fn lost_tick_race_cannot_strand_a_never_yielding_guest() {
-    if std::env::var_os(RACE_CHILD).is_some() {
-        race_child();
-        return;
-    }
+/// Runs the scenario in a re-exec child. The watchdog never touches the epoch. It kills
+/// the child at `limit` and reports whether the child was still running then, plus its
+/// output.
+fn run_race_child(design: &str, limit: Duration) -> (Option<std::process::ExitStatus>, String) {
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", RACE_TEST, "--nocapture", "--test-threads=1"])
-        .env(RACE_CHILD, "1")
+        .env(RACE_CHILD, design)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -281,12 +405,12 @@ fn lost_tick_race_cannot_strand_a_never_yielding_guest() {
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
-            break status;
+            break Some(status);
         }
-        if started.elapsed() > WATCHDOG {
+        if started.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("the guest was not interrupted within {WATCHDOG:?}: its deadline was lost");
+            break None;
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -294,8 +418,47 @@ fn lost_tick_race_cannot_strand_a_never_yielding_guest() {
     std::io::Read::read_to_string(&mut child.stdout.take().unwrap(), &mut output).unwrap();
     let mut errors = String::new();
     std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut errors).unwrap();
+    (status, format!("{output}\n{errors}"))
+}
+
+/// Deterministic interleaving on a shared engine: another store's tick reaches the
+/// target's callback early and ends that store, then the target's own tick lands between
+/// the wall-clock check and the re-arm. The guest must still be interrupted. A regression
+/// fails at the watchdog instead of hanging.
+#[test]
+fn lost_tick_race_cannot_strand_a_never_yielding_guest() {
+    let (status, output) = run_race_child("recurring", WATCHDOG);
+    let Some(status) = status else {
+        panic!(
+            "the guest was not interrupted within {WATCHDOG:?}: its deadline was lost\n{output}"
+        );
+    };
     assert!(
-        status.success() && output.contains("RACE_OK"),
-        "{status:?}\n{output}\n{errors}"
+        status.success()
+            && output.contains("RACE_OK")
+            && output.contains("RACE_INJECTED neighbour_done=true"),
+        "{status:?}\n{output}"
     );
+}
+
+/// Negative control: the same interleaving strands a guest under the superseded
+/// single-shot design, so the regression above is sensitive to the reported defect.
+#[test]
+fn the_same_interleaving_strands_a_guest_under_single_shot_timers() {
+    let (status, output) = run_race_child("single-shot", STRAND_WINDOW);
+    assert!(
+        output.contains("RACE_INJECTED neighbour_done=true"),
+        "the race was not injected\n{output}"
+    );
+    assert!(
+        status.is_none() && !output.contains("RACE_OK"),
+        "the guest was interrupted although no tick followed the re-arm: {status:?}\n{output}"
+    );
+}
+
+struct Denying;
+impl host::Bindings for Denying {
+    fn call(&self, _: &host::Context, _: host::Operation) -> Result<host::Reply, host::HostError> {
+        Err(host::HostError::Denied)
+    }
 }

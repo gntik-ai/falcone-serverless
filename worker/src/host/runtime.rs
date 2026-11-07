@@ -611,7 +611,9 @@ pub fn instantiate(
     source: impl AsRef<[u8]>,
     host: Host,
 ) -> wasmtime::Result<(Store<Host>, Instance)> {
-    let mut context_bytes = host.inbound();
+    // The getters return these values to the guest, so they count against the
+    // host-to-guest limit, not the guest-to-host one.
+    let mut context_bytes = host.outbound();
     for value in [
         &host.context.invocation_key,
         &host.context.attempt_id,
