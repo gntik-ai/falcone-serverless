@@ -369,14 +369,20 @@ func (e *Elector) campaign(ctx context.Context) {
 	// answers 409 and nothing is overwritten. This keeps the read's latency out of
 	// the time from the observation to the takeover.
 	if until, ok := e.eligible(e.clock.Now()); ok && until <= 0 {
-		e.takeOver(ctx, e.obs)
+		e.takeOver(ctx, e.obs, true)
 		return
 	}
+	e.read(ctx, true)
+}
+
+// read observes the Lease once. refresh is true when a conflict on the direct
+// update may be answered by one further read in the same attempt.
+func (e *Elector) read(ctx context.Context, refresh bool) {
 	l, err := e.call(ctx, nil, func(c context.Context) (Lease, error) { return e.client.Get(c) })
 	now := e.clock.Now()
 	switch {
 	case err == nil:
-		e.observe(ctx, l, now)
+		e.observe(ctx, l, now, refresh)
 	case errors.Is(err, ErrNotFound):
 		e.absent(ctx, now)
 	default:
@@ -414,7 +420,7 @@ func (e *Elector) wait(recorded time.Duration) time.Duration {
 	return max(e.cfg.Timings.LeaseDuration, recorded)
 }
 
-func (e *Elector) observe(ctx context.Context, l Lease, now time.Time) {
+func (e *Elector) observe(ctx context.Context, l Lease, now time.Time, refresh bool) {
 	e.noteHistory(l)
 	e.barrier = barrier{}
 	if !e.haveObs || !sameRecord(e.obs, l) {
@@ -426,7 +432,7 @@ func (e *Elector) observe(ctx context.Context, l Lease, now time.Time) {
 	if l.Holder != "" && now.Sub(e.obsAt) < e.wait(time.Duration(l.LeaseDurationSeconds)*time.Second) {
 		return
 	}
-	e.takeOver(ctx, l)
+	e.takeOver(ctx, l, refresh)
 }
 
 // absent handles a 404. Every 404 starts the recovery barrier, however closely the
@@ -483,7 +489,12 @@ func (e *Elector) create(ctx context.Context) {
 	}
 }
 
-func (e *Elector) takeOver(ctx context.Context, l Lease) {
+// takeOver updates the observed record with a resourceVersion precondition. After
+// a conflict on a record that was observed earlier, refresh allows one read in the
+// same attempt, so a Lease released since that observation is taken on this retry
+// and not the next; the read goes through observe, so ownership, the wait and the
+// optimistic concurrency checks all apply to the fresh record.
+func (e *Elector) takeOver(ctx context.Context, l Lease, refresh bool) {
 	start := e.clock.Now()
 	n := l
 	n.Holder = e.cfg.Identity
@@ -495,8 +506,11 @@ func (e *Elector) takeOver(ctx context.Context, l Lease) {
 	case err == nil:
 		e.lead(got, start)
 	case errors.Is(err, ErrConflict):
-		// Another writer won; the next Get observes the new record.
+		// Another writer won. The record is observed again, not trusted.
 		e.haveObs = false
+		if refresh {
+			e.read(ctx, false)
+		}
 	case errors.Is(err, ErrNotFound):
 		// Deleted since we observed it. The 404 is a successful API response, so the
 		// recovery barrier starts here, from this reading.

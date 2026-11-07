@@ -549,6 +549,35 @@ func TestReleasedLeaseIsAcquiredOnTheNextRetry(t *testing.T) {
 	}
 }
 
+// B's cached observation is old enough to act on, but A renewed and then released
+// after it: the stale resourceVersion answers 409, and the same attempt re-reads
+// and takes the released Lease instead of waiting for the next retry.
+func TestReleaseAfterAStaleObservationIsAcquiredInTheSameAttempt(t *testing.T) {
+	clock, store := newFakeClock(), &fakeStore{}
+	a := newInstance(t, clock, store, "a", defaults)
+	b := newInstance(t, clock, store, "b", defaults)
+	holdFirst(t, clock, a)
+	b.tick() // B observes A's record
+	observed := clock.since()
+	for clock.since() < observed+14*sec { // B misses A's renewals
+		clock.Advance(2 * sec)
+		a.tick()
+	}
+	clock.Advance(sec / 2)
+	a.el.Shutdown() // A releases half a second before B's turn
+	clock.Advance(sec / 2)
+	if got := clock.since() - observed; got != 15*sec {
+		t.Fatalf("test setup: B's turn is %s after its observation, want 15s", got)
+	}
+	b.tick()
+	if !b.open() {
+		t.Fatal("standby did not acquire the released Lease in the attempt that met the conflict")
+	}
+	if l := store.current(); l == nil || l.Holder != "b-0123abcd" {
+		t.Fatalf("Lease after takeover = %+v", l)
+	}
+}
+
 func TestShutdownClosesGateThenCancelsDrainsAndReleases(t *testing.T) {
 	clock, store := newFakeClock(), &fakeStore{}
 	a := newInstance(t, clock, store, "a", defaults)
