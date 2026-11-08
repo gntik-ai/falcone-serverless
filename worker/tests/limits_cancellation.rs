@@ -195,6 +195,65 @@ fn invocation_context_results_are_checked_against_the_host_to_guest_limit() {
     assert!(error.contains("limit-exceeded"), "{error}");
 }
 
+/// Counts binding calls; every write succeeds.
+struct Counting(std::sync::atomic::AtomicUsize);
+impl host::Bindings for Counting {
+    fn call(&self, _: &host::Context, op: host::Operation) -> Result<host::Reply, host::HostError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        match op {
+            host::Operation::Write { .. } => Ok(host::Reply::Empty),
+            _ => Err(host::HostError::Denied),
+        }
+    }
+}
+
+/// The key given to `open-object` / `open-checkpoint` is a guest-to-host string, so it counts
+/// (4-byte prefix plus its bytes) against the contract's limit as any other string does.
+#[test]
+fn opening_a_storage_key_is_checked_against_the_guest_to_host_limit() {
+    let engine = wasmtime::Engine::default();
+    let objects = fixtures().storage_io;
+    let checkpoints = include_str!("../src/qualification/fixtures/capability-checkpoint.wat");
+    // "objects/good" is 12 bytes: 16 with its prefix. The write that follows needs 8 or 10.
+    for (wat, call_args, failed) in [(objects.as_str(), 0u32, 100u32), (checkpoints, 1, 99)] {
+        for (limit, expected, binding_calls) in [(16, 0, 1), (15, failed, 0)] {
+            let limits = Limits::qualification()
+                .replace(Field::GuestToHostBufferBytes, limit)
+                .unwrap();
+            let context = host::Context {
+                grants: host::Grants {
+                    prefixes: vec!["objects/".into()],
+                    ..Default::default()
+                },
+                ..host::Context::default()
+            };
+            let binding = Arc::new(Counting(std::sync::atomic::AtomicUsize::new(0)));
+            let (mut store, instance) = host::instantiate(
+                &engine,
+                wat,
+                host::Host::with_limits(context, binding.clone(), limits),
+            )
+            .unwrap();
+            let reply = if wat == objects.as_str() {
+                let run = instance
+                    .get_typed_func::<(u32,), (u32,)>(&mut store, "write")
+                    .unwrap();
+                run.call(&mut store, (call_args,)).unwrap().0
+            } else {
+                let run = instance
+                    .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+                    .unwrap();
+                run.call(&mut store, (call_args,)).unwrap().0
+            };
+            assert_eq!(
+                (reply, binding.0.load(Ordering::SeqCst)),
+                (expected, binding_calls),
+                "limit {limit}"
+            );
+        }
+    }
+}
+
 /// A wall clock the test advances by hand.
 struct ManualClock {
     base: Instant,

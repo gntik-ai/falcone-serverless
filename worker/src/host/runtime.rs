@@ -553,6 +553,10 @@ fn storage_resource<T: Send + 'static>(
                 if key.len() > STORAGE_KEY_BYTES {
                     return Err(HostError::LimitExceeded);
                 }
+                // Guest-to-host string: counted before the key is retained or authorised.
+                let mut bytes = store.data().inbound();
+                bytes.add(4)?;
+                bytes.add(key.len())?;
                 if !store.data().context.grants.allows_key(&key) {
                     return Err(HostError::Denied);
                 }
