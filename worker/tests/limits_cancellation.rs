@@ -440,12 +440,42 @@ fn race_child(design: Design) {
     println!("RACE_OK");
 }
 
+/// A guard outlives its clock: the registration must keep the ticker running, so the
+/// never-yielding guest is still interrupted.
+fn clock_dropped_child() {
+    let fixtures = fixtures();
+    let limits = Limits::qualification();
+    let engine = host::epoch_engine().unwrap();
+    let ticker = EpochClock::start(&engine).unwrap();
+    let host = host::Host::with_limits(host::Context::default(), Arc::new(Denying), limits);
+    let (mut store, instance) = host::instantiate(&engine, &fixtures.infinite_loop, host).unwrap();
+    let run = instance
+        .get_typed_func::<(), ()>(&mut store, "run")
+        .unwrap();
+    let guard = ticker.arm(&mut store, Duration::from_millis(200));
+    drop(ticker);
+    let started = Instant::now();
+    let result = run.call(&mut store, ());
+    assert_eq!(
+        host::classify(store.data(), &result),
+        Outcome::GuestInterrupted
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    drop(guard);
+    println!("CLOCK_DROPPED_OK");
+}
+
 /// Entry point of the re-exec child. It does nothing outside the parent tests below.
 #[test]
 fn race_scenario_child() {
     match std::env::var(RACE_CHILD).as_deref() {
         Ok("recurring") => race_child(Design::Recurring),
         Ok("single-shot") => race_child(Design::SingleShot),
+        Ok("clock-dropped") => clock_dropped_child(),
         _ => {}
     }
 }
@@ -496,6 +526,20 @@ fn lost_tick_race_cannot_strand_a_never_yielding_guest() {
         status.success()
             && output.contains("RACE_OK")
             && output.contains("RACE_INJECTED neighbour_done=true"),
+        "{status:?}\n{output}"
+    );
+}
+
+/// The ticker belongs to the pending registrations, not to the clock that created it:
+/// dropping the clock while a guard is held must not strand the guest.
+#[test]
+fn a_pending_deadline_keeps_the_ticker_alive_after_the_clock_is_dropped() {
+    let (status, output) = run_race_child("clock-dropped", WATCHDOG);
+    let Some(status) = status else {
+        panic!("the guest was not interrupted within {WATCHDOG:?}: the ticker stopped\n{output}");
+    };
+    assert!(
+        status.success() && output.contains("CLOCK_DROPPED_OK"),
         "{status:?}\n{output}"
     );
 }

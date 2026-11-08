@@ -88,34 +88,54 @@ impl Shared {
     }
 }
 
-/// The recurring ticker of one engine. Dropping it stops and joins the thread.
-pub struct EpochClock {
+/// Owns the ticker thread; dropping it stops and joins the thread. Shared by the clock
+/// and by every registration, so the thread outlives the clock for as long as any
+/// registration is pending.
+struct Ticker {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
 
-struct Registration(Arc<Shared>);
+impl Drop for Ticker {
+    fn drop(&mut self) {
+        self.shared.lock().closed = true;
+        self.shared.wake.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// The recurring ticker of one engine. The thread stops once the clock and every
+/// `DeadlineGuard` armed from it have been dropped.
+pub struct EpochClock {
+    ticker: Arc<Ticker>,
+}
+
+struct Registration(Arc<Ticker>);
 
 impl Registration {
-    fn new(shared: &Arc<Shared>) -> Self {
-        let mut state = shared.lock();
+    fn new(ticker: &Arc<Ticker>) -> Self {
+        let mut state = ticker.shared.lock();
         state.pending += 1;
         if state.pending == 1 {
-            shared.wake.notify_all();
+            ticker.shared.wake.notify_all();
         }
-        Self(shared.clone())
+        drop(state);
+        Self(ticker.clone())
     }
 }
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        self.0.lock().pending -= 1;
+        self.0.shared.lock().pending -= 1;
     }
 }
 
-/// Holds one pending-deadline registration and the armed flag the callback reads. Keep it
-/// alive for the whole guest call; dropping it disarms the store and, when it was the last
-/// registration, lets the ticker go idle.
+/// Holds one pending-deadline registration and the armed flag the callback reads. It also
+/// keeps the ticker thread alive, even if the clock is dropped first. Keep it alive for the
+/// whole guest call; dropping it disarms the store and, when it was the last registration,
+/// lets the ticker go idle.
 pub struct DeadlineGuard {
     armed: Arc<AtomicBool>,
     _registration: Registration,
@@ -142,14 +162,16 @@ impl EpochClock {
             .name("falcone-epoch".into())
             .spawn(move || tick(&ticker))?;
         Ok(Self {
-            shared,
-            thread: Some(thread),
+            ticker: Arc::new(Ticker {
+                shared,
+                thread: Some(thread),
+            }),
         })
     }
 
     /// Registrations currently holding the ticker awake; zero means it is idle.
     pub fn pending(&self) -> usize {
-        self.shared.lock().pending
+        self.ticker.shared.lock().pending
     }
 
     /// Arm the guest deadline of `store` for the call that follows, on the system clock.
@@ -166,7 +188,7 @@ impl EpochClock {
     ) -> DeadlineGuard {
         // Register before the first tick can be requested, so the ticker is running for
         // every moment the deadline is pending.
-        let registration = Registration::new(&self.shared);
+        let registration = Registration::new(&self.ticker);
         let armed = Arc::new(AtomicBool::new(true));
         let limit = clock.now() + deadline;
         let live = armed.clone();
@@ -185,16 +207,6 @@ impl EpochClock {
         DeadlineGuard {
             armed,
             _registration: registration,
-        }
-    }
-}
-
-impl Drop for EpochClock {
-    fn drop(&mut self) {
-        self.shared.lock().closed = true;
-        self.shared.wake.notify_all();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
         }
     }
 }
@@ -250,8 +262,8 @@ mod tests {
         let engine = epoch_engine().unwrap();
         let clock = EpochClock::start(&engine).unwrap();
         assert_eq!(clock.pending(), 0);
-        let first = Registration::new(&clock.shared);
-        let second = Registration::new(&clock.shared);
+        let first = Registration::new(&clock.ticker);
+        let second = Registration::new(&clock.ticker);
         assert_eq!(clock.pending(), 2);
         drop(first);
         assert_eq!(clock.pending(), 1);

@@ -162,101 +162,19 @@ execution in a supervised child process that is killed and reaped. It is qualifi
 and does not select the process model of ADR 0004, which is still Proposed.
 
 The race regression (`lost_tick_race_cannot_strand_a_never_yielding_guest`) re-executes the
-test binary as a child. Two stores share one engine and both arm before either runs. The
-neighbour (200 ms deadline) ends first, which consumes the last tick any other store sends.
-The target's first callback is that early tick; between its wall-clock check and its re-arm
-the probe waits for the neighbour to finish, ticks the target's own timer and moves the
-clock past the deadline (the test-only `Clock` and `Probe` seams of `EpochClock::arm_with`).
-No other store can tick afterwards, so only a recurring ticker can still interrupt the
-guest. A watchdog outside the engine kills the child after 60 s, so a lost deadline fails
-the test instead of hanging CI.
+test binary as a child. On a shared engine it drives another store's tick, then this store's
+own tick between the wall-clock check and the re-arm, using the test-only `Clock` and
+`Probe` seams of `EpochClock::arm_with`. A watchdog outside the engine kills the child after
+60 s, so a lost deadline fails the test instead of hanging CI.
 
 The negative control (`the_same_interleaving_strands_a_guest_under_single_shot_timers`) runs
 the identical scenario against a test-local copy of the superseded single-shot arming and
 asserts the guest is still running 5 s after the injection (killed by the watchdog). It
 shows the regression is sensitive to the reported defect.
 
-Operator qualification (not run by agents): with the runner's `KUBECONFIG` and
-an operator-built, digest-pinned `FS_TEST_WAS02_IMAGE` already set, run exactly:
-
-```sh
-FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_capability_gates -- --ignored --nocapture
-```
-
-The live test is ignored by default with the visible reason
-`not run: FS_TEST_CLUSTER unset`, skips client construction, and keeps workspace
-CI green. The operator command explicitly selects it with `--ignored` and sets
-`FS_TEST_CLUSTER=1`. Any set value other than `1`, or missing/invalid inputs when
-opted in, fails closed. The pod uses RuntimeDefault
-seccomp, a read-only root, an arbitrary non-root UID and no service-account
-token. Namespace create/cleanup and labelled shared-mode cleanup reuse the
-existing namespace guard and `FS_TEST_NAMESPACE_MODE`/`FS_TEST_NAMESPACE` rules.
-No live cluster evidence is claimed by the in-process suite. Sandbox socket
-checks report `NOT RUN: EPERM (sandbox), PR CI runs them`; the pod mode fails
-closed if it cannot create its required listeners.
-
-## Limits and cancellation (WAS-02 ac3, #125)
-
-The limits contract is `worker/src/limits/mod.rs`: version 1, one JSON document with
-`version` and nine mandatory fields. A missing, zero, `u64::MAX` or above-ceiling value, an
-unknown field and an unknown version are each rejected with a typed `LimitsError` that
-names the field (`worker/tests/limits_config.rs`). The ceilings equal the limits the worker
-enforced before the contract (1 MiB per buffer direction, 256 MiB guest memory, 30 s per
-host call, 120 s / 4 GiB compiler); none is weaker. `Limits::qualification()` is the
-qualification value set, not a production default. The operator approves production values.
-
-| Field | Ceiling | Qualification value |
-|---|---|---|
-| `compiler_cpu_seconds` | 120 | 120 |
-| `compiler_memory_bytes` | 4 GiB | 4 GiB |
-| `guest_memory_bytes` | 256 MiB | 256 MiB |
-| `guest_to_host_buffer_bytes` | 1 MiB | 1 MiB |
-| `host_to_guest_buffer_bytes` | 1 MiB | 1 MiB |
-| `guest_deadline_ms` | 300000 | 30000 |
-| `host_call_deadline_ms` | 30000 | 30000 |
-| `termination_budget_ms` | 30000 | 5000 |
-| `interruption_tolerance_ms` | 30000 | 2000 |
-
-`Host::with_limits` takes the buffer, guest-memory and host-call values from the contract;
-`Host::new` uses `Limits::qualification()`. Buffer limits count canonical-ABI bytes: a
-`write` payload may be at most `limit - 8` and a `read` result at most `limit - 4` bytes.
-One byte more is `limit-exceeded`; for guest-to-host data the binding is never called.
-
-Guest interruption needs an engine built with `host::epoch_engine()` (a default engine has
-no epoch instrumentation, which is how the blocked-host-call fixture disables it). One
-`EpochClock` per engine ticks every 10 ms (`EPOCH_TICK`) for as long as any store holds a
-`DeadlineGuard` from `EpochClock::arm`, and idles when none does. Because the ticker is
-recurring while a deadline is pending, another store's tick, or this store's own tick
-between the wall-clock check and the re-arm, can never move the deadline past the last
-tick. The interruption bound asserted by the fixtures is
-`guest deadline + EPOCH_TICK + interruption_tolerance_ms`. The host-call and cancellation
-bounds use `interruption_tolerance_ms` too. The tolerances are named, generous values for
-shared, contended runners; they are not performance targets.
-
-Fixtures are WAT text compiled at run time with the locked toolchain; no precompiled
-artifact is committed or loaded:
-
-- `infinite-loop.wat`: never yields; only epoch interruption or process termination ends it.
-- `memory-exhaustion.wat`: grows memory with no declared maximum until the guest-memory limit
-  denies a growth; the host reports the guest-memory-limit outcome and the process lives on.
-- `storage-io.wat`: one granted object; `write(len)` is the guest-to-host payload fixture,
-  `read()` the host-to-guest result fixture and, against a binding that never returns, the
-  blocked host call.
-- `complete.wat`: the valid control that must still run after every failure.
-- `cpu-heavy.wat`, `memory-heavy.wat`: the compiler-exhaustion inputs above.
-
-`worker/src/qualification/limits_fixtures.rs` runs each fixture and records it passed,
-failed or unverified. A check whose helper is absent (the compile child, or the
-termination child) is unverified, never passed. The termination fallback is behind the
-`host::TerminationFallback` trait; the only implementation, `ProcessFallback`, runs the
-execution in a supervised child process that is killed and reaped. It is qualification-only
-and does not select the process model of ADR 0004, which is still Proposed.
-
-The race regression (`lost_tick_race_cannot_strand_a_never_yielding_guest`) re-executes the
-test binary as a child. On a shared engine it drives another store's tick, then this store's
-own tick between the wall-clock check and the re-arm, using the test-only `Clock` and
-`Probe` seams of `EpochClock::arm_with`. A watchdog outside the engine kills the child after
-60 s, so a lost deadline fails the test instead of hanging CI.
+The ticker thread belongs to the pending `DeadlineGuard`s, not only to the `EpochClock`:
+dropping the clock while a guard is held keeps ticking until the last guard ends
+(`a_pending_deadline_keeps_the_ticker_alive_after_the_clock_is_dropped`, same watchdog).
 
 Operator qualification (not run by agents): with the runner's `KUBECONFIG` and an
 operator-built, digest-pinned `FS_TEST_WAS02_IMAGE` already set, run exactly:
