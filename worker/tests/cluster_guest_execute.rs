@@ -69,9 +69,23 @@ fn every_required_case_is_registered_in_the_runner_table() {
     let mut required = REQUIRED_CASES.to_vec();
     required.sort_unstable();
     assert_eq!(registered, required);
-    // And the runner is reachable through the flag the pod uses.
-    assert!(
-        include_str!("../src/qualification/compile_cache_runner.rs")
-            .contains("Some(\"--guest-execute\") => return guest_execute_runner::main()")
-    );
+    // And the runner is reachable through the flag the pod uses: run the executable
+    // and require every case it reports to have passed.
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_compile-cache-qualification"))
+        .arg(QUALIFICATION_FLAG)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let mut reported: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["check"], QUALIFICATION_CHECK);
+        if let Some(case) = value["case"].as_str() {
+            assert_eq!(value["status"], "passed", "{case}");
+            reported.push(case.to_owned());
+        }
+    }
+    reported.sort_unstable();
+    assert_eq!(reported, required);
+    assert!(output.status.success());
 }
