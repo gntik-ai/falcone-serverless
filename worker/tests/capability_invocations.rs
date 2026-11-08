@@ -51,16 +51,44 @@ mod guest_execute_allocation {
         (peak.saturating_sub(before), result.unwrap_err().code)
     }
 
+    /// Runs only in a fresh child process (ADR 0014 invariant 4): the parent test
+    /// below re-executes this binary with `FALCONE_REFUSED_HEAP_PROBE` set.
+    #[test]
+    fn refused_heap_probe() {
+        let Ok(probe) = std::env::var("FALCONE_REFUSED_HEAP_PROBE") else {
+            return;
+        };
+        let mode = probe.as_bytes()[0];
+        let (delta, code) = peak_during(mode, CEILING + CEILING / 2);
+        assert_eq!(code, "buffer_limit_exceeded", "mode {}", mode as char);
+        assert!(
+            delta < HEAP_BOUND,
+            "mode {}: host heap grew by {delta} bytes",
+            mode as char
+        );
+        println!("refused-heap-probe passed: {} {delta}", mode as char);
+    }
+
     #[test]
     fn refused_results_and_error_texts_are_not_copied_into_host_memory() {
         let _case = super::capability_support::serial_case();
-        for mode in *b"sG" {
-            let (delta, code) = peak_during(mode, CEILING + CEILING / 2);
-            assert_eq!(code, "buffer_limit_exceeded", "mode {}", mode as char);
+        for mode in ['s', 'G'] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "guest_execute_allocation::refused_heap_probe",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env("FALCONE_REFUSED_HEAP_PROBE", mode.to_string())
+                .output()
+                .unwrap();
             assert!(
-                delta < HEAP_BOUND,
-                "mode {}: host heap grew by {delta} bytes",
-                mode as char
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout)
+                        .contains(&format!("refused-heap-probe passed: {mode} ")),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
     }
