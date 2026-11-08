@@ -136,3 +136,18 @@ fn context_missing_a_member_in_the_containerfile_fails_to_load() {
     assert!(!context.0.join("compiler").exists());
     assert!(!metadata_loads(&context));
 }
+
+/// The execute command compiles through `artifact-compile-child` placed next to the worker
+/// executable, so the runtime image must build it and ship it beside the worker.
+#[test]
+fn runtime_image_ships_the_trusted_compiler_next_to_the_worker() {
+    assert!(CONTAINERFILE.contains("--bin artifact-compile-child"));
+    assert!(CONTAINERFILE.contains("--bin falcone-serverless-worker"));
+    let destinations: Vec<&str> = CONTAINERFILE
+        .lines()
+        .filter(|line| line.starts_with("COPY --from=build"))
+        .filter_map(|line| line.split_whitespace().last())
+        .collect();
+    assert!(destinations.contains(&"/usr/local/bin/falcone-serverless-worker"));
+    assert!(destinations.contains(&"/usr/local/bin/artifact-compile-child"));
+}
