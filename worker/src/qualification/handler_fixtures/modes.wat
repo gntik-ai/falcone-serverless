@@ -4,6 +4,7 @@
 ;;   'f' failed("boom")      'g' failed(1000 x 'x')                   'l' loop forever
 ;;   't' trap                'k' log, then return ok("done")         'm' log, then failed("boom")
 ;;   'n' log, then invalid-input("bad input")
+;;   'G' failed(string of u32-LE(params[1..5]) NUL bytes)
 (component
   (import "falcone:host/logging@0.2.0" (instance $logging
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
@@ -57,6 +58,8 @@
       (if (i32.eq (local.get $mode) (i32.const 103)) (then
         (memory.fill (i32.const 16384) (i32.const 120) (i32.const 1000))
         (return (call $err (i32.const 1) (i32.const 16384) (i32.const 1000)))))
+      (if (i32.eq (local.get $mode) (i32.const 71)) (then
+        (return (call $err (i32.const 1) (i32.const 16384) (i32.load (i32.add (local.get $ptr) (i32.const 1)))))))
       (if (i32.eq (local.get $mode) (i32.const 108)) (then (loop $forever (br $forever))))
       (if (i32.eq (local.get $mode) (i32.const 116)) (then unreachable))
       (if (i32.eq (local.get $mode) (i32.const 107)) (then

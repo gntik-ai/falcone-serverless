@@ -227,16 +227,25 @@ only for the two handler errors, cut to 256 characters with control characters r
 | --- | --- |
 | `missing_handler_export`, `invalid_handler_signature` | The handler gate, on the compiled component, before instantiation (zero host calls). |
 | `buffer_limit_exceeded` | Params over `max-host-to-guest-bytes` (refused before any guest code runs), a result over `max-guest-to-host-bytes`, or a host call that hit a buffer ceiling. Exactly at the ceiling succeeds. |
-| `uncertain_effect` | A detached mutating host call may still commit. |
+| `uncertain_effect` | A detached mutating host call may still commit. When cancellation or the deadline decides the code instead, the failure still reports it (the CLI appends `(uncertain_effect)`). |
 | `guest_memory_limit` | The guest hit the store's memory limit. |
-| `cancelled` | The invocation was cancelled, including during the guest's last host call. |
+| `cancelled` | Cancellation was requested, including during the guest's last host call. A host call that only hit its own deadline is not a cancellation. |
 | `timeout` | The guest deadline passed, including an invocation that otherwise returned a value or a handler error. |
 | `guest_trapped` | The guest trapped. No guest text. |
 | `invalid_input`, `handler_failed` | The guest returned `handler-error`. |
 | `instantiation_failed`, `engine_unsupported` | Linking was refused (a denied import), or the engine has no epoch interruption. |
 
-Precedence, applied to every outcome (a value, a handler error, a trap): uncertain
-effect, guest memory limit, cancellation, the deadline, the buffer ceiling, and only
-then the guest's own result. A guest cancelled during its last host call is therefore
-`cancelled`, never `handler_failed` or a success, and an invocation past its deadline is
-`timeout`, never an application error.
+Precedence, applied to every outcome (a value, a handler error, a trap): requested
+cancellation first, then the deadline, and only then the outcome is mapped (uncertain
+effect, guest memory limit, buffer ceiling, and the guest's own result). A guest cancelled
+during its last host call is therefore `cancelled`, never `handler_failed` or a success,
+and an invocation past its deadline is `timeout`, never an application error, including
+when a host call timed out on its own deadline in the meantime. An uncertain effect is
+never erased: it is carried on the failure whatever code wins.
+
+Guest data is bounded before it is copied. The store's hostcall fuel is the transfer
+ceiling, and Wasmtime charges every list and string it lifts against it before copying
+a byte, so a guest cannot make the host allocate up to its memory allowance for a result
+or a handler-error text that is going to be refused. Either one over the ceiling is
+`buffer_limit_exceeded`; so is a host-call argument over the ceiling, which on this path
+ends the guest instead of returning the `limit-exceeded` host error.

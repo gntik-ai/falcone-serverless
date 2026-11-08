@@ -17,7 +17,7 @@ const TOLERANCE: Duration = Duration::from_secs(2);
 const CEILING: usize = 1_048_576;
 
 /// Every case, by the name the cluster pod reports it under.
-pub const CASES: [(&str, fn()); 8] = [
+pub const CASES: [(&str, fn()); 10] = [
     (
         "successful_handler_call",
         successful_handler_call_returns_exactly_the_params,
@@ -37,6 +37,14 @@ pub const CASES: [(&str, fn()); 8] = [
     (
         "deadline_precedence",
         the_deadline_wins_on_success_and_on_every_handler_error,
+    ),
+    (
+        "host_call_timeout_is_not_cancellation",
+        a_host_call_timeout_is_not_a_cancellation,
+    ),
+    (
+        "oversized_guest_data",
+        oversized_results_and_error_payloads_are_refused_unread,
     ),
     ("bounded_errors", every_failure_maps_to_a_bounded_error),
     (
@@ -278,6 +286,61 @@ pub fn the_deadline_wins_on_success_and_on_every_handler_error() {
         assert_eq!(error.code, "timeout", "mode {}", params as char);
         assert_eq!(error.message, None);
     }
+}
+
+#[cfg_attr(test, test)]
+pub fn a_host_call_timeout_is_not_a_cancellation() {
+    // The guest deadline (100 ms) falls while the host call (deadline 150 ms) is still
+    // blocked for 300 ms: the host call times out, nobody cancels, and the invocation is
+    // past its deadline, so every outcome reports timeout.
+    for (params, _, _) in OUTCOMES {
+        let binding = Arc::new(Recording::default());
+        binding.on_call(|| std::thread::sleep(Duration::from_millis(300)));
+        let result = controlled(params, binding, limits(100, 150, CEILING, CEILING));
+        let error = result.expect_err("an invocation past its deadline never succeeds");
+        assert_eq!(error.code, "timeout", "mode {}", params as char);
+        assert_eq!(error.message, None);
+    }
+    // Control: with the guest deadline far away, the same host-call timeout is only an
+    // error value the guest saw. It is not a cancellation, so the guest's own outcome
+    // stands.
+    for (params, plain, message) in OUTCOMES {
+        let binding = Arc::new(Recording::default());
+        binding.on_call(|| std::thread::sleep(Duration::from_millis(300)));
+        let result = controlled(params, binding, limits(30_000, 50, CEILING, CEILING));
+        match message {
+            None => assert_eq!(result.unwrap(), b"done", "mode {}", params as char),
+            Some(message) => {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    (error.code, error.message.as_deref()),
+                    (plain, Some(message))
+                );
+            }
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn oversized_results_and_error_payloads_are_refused_unread() {
+    let engine = shared_engine();
+    let modes = component(&engine, fixtures::MODES);
+    let sized = |byte: u8, bytes: usize| mode(byte, &(bytes as u32).to_le_bytes());
+    // The guest memory (2 MiB) holds a result and an error text well over the ceiling.
+    let over = CEILING + CEILING / 2;
+    assert_eq!(
+        code(run(&modes, &sized(b's', over))),
+        "buffer_limit_exceeded"
+    );
+    let error = run(&modes, &sized(b'G', over)).unwrap_err();
+    assert_eq!((error.code, error.message), ("buffer_limit_exceeded", None));
+    // An error text exactly at the ceiling is still the guest's handler error, cut to a
+    // bounded echo, and one byte more is a limit failure.
+    let error = run(&modes, &sized(b'G', CEILING)).unwrap_err();
+    assert_eq!(error.code, "handler_failed");
+    assert_eq!(error.message.unwrap().chars().count(), 256);
+    let error = run(&modes, &sized(b'G', CEILING + 1)).unwrap_err();
+    assert_eq!(error.code, "buffer_limit_exceeded");
 }
 
 #[cfg_attr(test, test)]

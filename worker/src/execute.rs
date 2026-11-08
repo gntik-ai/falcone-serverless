@@ -93,8 +93,14 @@ pub fn run(component: &Path, params: &Path) -> Result<Vec<u8>, String> {
             _ => format!("execute failed: {}", error.code),
         })?;
     let host = Host::with_limits(Context::default(), Arc::new(NoBindings), limits);
-    host::execute::execute(&loaded.component, host, &params).map_err(|error| match error.message {
-        Some(message) => format!("execute failed: {}: {message}", error.code),
-        None => format!("execute failed: {}", error.code),
+    host::execute::execute(&loaded.component, host, &params).map_err(|error| {
+        let mut line = format!("execute failed: {}", error.code);
+        if let Some(message) = error.message {
+            line = format!("{line}: {message}");
+        }
+        if error.uncertain_effect {
+            line.push_str(" (uncertain_effect)");
+        }
+        line
     })
 }

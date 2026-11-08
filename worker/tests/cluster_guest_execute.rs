@@ -24,6 +24,8 @@ const REQUIRED_CASES: &[&str] = &[
     "timeout_isolation",
     "cancellation_precedence",
     "deadline_precedence",
+    "host_call_timeout_is_not_cancellation",
+    "oversized_guest_data",
     "bounded_errors",
     "signature_rejection",
     "trusted_compile_path",

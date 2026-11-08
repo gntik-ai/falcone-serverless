@@ -180,15 +180,15 @@ impl Helper {
     }
 }
 
-struct Bytes {
+pub(super) struct Bytes {
     used: usize,
     limit: usize,
 }
 impl Bytes {
-    fn new(limit: usize) -> Self {
+    pub(super) fn new(limit: usize) -> Self {
         Self { used: 0, limit }
     }
-    fn add(&mut self, bytes: usize) -> Result<(), HostError> {
+    pub(super) fn add(&mut self, bytes: usize) -> Result<(), HostError> {
         if self
             .used
             .checked_add(bytes)

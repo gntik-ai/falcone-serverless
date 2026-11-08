@@ -6,8 +6,7 @@
 //! precompiled artifact is ever loaded here. Every failure is a typed code and an optional bounded message, and a
 //! failure never carries partial output.
 use super::Host;
-use super::outcome::{InvocationOutcome, classify};
-use super::runtime::instantiate_component;
+use super::runtime::{BUFFER_BYTES, Bytes, instantiate_component};
 use std::time::Instant;
 use wasmtime::Engine;
 use wasmtime::component::types::{ComponentFunc, ComponentItem, Type};
@@ -29,11 +28,13 @@ enum HandlerError {
 }
 
 /// A failed invocation. `code` is stable; `message` is guest text, only for handler errors,
-/// cut to `MESSAGE_CHARS` with control characters replaced.
+/// cut to `MESSAGE_CHARS` with control characters replaced. `uncertain_effect` is set
+/// whenever a detached mutating host call may still commit, whatever `code` says.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecuteError {
     pub code: &'static str,
     pub message: Option<String>,
+    pub uncertain_effect: bool,
 }
 
 impl ExecuteError {
@@ -41,6 +42,7 @@ impl ExecuteError {
         Self {
             code,
             message: None,
+            uncertain_effect: false,
         }
     }
 
@@ -53,6 +55,7 @@ impl ExecuteError {
         Self {
             code,
             message: Some(message),
+            uncertain_effect: false,
         }
     }
 }
@@ -66,8 +69,10 @@ impl ExecuteError {
 /// 2. Params over the host-to-guest ceiling are refused before any guest code runs.
 /// 3. The guest runs under the store's epoch deadline and cancellation flag.
 /// 4. Every outcome, including handler errors, passes the same completion checks:
-///    uncertain effects, memory limit, cancellation, then the deadline, and only then
-///    the buffer ceiling and the guest's own result.
+///    cancellation first, then the deadline, and only then the outcome is mapped
+///    (uncertain effects, memory limit, buffer ceiling, the guest's own result).
+///    The store's hostcall fuel is the transfer ceiling, so Wasmtime refuses to lift a
+///    result or error text over it before copying a byte into host memory.
 ///
 /// The engine must have epoch interruption enabled, which the trusted cache's does.
 pub fn execute(component: &Component, host: Host, params: &[u8]) -> Result<Vec<u8>, ExecuteError> {
@@ -81,6 +86,10 @@ pub fn execute(component: &Component, host: Host, params: &[u8]) -> Result<Vec<u
     }
     let (mut store, instance) = instantiate_component(engine, component, host)
         .map_err(|_| ExecuteError::new("instantiation_failed"))?;
+    // Wasmtime charges every list and string it lifts against this fuel before it copies
+    // them, so a guest cannot make the host allocate more than the transfer ceiling for
+    // its result, an error text, or an argument of a host call.
+    store.set_hostcall_fuel(BUFFER_BYTES);
     let outcome = instance.and_then(|instance| {
         let export = component
             .get_export_index(None, HANDLER_EXPORT)
@@ -98,41 +107,67 @@ fn finish(
     host: &Host,
     outcome: wasmtime::Result<(Result<Vec<u8>, HandlerError>,)>,
 ) -> Result<Vec<u8>, ExecuteError> {
-    let base = classify(host, outcome.as_ref().map(|_| ()));
-    match base {
-        InvocationOutcome::Uncertain => return Err(ExecuteError::new("uncertain_effect")),
-        InvocationOutcome::GuestMemoryLimit => {
-            return Err(ExecuteError::new("guest_memory_limit"));
-        }
-        _ => {}
-    }
+    let uncertain = host.uncertain_host_call();
+    let fail = |code: &'static str| ExecuteError {
+        uncertain_effect: uncertain,
+        ..ExecuteError::new(code)
+    };
     // Cancellation first: a guest cancelled during its last host call is cancelled,
     // whether it then returned a value, a handler error, or trapped on the interrupt.
-    if host.cancelled_host_call() || host.cancel_requested() {
-        return Err(ExecuteError::new("cancelled"));
+    // Only a requested cancellation counts: a host call that hit its own deadline also
+    // marks the call as unacknowledged, but nobody asked for the invocation to stop.
+    if host.cancel_requested() {
+        return Err(fail("cancelled"));
     }
     // Then the deadline, so an expired invocation never reports an application error.
-    if base == InvocationOutcome::GuestInterrupted
+    let interrupted = outcome.as_ref().err().is_some_and(|error| {
+        matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::Interrupt)
+        )
+    });
+    if interrupted
         || host
             .guest_deadline()
             .is_some_and(|deadline| Instant::now() >= deadline)
     {
-        return Err(ExecuteError::new("timeout"));
+        return Err(fail("timeout"));
     }
-    if base == InvocationOutcome::BufferLimit {
-        return Err(ExecuteError::new("buffer_limit_exceeded"));
+    // Only now is the outcome mapped. A detached mutating call may still commit, so
+    // that fact is reported ahead of whatever the guest did next.
+    if uncertain {
+        return Err(fail("uncertain_effect"));
+    }
+    if host.memory_limited() {
+        return Err(fail("guest_memory_limit"));
+    }
+    if host.buffer_limited() {
+        return Err(fail("buffer_limit_exceeded"));
     }
     match outcome {
-        Err(_) => Err(ExecuteError::new("guest_trapped")),
-        Ok((Ok(result),)) if result.len() <= host.input_limit() => Ok(result),
-        Ok((Ok(_),)) => Err(ExecuteError::new("buffer_limit_exceeded")),
-        Ok((Err(HandlerError::InvalidInput(message)),)) => {
-            Err(ExecuteError::guest("invalid_input", message))
-        }
-        Ok((Err(HandlerError::Failed(message)),)) => {
-            Err(ExecuteError::guest("handler_failed", message))
+        Err(error) if over_transfer_ceiling(&error) => Err(fail("buffer_limit_exceeded")),
+        Err(_) => Err(fail("guest_trapped")),
+        Ok((Ok(result),)) => match Bytes::new(host.input_limit()).add(result.len()) {
+            Ok(()) => Ok(result),
+            Err(_) => Err(fail("buffer_limit_exceeded")),
+        },
+        Ok((Err(error),)) => {
+            let (code, message) = match error {
+                HandlerError::InvalidInput(message) => ("invalid_input", message),
+                HandlerError::Failed(message) => ("handler_failed", message),
+            };
+            match Bytes::new(host.input_limit()).add(message.len()) {
+                Ok(()) => Err(ExecuteError::guest(code, message)),
+                Err(_) => Err(fail("buffer_limit_exceeded")),
+            }
         }
     }
+}
+
+/// Wasmtime's own refusal to lift guest data over the store's hostcall fuel. It is a
+/// plain error, not a trap, and is only recognisable by its message; a test pins it.
+fn over_transfer_ceiling(error: &wasmtime::Error) -> bool {
+    format!("{error:#}").contains("fuel allocated for hostcalls has been exhausted")
 }
 
 /// The static handler check on the compiled component's type. It mirrors the intake

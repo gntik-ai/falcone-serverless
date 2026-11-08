@@ -194,7 +194,7 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert!(
         result
             .as_str()
-            .contains("debbb2c56fb044a8e5e0f5e60636247a0ad8068f169c2ad47d7174ceb69de024")
+            .contains("c403cc739dcb74a26a98cfa8b918b17fea2c5a040428af5c0e2ee664052c7724")
     );
 }
 
