@@ -1,4 +1,4 @@
-package falcone:host@0.1.0;
+package falcone:host@0.2.0;
 
 /// max-guest-to-host-bytes: 1048576
 /// max-host-to-guest-bytes: 1048576
@@ -129,7 +129,26 @@ interface invocation-context {
     idempotency-key: func() -> string;
 }
 
+/// The guest's single entry point. The host calls it once per invocation.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: Blocking calls are cancelled independently of fuel/epoch.
+interface handler {
+    /// Application-level failures. The host reports only a bounded code, never the message.
+    variant handler-error {
+        invalid-input(string),
+        failed(string),
+    }
+
+    /// params: the JSON legacy envelope (at most max-host-to-guest-bytes).
+    /// Returns the JSON result envelope (at most max-guest-to-host-bytes).
+    handle: func(params: list<u8>) -> result<list<u8>, handler-error>;
+}
+
 world function {
+    export handler;
+
     import storage;
     import http;
     import events;

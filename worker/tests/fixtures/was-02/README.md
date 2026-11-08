@@ -1,13 +1,15 @@
 # Compile/cache fixtures
 
-`valid.wasm` is the eight-byte empty component. `invalid.wasm` has component
+`valid.wasm` is `../handler/echo.wat`: an import-free component that exports
+`falcone:host/handler@0.2.0` and echoes its params. Validation requires that
+export, so the empty component is no longer valid. `invalid.wasm` has component
 magic followed by a malformed section. `native.elf` is rejected at intake.
 The precompiled-input case generates real native output with the locked engine
 in the test, avoiding a checked-in architecture-specific engine artifact.
 
 The qualification fixture encoder expands `cpu-heavy.wat` to 64 functions with
 8192 multiply/add pairs each and `memory-heavy.wat` to one function with 131072
-pairs. An independent WAT parser checks their exact bytes. Neither workload is
+pairs. Both also carry the echo handler, which comes first. An independent WAT parser checks their exact bytes. Neither workload is
 instantiated or executed. CPU failure uses 1 s / 1 GiB / 300 s; memory failure
 uses 60 s / 128 MiB / 300 s. Both controls use 120 s / 4 GiB / 300 s.
 
@@ -103,3 +105,23 @@ existing namespace guard and `FS_TEST_NAMESPACE_MODE`/`FS_TEST_NAMESPACE` rules.
 No live cluster evidence is claimed by the in-process suite. Sandbox socket
 checks report `NOT RUN: EPERM (sandbox), PR CI runs them`; the pod mode fails
 closed if it cannot create its required listeners.
+
+## Execute path (WAS-01 handler export)
+
+`worker/tests/execute.rs` drives `host::execute` and the worker's `execute` subcommand
+in process. The cluster qualification in `worker/tests/cluster_execute.rs` runs
+`compile-cache-qualification --execute-gates` in a pod under the restricted posture, in
+an `fs-test` namespace the test creates and deletes. It covers a successful handler call,
+a rejected component whose start function would call the host (zero capability calls),
+and a cancelled invocation of a guest that never returns. Both use only trusted-compiled
+output. The two components the runner needs beyond the echo handler are embedded as bytes
+in `worker/src/qualification/execute_fixtures.rs`, and a unit test compares them to their
+WAT sources. Operator qualification (not run by agents), with the same image and inputs
+as above:
+
+```sh
+FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_execute -- --ignored --nocapture
+```
+
+With `FS_TEST_CLUSTER` unset the live test is ignored with the visible reason
+`not run: FS_TEST_CLUSTER unset`.

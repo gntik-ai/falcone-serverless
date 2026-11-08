@@ -58,7 +58,10 @@ evidence object make the absence of qualification explicit.
 The `allowedInterfaces` list caps grantable capabilities; membership never grants
 authority by itself. Each entry must resolve at its exact package version in
 [worker/wit/host.wit](../../worker/wit/host.wit), parsed with wit-parser. For
-example, `falcone:host/storage@0.1.0` names an interface, not a grant. Wildcards,
+example, `falcone:host/storage@0.2.0` names an interface, not a grant. Every
+`allowedInterfaces` entry resolves at `@0.2.0`; a `@0.1.0` entry is a version
+substitution and is rejected. The exported `handler` interface is not an import
+and is never listed or granted. Wildcards,
 unknown interfaces and version substitutions are rejected. Empty seed lists
 grant no capabilities. Future consumers must still intersect this ceiling with
 verified invocation grants and enforce scope, limits and cancellation.

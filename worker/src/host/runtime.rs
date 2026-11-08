@@ -310,6 +310,8 @@ pub struct Host {
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
     executions: BTreeMap<u32, (String, String)>,
+    /// When set, no host call may outlast the invocation's guest deadline.
+    invocation_deadline: Option<Instant>,
 }
 
 impl Host {
@@ -328,7 +330,13 @@ impl Host {
             keys: BTreeMap::new(),
             next_handle: 0,
             executions: BTreeMap::new(),
+            invocation_deadline: None,
         }
+    }
+
+    /// Bounds every later host call by the invocation's own deadline.
+    pub fn set_invocation_deadline(&mut self, deadline: Instant) {
+        self.invocation_deadline = Some(deadline);
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
@@ -363,7 +371,10 @@ impl Host {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(HostError::Cancelled);
         }
-        let deadline = Instant::now() + self.call_timeout;
+        let mut deadline = Instant::now() + self.call_timeout;
+        if let Some(invocation) = self.invocation_deadline {
+            deadline = deadline.min(invocation);
+        }
         let permit = permit(&self.bindings, deadline, &self.cancelled)?;
         let ticket = permit.0.clone();
         let (send, receive) = mpsc::sync_channel(1);
@@ -475,14 +486,7 @@ fn storage_resource<T: Send + 'static>(
     )
 }
 
-/// Qualification-only: compiles raw source in process, never native artifacts.
-/// A runtime adapter must use the supervised trusted compiler for tenant input;
-/// this fixture entry point does not enforce compilation CPU or memory budgets.
-pub fn instantiate(
-    engine: &Engine,
-    source: impl AsRef<[u8]>,
-    host: Host,
-) -> wasmtime::Result<(Store<Host>, Instance)> {
+fn check_context_size(host: &Host) -> wasmtime::Result<()> {
     let mut context_bytes = Bytes::default();
     for value in [
         &host.context.invocation_key,
@@ -494,7 +498,32 @@ pub fn instantiate(
             .and_then(|()| context_bytes.add(value.len()))
             .map_err(|_| wasmtime::Error::msg("limit-exceeded: invocation context"))?;
     }
+    Ok(())
+}
+
+/// Qualification-only: compiles raw source in process, never native artifacts.
+/// A runtime adapter must use the supervised trusted compiler for tenant input;
+/// this fixture entry point does not enforce compilation CPU or memory budgets.
+pub fn instantiate(
+    engine: &Engine,
+    source: impl AsRef<[u8]>,
+    host: Host,
+) -> wasmtime::Result<(Store<Host>, Instance)> {
+    check_context_size(&host)?;
     let component = Component::new(engine, source)?;
+    instantiate_component(engine, &component, host, |_| Ok(()))
+}
+
+/// Links the capability host to an already compiled component and instantiates it.
+/// `configure` runs on the new store before instantiation, so limits such as fuel and
+/// epoch deadlines also cover a guest start function.
+pub fn instantiate_component(
+    engine: &Engine,
+    component: &Component,
+    host: Host,
+    configure: impl FnOnce(&mut Store<Host>) -> wasmtime::Result<()>,
+) -> wasmtime::Result<(Store<Host>, Instance)> {
+    check_context_size(&host)?;
     for (name, _) in component.component_type().imports(engine) {
         if !import_allowed(name, &host.context.grants) {
             return Err(wasmtime::Error::msg(format!("denied import: {name}")));
@@ -502,14 +531,14 @@ pub fn instantiate(
     }
     let mut linker = Linker::new(engine);
     linker
-        .instance("falcone:host/cancellation@0.1.0")?
+        .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(
             "is-cancelled",
             |store: StoreContextMut<'_, Host>, (): ()| {
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
-    let mut context = linker.instance("falcone:host/invocation-context@0.1.0")?;
+    let mut context = linker.instance("falcone:host/invocation-context@0.2.0")?;
     context.func_wrap(
         "invocation-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
@@ -525,7 +554,7 @@ pub fn instantiate(
             Ok((store.data().context.idempotency_key.clone(),))
         },
     )?;
-    let mut progress = linker.instance("falcone:host/progress@0.1.0")?;
+    let mut progress = linker.instance("falcone:host/progress@0.2.0")?;
     progress.resource(
         "checkpoint",
         ResourceType::host::<Checkpoint>(),
@@ -561,7 +590,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.topics.is_empty() {
-        linker.instance("falcone:host/events@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/events@0.2.0")?.func_wrap(
             "publish",
             |mut store: StoreContextMut<'_, Host>,
              (destination, payload): (WasmStr, WasmList<u8>)| {
@@ -590,7 +619,7 @@ pub fn instantiate(
             },
         )?;
     }
-    linker.instance("falcone:host/logging@0.1.0")?.func_wrap(
+    linker.instance("falcone:host/logging@0.2.0")?.func_wrap(
         "log",
         |mut store: StoreContextMut<'_, Host>,
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
@@ -619,7 +648,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.prefixes.is_empty() {
-        let mut storage = linker.instance("falcone:host/storage@0.1.0")?;
+        let mut storage = linker.instance("falcone:host/storage@0.2.0")?;
         storage_resource::<Object>(
             &mut storage,
             ["object", "open-object", "read-object", "write-object"],
@@ -637,7 +666,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.targets.is_empty() {
-        let mut workflows = linker.instance("falcone:host/workflows@0.1.0")?;
+        let mut workflows = linker.instance("falcone:host/workflows@0.2.0")?;
         workflows.resource(
             "execution",
             ResourceType::host::<Execution>(),
@@ -730,7 +759,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.hosts.is_empty() {
-        linker.instance("falcone:host/http@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/http@0.2.0")?.func_wrap(
             "request",
             |mut store: StoreContextMut<'_, Host>,
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
@@ -758,6 +787,7 @@ pub fn instantiate(
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
     store.set_hostcall_fuel(GUEST_MEMORY_BYTES * 16);
-    let instance = linker.instantiate(&mut store, &component)?;
+    configure(&mut store)?;
+    let instance = linker.instantiate(&mut store, component)?;
     Ok((store, instance))
 }

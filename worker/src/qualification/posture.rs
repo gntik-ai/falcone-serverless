@@ -1,5 +1,10 @@
 //! Restricted-posture contract v1 and separately wired worker capability host.
 
+// The execute path validates the raw component with the artifact gate first.
+#[path = "../artifact/mod.rs"]
+pub mod artifact;
+#[path = "../cache/mod.rs"]
+pub mod cache;
 #[path = "../host/mod.rs"]
 pub mod host;
 

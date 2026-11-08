@@ -259,7 +259,7 @@ fn untrusted_entries_are_misses_before_any_native_load() {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
                 let requested: serde_json::Value =
                     serde_json::from_slice(&entry[4..4 + size]).unwrap();
-                let other = wat::parse_str("(component)").unwrap();
+                let other = wat::parse_str(include_str!("fixtures/handler/echo.wat")).unwrap();
                 let loaded = cache
                     .compile(3, &other, limits(), &AtomicBool::new(false))
                     .unwrap();
@@ -364,19 +364,28 @@ fn qualification_binary_fixtures_match_the_independent_wat_oracle() {
         fixtures::INVALID,
         include_bytes!("fixtures/was-02/invalid.wasm")
     );
-    assert_eq!(fixtures::small(), wat::parse_str("(component)").unwrap());
+    // The compile workloads need the handler export, so small() is the import-free echo.
+    let echo = include_str!("fixtures/handler/echo.wat");
+    assert_eq!(fixtures::small(), wat::parse_str(echo).unwrap());
+    let handler = echo
+        .split_once("(component\n")
+        .and_then(|(_, rest)| rest.trim_end().strip_suffix(')'))
+        .expect("echo fixture is one component");
     let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
     let function =
         include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
-    let cpu_wat =
-        include_str!("fixtures/was-02/cpu-heavy.wat").replace(";; FUNCTIONS", &function.repeat(64));
+    let cpu_wat = include_str!("fixtures/was-02/cpu-heavy.wat")
+        .replace(";; HANDLER", handler)
+        .replace(";; FUNCTIONS", &function.repeat(64));
     let expected_cpu = wat::parse_str(cpu_wat).unwrap();
     // Avoid printing megabytes of fixture bytes on a calibration mismatch.
     assert!(fixtures::cpu() == expected_cpu);
-    let memory_wat = include_str!("fixtures/was-02/memory-heavy.wat").replace(
-        ";; OPERATIONS",
-        &"i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(131072),
-    );
+    let memory_wat = include_str!("fixtures/was-02/memory-heavy.wat")
+        .replace(";; HANDLER", handler)
+        .replace(
+            ";; OPERATIONS",
+            &"i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(131072),
+        );
     assert_eq!(fixtures::memory(), wat::parse_str(memory_wat).unwrap());
 }
 
@@ -438,9 +447,14 @@ impl ChildFixture {
 #[test]
 fn child_limit_exit_during_input_transfer_keeps_its_diagnostic() {
     use cache::LoadEvent::*;
-    // Larger than a pipe buffer, but still a valid, otherwise empty component.
+    // Larger than a pipe buffer, but still a valid component: the echo handler plus padding.
+    let echo = include_str!("fixtures/handler/echo.wat");
+    let handler = echo
+        .split_once("(component\n")
+        .and_then(|(_, rest)| rest.trim_end().strip_suffix(')'))
+        .expect("echo fixture is one component");
     let bytes = wat::parse_str(format!(
-        "(component (@custom \"padding\" \"{}\"))",
+        "(component {handler} (@custom \"padding\" \"{}\"))",
         "x".repeat(1024 * 1024)
     ))
     .unwrap();

@@ -154,6 +154,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     let outcome = path == Path::new("qualification/outcome.rs");
     let runner = path == Path::new("qualification/runner.rs");
     let capability = [
+        "host/execute.rs",
         "host/mod.rs",
         "host/net.rs",
         "host/runtime.rs",

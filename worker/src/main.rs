@@ -1,12 +1,14 @@
 //! Falcone serverless execution worker.
 //!
-//! Placeholder binary so the workspace, CI and Hermes test commands exist before the
-//! Wasmtime host lands (EP-RUN, #18). It embeds no engine and runs no guest code yet.
+//! The `execute` subcommand runs one guest `handle` call through the trusted compile path.
+//! Pool serving, routing and platform bindings are not wired here yet.
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
 mod config;
+
+mod execute_command;
 
 #[cfg(test)]
 mod runtime_metrics;
@@ -44,6 +46,12 @@ pub fn run_with_io(
 }
 
 fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    // The one command whose stdout is the raw guest result: no banner, no trailing newline.
+    if let [subcommand, rest @ ..] = args
+        && subcommand == "execute"
+    {
+        return execute_command::run(rest, stdout);
+    }
     let output = match args {
         [] => format!("falcone-serverless-worker {}", version()),
         [flag] if flag == "--version" => format!("falcone-serverless-worker {}", version()),
@@ -56,7 +64,8 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | execute ...]"
+                    .into(),
             );
         }
     };

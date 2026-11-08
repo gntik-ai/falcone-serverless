@@ -8,6 +8,7 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod execute_fixtures;
 pub use falcone_serverless_worker::host;
 
 use artifact::supervisor::CompileLimits;
@@ -15,6 +16,7 @@ use cache::Cache;
 use compile_cache_fixtures::{limits, small};
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
+use std::time::Instant;
 
 fn check(ok: bool, reason: &'static str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(reason.into()) }
@@ -124,6 +126,91 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
     )
 }
 
+/// Counts capability calls: the rejected component must never cause one.
+#[derive(Default)]
+struct CountingBindings(std::sync::atomic::AtomicUsize);
+
+impl host::Bindings for CountingBindings {
+    fn call(&self, _: &host::Context, _: host::Operation) -> Result<host::Reply, host::HostError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(host::Reply::Empty)
+    }
+}
+
+fn execute_limits() -> host::execute::Limits {
+    host::execute::Limits {
+        guest_deadline: std::time::Duration::from_secs(20),
+    }
+}
+
+/// The execute path under the pod's restricted posture: a successful handler call and a
+/// cancelled invocation run only trusted-compiled output; a component with a start
+/// function that would call the host is rejected before any instantiation.
+fn execute_gates(root: &Path, child: &Path) -> Result<(), String> {
+    use host::execute::Executor;
+    let mut cache = Cache::new(root.join("cache"), child).map_err(|error| error.code.to_owned())?;
+    let params = br#"{"hello":"world"}"#;
+
+    let echo = compiled(&mut cache, &small(), limits())?;
+    let executor = Executor::new(echo.component.engine()).map_err(|error| error.code.to_owned())?;
+    let bindings = std::sync::Arc::new(CountingBindings::default());
+    let host = host::Host::new(host::Context::default(), bindings.clone());
+    let echoed = executor
+        .execute(&echo.component, host, params, execute_limits())
+        .map_err(|error| error.code.to_owned())?;
+    check(echoed == params, "echo_differs")?;
+
+    let spawned = cache.spawn_count();
+    let result = cache.compile(
+        3,
+        execute_fixtures::START_CALLS_HOST_MISTYPED,
+        limits(),
+        &AtomicBool::new(false),
+    );
+    check(
+        cache::verdict(&result) == ("rejected", Some("missing_handler_export")),
+        "rejected_component_accepted",
+    )?;
+    check(
+        cache.spawn_count() == spawned,
+        "rejected_component_compiled",
+    )?;
+    let rejected = executor.execute_source(
+        execute_fixtures::START_CALLS_HOST_MISTYPED,
+        host::Host::new(host::Context::default(), bindings.clone()),
+        params,
+        execute_limits(),
+    );
+    check(
+        rejected.as_ref().err().map(|error| error.code) == Some("missing_handler_export"),
+        "rejected_component_executed",
+    )?;
+    check(
+        bindings.0.load(std::sync::atomic::Ordering::SeqCst) == 0,
+        "rejected_component_reached_host",
+    )?;
+
+    let spin = compiled(&mut cache, execute_fixtures::SPIN, limits())?;
+    let host = host::Host::new(host::Context::default(), bindings);
+    let cancel = host.cancellation();
+    let started = Instant::now();
+    let cancelled = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        });
+        executor.execute(&spin.component, host, params, execute_limits())
+    });
+    check(
+        cancelled.as_ref().err().map(|error| error.code) == Some("cancelled"),
+        "cancellation_not_reported",
+    )?;
+    check(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "cancellation_not_prompt",
+    )
+}
+
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("binding_drop_probe") => {
@@ -176,6 +263,40 @@ fn main() -> std::process::ExitCode {
             capability_http::private_dns_and_nat64_answers_and_redirects_never_reach_transport();
             capability_http::http_lists_scalars_fields_and_responses_obey_the_aggregate_ceiling();
             capability_http::socket_rebinding_and_redirects_accept_no_forbidden_connections();
+        }
+        Some("--execute-gates") => {
+            let root = std::env::temp_dir().join(format!("was01-execute-{}", std::process::id()));
+            let result = std::env::current_exe()
+                .map_err(|_| "executable_path".to_owned())
+                .and_then(|exe| {
+                    let child = exe
+                        .parent()
+                        .ok_or("executable_directory")?
+                        .join("artifact-compile-child");
+                    // Never adopt a pre-existing scratch directory or its entries.
+                    std::fs::create_dir(&root).map_err(|_| "scratch_create")?;
+                    let result = execute_gates(&root, &child);
+                    let cleanup =
+                        std::fs::remove_dir_all(&root).map_err(|_| "scratch_cleanup".to_owned());
+                    cleanup?;
+                    result
+                });
+            return match result {
+                Ok(()) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"check":"execute_gates","status":"passed"})
+                    );
+                    std::process::ExitCode::SUCCESS
+                }
+                Err(reason) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({"check":"execute_gates","status":"failed","reason":reason})
+                    );
+                    std::process::ExitCode::FAILURE
+                }
+            };
         }
         Some(_) => return std::process::ExitCode::FAILURE,
         None => {}

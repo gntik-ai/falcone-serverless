@@ -38,12 +38,26 @@ fn raw_component_accepts_exact_world_function_interfaces() {
                 panic!("interface import")
             };
             format!(
-                "falcone:host/{}@0.1.0",
+                "falcone:host/{}@0.2.0",
                 resolve.interfaces[*id].name.as_ref().unwrap()
             )
         })
         .collect();
     assert_eq!(expected.len(), 8);
+    let exports: Vec<_> = world
+        .exports
+        .values()
+        .map(|item| {
+            let WorldItem::Interface { id, .. } = item else {
+                panic!("interface export")
+            };
+            format!(
+                "falcone:host/{}@0.2.0",
+                resolve.interfaces[*id].name.as_ref().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(exports, [artifact::validate::HANDLER_EXPORT]);
     assert_eq!(
         artifact::validate::ALLOWED_IMPORTS
             .iter()
@@ -57,6 +71,172 @@ fn raw_component_accepts_exact_world_function_interfaces() {
         validated.imports.iter().cloned().collect::<BTreeSet<_>>(),
         expected
     );
+}
+
+const HANDLER: &str = "falcone:host/handler@0.2.0";
+
+fn code(wat: &str) -> artifact::Error {
+    let bytes = wat::parse_str(wat).unwrap();
+    artifact::validate::validate(&bytes, bytes.len()).unwrap_err()
+}
+
+/// The valid fixture with one source edit, which must really change it.
+fn mutated(before: &str, after: &str) -> String {
+    let original = include_str!("fixtures/was-02/allowed.wat");
+    let changed = original.replace(before, after);
+    assert_ne!(
+        changed, original,
+        "mutation must change the fixture: {before}"
+    );
+    changed
+}
+
+#[test]
+fn valid_fixture_exports_the_handler_and_imports_only_world_interfaces() {
+    let bytes = small();
+    let validated = artifact::validate::validate(&bytes, bytes.len()).unwrap();
+    assert_eq!(validated.imports.len(), 8);
+    assert!(
+        validated
+            .imports
+            .iter()
+            .all(|import| import.starts_with("falcone:host/") && import.ends_with("@0.2.0"))
+    );
+}
+
+#[test]
+fn wasi_and_old_version_imports_stay_undeclared() {
+    let wasi = mutated(
+        "(import \"falcone:host/http@0.2.0\" (instance (type $host)))",
+        "(import \"wasi:cli/environment@0.2.0\" (instance (type $host)))",
+    );
+    let error = code(&wasi);
+    assert_eq!(error.code, "undeclared_import");
+    assert_eq!(error.import.as_deref(), Some("wasi:cli/environment@0.2.0"));
+    let old = mutated("storage@0.2.0", "storage@0.1.0");
+    let error = code(&old);
+    assert_eq!(error.code, "undeclared_import");
+    assert_eq!(error.import.as_deref(), Some("falcone:host/storage@0.1.0"));
+    // An import fails before the export check, so one missing export cannot mask it.
+    let both = mutated("storage@0.2.0", "storage@0.1.0").replace(HANDLER, "other:pkg/x@1.0.0");
+    assert_eq!(code(&both).code, "undeclared_import");
+}
+
+#[test]
+fn missing_extra_or_misnamed_handler_export_is_rejected() {
+    let export = format!("(export \"{HANDLER}\" (instance $handler))");
+    for (name, source) in [
+        ("no export", mutated(&export, "")),
+        (
+            "old version",
+            mutated(HANDLER, "falcone:host/handler@0.1.0"),
+        ),
+        ("other name", mutated(HANDLER, "falcone:host/other@0.2.0")),
+        (
+            "extra export",
+            mutated(
+                &export,
+                &format!("{export}\n  (export \"second\" (instance $handler))"),
+            ),
+        ),
+        (
+            "export is a type",
+            mutated(
+                &export,
+                "(export \"falcone:host/handler@0.2.0\" (type $error))",
+            ),
+        ),
+        (
+            "empty instance",
+            mutated(
+                "(instance $handler (export \"handler-error\" (type $error)) (export \"handle\" (func $handle)))",
+                "(instance $handler)",
+            ),
+        ),
+        (
+            "differently named function",
+            mutated(
+                "(export \"handle\" (func $handle))",
+                "(export \"run\" (func $handle))",
+            ),
+        ),
+    ] {
+        let error = code(&source);
+        assert_eq!(error.code, "missing_handler_export", "{name}");
+        assert_eq!(error.import, None, "{name}");
+    }
+}
+
+#[test]
+fn handle_must_have_exactly_the_wit_signature() {
+    for (name, before, after) in [
+        (
+            "params type",
+            "(param \"params\" (list u8))",
+            "(param \"params\" (list u16))",
+        ),
+        (
+            "params as string",
+            "(param \"params\" (list u8))",
+            "(param \"params\" string)",
+        ),
+        (
+            "params name",
+            "(param \"params\" (list u8))",
+            "(param \"input\" (list u8))",
+        ),
+        (
+            "ok type",
+            "(type $outcome (result (list u8) (error $error)))",
+            "(type $outcome (result (list u16) (error $error)))",
+        ),
+        (
+            "no error type",
+            "(type $outcome (result (list u8) (error $error)))",
+            "(type $outcome (result (list u8)))",
+        ),
+        (
+            "bare list result",
+            "(func $handle (param \"params\" (list u8)) (result $outcome)",
+            "(func $handle (param \"params\" (list u8)) (result (list u8))",
+        ),
+        (
+            "error case names",
+            "(case \"invalid-input\" string) (case \"failed\" string)",
+            "(case \"failed\" string) (case \"invalid-input\" string)",
+        ),
+        (
+            "error case payload",
+            "(case \"failed\" string)",
+            "(case \"failed\")",
+        ),
+        (
+            "error case count",
+            "(variant (case \"invalid-input\" string) (case \"failed\" string))",
+            "(variant (case \"invalid-input\" string))",
+        ),
+    ] {
+        let error = code(&mutated(before, after));
+        assert_eq!(error.code, "missing_handler_export", "{name}");
+        assert_eq!(error.import, None, "{name}");
+    }
+}
+
+#[test]
+fn rejection_diagnostics_are_bounded_and_never_echo_the_artifact() {
+    let long = "x".repeat(4096);
+    let source = mutated(
+        "falcone:host/http@0.2.0",
+        &format!("falcone:host/{long}@0.2.0"),
+    );
+    let error = code(&source);
+    assert_eq!(error.code, "undeclared_import");
+    assert_eq!(error.import.unwrap().chars().count(), 256);
+    // A rejected export carries only the stable code, whatever the artifact says.
+    let export = mutated(HANDLER, &format!("secret-{long}"));
+    let error = code(&export);
+    assert_eq!(error.code, "missing_handler_export");
+    assert_eq!(error.import, None);
 }
 
 #[test]
@@ -98,7 +278,7 @@ fn validation_order_and_input_boundary() {
     assert_eq!(error.code, "undeclared_import");
     assert_eq!(error.import.as_deref(), Some("wasi:filesystem/types@0.2.0"));
     let wrong_kind = wat::parse_str(
-        "(component (type (func)) (import \"falcone:host/http@0.1.0\" (func (type 0))))",
+        "(component (type (func)) (import \"falcone:host/http@0.2.0\" (func (type 0))))",
     )
     .unwrap();
     assert_eq!(
@@ -181,14 +361,22 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert_eq!(supervisor.spawn_count(), 1);
     assert!(supervisor.last_child_status().unwrap().unwrap().success());
     assert!(result.as_str().starts_with("sha256:"));
+    // The empty component has no handler export: it is no longer a valid artifact.
     let empty = b"\0asm\x0d\0\x01\0";
-    let result = supervisor
+    let error = supervisor
         .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
+        .unwrap_err();
+    assert_eq!(error.code, "missing_handler_export");
+    assert_eq!(supervisor.spawn_count(), 1);
+    // The import-free echo handler compiles; its key carries the sha256 of valid.wasm.
+    let echo = include_bytes!("fixtures/was-02/valid.wasm");
+    let result = supervisor
+        .compile(echo, limits(), &std::sync::atomic::AtomicBool::new(false))
         .unwrap();
     assert!(
         result
             .as_str()
-            .contains("24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29")
+            .contains("5e2c73ed4c48b4ea62efc35e26b5adf1c52134d53006d9b15675c343ca0e0317")
     );
 }
 
@@ -230,8 +418,14 @@ fn heavy() -> &'static [u8] {
         let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
         let function =
             include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
+        // The handler export is mandatory, so the workload carries the echo handler.
+        let echo = include_str!("fixtures/handler/echo.wat");
+        let handler = echo
+            .split_once("(component\n")
+            .and_then(|(_, rest)| rest.trim_end().strip_suffix(')'))
+            .expect("echo fixture is one component");
         wat::parse_str(format!(
-            "(component (core module {}))",
+            "(component {handler} (core module {}))",
             function.repeat(128)
         ))
         .unwrap()

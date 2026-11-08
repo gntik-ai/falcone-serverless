@@ -1,17 +1,44 @@
 # Falcone host capability contract
 
-package: falcone:host@0.1.0
+package: falcone:host@0.2.0
 
 The package stays pre-1.0 until WAS-03 qualification. Consumers pin the exact
-version. A breaking change requires a new version; once a revision pins 0.1.0,
+version. A breaking change requires a new version; once a revision pins 0.2.0,
 publish a corrected version rather than modifying that pinned contract. Raising
 a ceiling is compatible; lowering one breaks guests.
 
+## Version notes
+
+- 0.2.0 adds the exported `handler` interface, so a guest can receive its
+  parameters and return a result. The eight imports and their signatures are
+  unchanged. This is a breaking change: a component must export
+  `falcone:host/handler@0.2.0`, and every import is named `@0.2.0`.
+  No enabled language profile depended on 0.1.0.
+- 0.1.0 declared imports only. A `@0.1.0` import is an `undeclared_import` now.
+
 World `function` imports exactly `storage`, `http`, `events`, `workflows`,
-`logging`, `cancellation`, `progress` and `invocation-context`. Linking is
-deny-by-default: only these versioned Falcone interfaces are permitted. This
-package grants no WASI filesystem, sockets, generic HTTP, environment or secret
-interface. WAS-03 owns any separately qualified WASI language profile.
+`logging`, `cancellation`, `progress` and `invocation-context`, and exports
+exactly `handler`. Linking is deny-by-default: only these versioned Falcone
+interfaces are permitted. This package grants no WASI filesystem, sockets,
+generic HTTP, environment or secret interface. WAS-03 owns any separately
+qualified WASI language profile.
+
+## Handler export
+
+`handler.handle: func(params: list<u8>) -> result<list<u8>, handler-error>` is
+the only export. `params` is the JSON legacy envelope and must not exceed
+`max-host-to-guest-bytes`; the returned list is the JSON result envelope and must
+not exceed `max-guest-to-host-bytes`. `handler-error` is
+`variant { invalid-input(string), failed(string) }`.
+
+The artifact validator checks the exported instance and the exact `handle`
+signature on the raw component, before any compilation or instantiation. A
+missing, extra or mistyped export fails with `missing_handler_export`. The
+execute path maps outcomes to bounded codes only and never returns partial
+output: `limit_exceeded`, `timeout`, `cancelled`, `trap`, `invalid_input`,
+`handler_failed`. After the guest returns, whether it succeeded or failed, the
+host checks cancellation first and then the guest deadline, so a cancelled or
+expired invocation never reports an application error.
 
 ## Per-call ceilings
 
