@@ -47,11 +47,28 @@ type Metadata struct {
 	Finalizers        []string          `json:"finalizers,omitempty"`
 	OwnerReferences   json.RawMessage   `json:"ownerReferences,omitempty"`
 }
+
+// MicroTime matches Kubernetes metav1.MicroTime on the wire. time.Time's
+// RFC3339Nano encoder emits variable precision, which the API's fixed-width
+// microsecond parser rejects, including whole seconds and trimmed trailing zeros.
+type MicroTime struct{ time.Time }
+
+func (t MicroTime) MarshalJSON() ([]byte, error) {
+	return json.Marshal(t.UTC().Format("2006-01-02T15:04:05.000000Z07:00"))
+}
+
+// Reads accept RFC3339 timestamps, including fractional seconds and offsets.
+func (t *MicroTime) UnmarshalJSON(data []byte) error { return t.Time.UnmarshalJSON(data) }
+
 type LeaseSpec struct {
 	HolderIdentity       string     `json:"holderIdentity,omitempty"`
 	LeaseDurationSeconds int        `json:"leaseDurationSeconds,omitempty"`
-	AcquireTime          *time.Time `json:"acquireTime,omitempty"`
-	RenewTime            *time.Time `json:"renewTime,omitempty"`
+	AcquireTime          *MicroTime `json:"acquireTime,omitempty"`
+	RenewTime            *MicroTime `json:"renewTime,omitempty"`
+	// Preserve server fields we do not manage when replacing the Lease on PUT.
+	LeaseTransitions *int32  `json:"leaseTransitions,omitempty"`
+	PreferredHolder  *string `json:"preferredHolder,omitempty"`
+	Strategy         *string `json:"strategy,omitempty"`
 }
 type Lease struct {
 	APIVersion string    `json:"apiVersion"`
@@ -320,12 +337,12 @@ func (e *Elector) Step(ctx context.Context) error {
 		}
 		floor++
 		l.Metadata.Annotations[EpochAnnotation] = strconv.FormatInt(floor, 10)
-		l.Spec.AcquireTime = &started
+		l.Spec.AcquireTime = &MicroTime{Time: started}
 	}
 	e.uid = l.Metadata.UID
 	l.Spec.HolderIdentity = e.holder
 	l.Spec.LeaseDurationSeconds = int(e.cfg.LeaseDuration / time.Second)
-	l.Spec.RenewTime = &started
+	l.Spec.RenewTime = &MicroTime{Time: started}
 	updated, err := e.client.Update(ctx, e.cfg.Namespace, l)
 	if err != nil {
 		return err
@@ -374,21 +391,29 @@ func (e *Elector) Release(ctx context.Context) error {
 }
 
 // Run maintains the gate until cancellation. Each term gets a cancellable duty
-// context. Errors keep the process degraded and are logged only through observe.
+// context. Errors keep the process degraded. Observe reports error transitions
+// rather than logging the same standby or fail-closed state on every retry.
 func (e *Elector) Run(ctx context.Context, duty func(*Gate), observe func(error)) {
+	var lastError string
+	report := func(err error) {
+		current := ""
+		if err != nil {
+			current = err.Error()
+		}
+		if current != lastError && err != nil && observe != nil {
+			observe(err)
+		}
+		lastError = current
+	}
 	defer func() {
 		e.close()
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := e.Release(releaseCtx); err != nil && observe != nil {
-			observe(err)
-		}
+		report(e.Release(releaseCtx))
 	}()
 	var previous *Gate
 	for ctx.Err() == nil {
-		if err := e.Step(ctx); err != nil && observe != nil {
-			observe(err)
-		}
+		report(e.Step(ctx))
 		if e.gate != nil && e.gate != previous && e.gate.Context().Err() == nil {
 			previous = e.gate
 			if duty != nil {

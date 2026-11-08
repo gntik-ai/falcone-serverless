@@ -2,7 +2,9 @@
 
 The controller performs its read-only OPS-01 preflight, writes exactly one
 `pool-preflight/v1` JSON report to stdout, and campaigns only on a passed result.
-Runtime election diagnostics go to stderr. `POD_NAME` and `POD_NAMESPACE` must be
+Runtime election diagnostics go to stderr on error-state transitions; repeated
+standby or missing-history retries do not emit the same diagnostic indefinitely.
+`POD_NAME` and `POD_NAMESPACE` must be
 provided through the downward API. The namespace must equal the values file's
 `controllerNamespace`, whose Lease permissions preflight checked. Pool namespaces
 never select the election namespace. Leader election is enabled by default.
@@ -58,6 +60,14 @@ be proven, leave the floor unset and publishing refused. Falcone's last accepted
 report alone may undercount acquired but unpublished terms. Neither its receiver
 nor a durable epoch authority is implemented by this ChangeSet.
 
+Consequently, enabling election by default does **not** make a single replica
+acquire automatically on a fresh install. The rollout requires a manual,
+post-install continuity assertion after the Lease receives its UID. A Helm
+template alone cannot supply that UID-bound assertion. Operator confirmation of
+this bootstrap procedure and an operations / `gntik-ai/falcone-charts` follow-up
+remain necessary; the controller must not weaken the continuity check to meet
+the original automatic-acquisition rollout description.
+
 Deletion loses the floor. Recreated/restored objects that copy old annotations
 fail the UID binding check, even after process restart with no in-memory history.
 An operator must establish a new valid floor and bind it to the replacement's
@@ -70,9 +80,14 @@ or automatically manufactures this assertion after absence.
 Every existing Lease must also have label `falcone.ai/owner=pool-controller`,
 annotation `falcone.ai/ownership-version=1` and owner annotation
 `falcone.ai/owner=["<controllerNamespace>","leader"]` (a JSON array of strings).
+The duty identifier for this singleton is exactly `leader`; it is distinct from
+the future scaler duty under the generic resource-ownership contract.
 Missing, malformed or foreign ownership means no takeover, update or deletion.
 Every update, including renewal and release, uses the resourceVersion and UID
 from the same fresh read that passed these checks.
+Lease timestamps use Kubernetes MicroTime's six fractional digits in UTC on
+writes. Updates preserve `leaseTransitions`, `preferredHolder` and `strategy`
+from the verified read; this controller does not manage those fields.
 
 ## Fencing and the residual overlap window
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gntik-ai/falcone-serverless/controller/internal/leader"
 )
@@ -62,6 +63,92 @@ func TestHTTPClientNamespacedLeaseWireContract(t *testing.T) {
 	want := []string{"GET " + item, "PUT " + item, "POST " + strings.TrimSuffix(item, "/"+leader.LeaseName)}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("calls: %v", calls)
+	}
+}
+
+func TestHTTPClientLeaseTimestampsUseKubernetesMicroTime(t *testing.T) {
+	for _, tc := range []struct{ name, input, want string }{
+		{"whole second", "2026-11-08T14:15:42Z", "2026-11-08T14:15:42.000000Z"},
+		{"nanoseconds", "2026-11-08T14:15:42.235373062Z", "2026-11-08T14:15:42.235373Z"},
+		{"trailing zeroes on release", "2026-11-08T14:15:42.309900Z", "2026-11-08T14:15:42.309900Z"},
+		{"non-UTC input", "2026-11-08T15:15:42.123456789+01:00", "2026-11-08T14:15:42.123456Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"namespace":"falcone-system","name":"falcone-pool-controller-leader","uid":"uid-1","resourceVersion":"17"},"spec":{"acquireTime":"` + tc.input + `","renewTime":"` + tc.input + `"}}`
+			put := false
+			client, err := leader.NewHTTPClient("https://api.example", "test-token", &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+				if r.Method == http.MethodPut {
+					put = true
+					var wire struct {
+						Spec map[string]string `json:"spec"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+						t.Fatal(err)
+					}
+					for _, field := range []string{"acquireTime", "renewTime"} {
+						value := wire.Spec[field]
+						// Match metav1.MicroTime's fixed-width parser, independently
+						// of the controller's own Lease decoder.
+						if _, err := time.Parse("2006-01-02T15:04:05.000000Z07:00", value); err != nil {
+							t.Errorf("%s is not Kubernetes MicroTime: %q: %v", field, value, err)
+						}
+						if value != tc.want {
+							t.Errorf("%s = %q, want %q", field, value, tc.want)
+						}
+					}
+				}
+				return response(http.StatusOK, body), nil
+			})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, err := client.Get(context.Background(), "falcone-system", leader.LeaseName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Update(context.Background(), "falcone-system", l); err != nil {
+				t.Fatal(err)
+			}
+			if !put {
+				t.Fatal("Lease update was not sent")
+			}
+		})
+	}
+}
+
+func TestHTTPClientUpdatePreservesOtherLeaseSpecFields(t *testing.T) {
+	const body = `{"apiVersion":"coordination.k8s.io/v1","kind":"Lease","metadata":{"namespace":"falcone-system","name":"falcone-pool-controller-leader","uid":"uid-1","resourceVersion":"17"},"spec":{"leaseTransitions":7,"preferredHolder":"pod-b","strategy":"OldestEmulationVersion"}}`
+	put := false
+	client, err := leader.NewHTTPClient("https://api.example", "test-token", &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPut {
+			put = true
+			var wire struct {
+				Spec map[string]json.RawMessage `json:"spec"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&wire); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]string{"leaseTransitions": "7", "preferredHolder": `"pod-b"`, "strategy": `"OldestEmulationVersion"`} {
+				if got := string(wire.Spec[field]); got != want {
+					t.Errorf("%s = %s, want %s", field, got, want)
+				}
+			}
+		}
+		return response(http.StatusOK, body), nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := client.Get(context.Background(), "falcone-system", leader.LeaseName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.Spec.HolderIdentity = ""
+	if _, err := client.Update(context.Background(), "falcone-system", l); err != nil {
+		t.Fatal(err)
+	}
+	if !put {
+		t.Fatal("Lease update was not sent")
 	}
 }
 

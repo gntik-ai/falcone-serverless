@@ -57,6 +57,7 @@ type fakeAPI struct {
 	beforeUpdate func()
 	afterCreate  func() error
 	missing      bool
+	beforeGet    func()
 }
 
 func clone(l leader.Lease) leader.Lease {
@@ -79,6 +80,9 @@ func (f *fakeAPI) Get(_ context.Context, ns, name string) (leader.Lease, error) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "get "+ns+"/"+name)
+	if f.beforeGet != nil {
+		f.beforeGet()
+	}
 	if f.fail {
 		return leader.Lease{}, errors.New("API unreachable")
 	}
@@ -178,6 +182,7 @@ func TestTwoInstancesRenewAndHandOverWithFencing(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = b.Step(ctx)
+	lastRenewal := c.Now()
 	old := a.Gate()
 	duty := old.Context()
 	// A loses API access; its independent renewal timer must cancel duty work.
@@ -191,9 +196,23 @@ func TestTwoInstancesRenewAndHandOverWithFencing(t *testing.T) {
 		t.Fatal("expired leader wrote")
 	}
 	f.fail = false
-	c.advance(6 * time.Second)
+	// B retries on its configured cadence. The observed last renewal at t=2
+	// expires at t=17: every retry through t=16 must refuse takeover and writes.
+	for i := 0; i < 3; i++ {
+		writes := f.writes
+		if err := b.Step(ctx); !errors.Is(err, leader.ErrStandby) || f.writes != writes {
+			t.Fatalf("standby wrote before observed expiry at %v: %v", c.Now(), err)
+		}
+		if err := write(t, b.Gate(), true, &reports); err == nil {
+			t.Fatal("standby duty wrote before observed expiry")
+		}
+		c.advance(2 * time.Second)
+	}
 	if err := b.Step(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if elapsed := c.Now().Sub(lastRenewal); elapsed > 17*time.Second {
+		t.Fatalf("handover took %v, exceeds leaseDuration + retryPeriod", elapsed)
 	}
 	if err := write(t, b.Gate(), true, &reports); err != nil {
 		t.Fatal(err)
@@ -625,6 +644,54 @@ func TestRunCancellationClosesDutyAndReleasesLease(t *testing.T) {
 	}
 	if got := emitted(t, b.Gate()); got.Epoch != 2 {
 		t.Fatalf("release reused epoch: %+v", got)
+	}
+}
+
+// Advance retry scheduling synchronously so Run can be driven without sleeps or
+// concurrent access to the fake clock. Duty deadlines remain ordinary timers.
+type retryClock struct {
+	*clock
+	retry time.Duration
+}
+
+func (c retryClock) AfterFunc(d time.Duration, fn func()) leader.Timer {
+	if d == c.retry {
+		c.advance(d)
+		fn()
+		return &timer{stopped: true}
+	}
+	return c.clock.AfterFunc(d, fn)
+}
+
+func TestRunReportsOnlyErrorTransitions(t *testing.T) {
+	f, c := seed(), newClock()
+	cfg := leader.DefaultConfig("falcone-system", "pod-a")
+	cfg.PreflightPassed = true
+	e, err := leader.New(cfg, f, retryClock{clock: c, retry: cfg.RetryPeriod})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	delete(f.lease.Metadata.Annotations, leader.EpochAnnotation)
+	reads := 0
+	f.beforeGet = func() {
+		reads++
+		switch reads {
+		case 4:
+			// Healthy acquisition resets the error state between two runs of
+			// the same degraded state.
+			f.lease.Metadata.Annotations[leader.EpochAnnotation] = "0"
+		case 5:
+			delete(f.lease.Metadata.Annotations, leader.EpochAnnotation)
+		case 8:
+			cancel()
+		}
+	}
+	var observed []error
+	e.Run(ctx, nil, func(err error) { observed = append(observed, err) })
+	if len(observed) != 2 || !errors.Is(observed[0], leader.ErrHistory) || !errors.Is(observed[1], leader.ErrHistory) {
+		t.Fatalf("expected one diagnostic per transition into missing history, got %v", observed)
 	}
 }
 

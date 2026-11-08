@@ -40,7 +40,7 @@ type deps struct {
 	readFile func(string) ([]byte, error)
 	client   *http.Client  // built from the service account CA when nil
 	timeout  time.Duration // per access review; preflight.DefaultTimeout when zero
-	start    func()        // replaces production startup in preflight-only tests
+	start    func()        // preflight-only harness: skips pod identity and election
 	stdout   io.Writer
 	ctx      context.Context
 }
@@ -94,6 +94,9 @@ func runPreflight(d deps) (status.Report, *leader.Elector) {
 		return status.NewReport(nil, preflight.MissingPrerequisites(), strings.ReplaceAll(err.Error(), "\n", "; ")), nil
 	}
 	prerequisites := values.Prerequisites()
+	// The existing preflight-only harness supplies neither downward-API identity
+	// nor an election loop. Production never supplies start; its identity failure
+	// and single-report behavior are covered by internal/leader/process_test.go.
 	if d.start == nil {
 		if err := leader.ValidateIdentity(d.getenv("POD_NAME"), d.getenv("POD_NAMESPACE"), values.ControllerNamespace); err != nil {
 			return status.NewReport(nil, prerequisites, err.Error()), nil
