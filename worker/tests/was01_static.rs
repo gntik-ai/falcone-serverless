@@ -154,6 +154,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     let outcome = path == Path::new("qualification/outcome.rs");
     let runner = path == Path::new("qualification/runner.rs");
     let capability = [
+        "host/execute.rs",
         "host/mod.rs",
         "host/net.rs",
         "host/runtime.rs",
@@ -203,6 +204,9 @@ fn qualification_sources_obey_boundaries() {
         ("config.rs", "wasmtime::Engine"),
         ("host/other.rs", "wasmtime::Engine"),
         ("host/nested/runtime.rs", "wasmtime::Engine"),
+        ("host/nested/execute.rs", "wasmtime::Engine"),
+        ("host/execute.rs.bak", "wasmtime::Engine"),
+        ("host/execute.rs", "deserialize"),
         ("qualification/capability_other.rs", "wasmtime::Engine"),
         (
             "qualification/capability_invocations.rs.bak",

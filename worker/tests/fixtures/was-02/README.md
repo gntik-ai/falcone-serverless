@@ -1,6 +1,6 @@
 # Compile/cache fixtures
 
-`valid.wasm` is the eight-byte empty component. `invalid.wasm` has component
+`valid.wasm` is the smallest accepted component: an empty core module 0 followed by the echo handler export (`valid.wat`, `handler.wat`). `invalid.wasm` has component
 magic followed by a malformed section. `native.elf` is rejected at intake.
 The precompiled-input case generates real native output with the locked engine
 in the test, avoiding a checked-in architecture-specific engine artifact.

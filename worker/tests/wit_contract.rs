@@ -12,7 +12,7 @@ const INTERFACES: &[&str] = &[
     "progress",
     "invocation-context",
 ];
-// Literal requirements for falcone:host@0.1.0, independent of the canonical WIT.
+// Literal requirements for falcone:host@0.2.0, independent of the canonical WIT.
 // Resource ownership is explicit even where WIT spells an own handle implicitly.
 const RESOURCES: &[(&str, &str)] = &[
     ("storage", "object"),
@@ -24,32 +24,32 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "storage",
         "open-object",
-        "(key: string) -> result<own<falcone:host@0.1.0/storage.object>, host-error>",
+        "(key: string) -> result<own<falcone:host@0.2.0/storage.object>, host-error>",
     ),
     (
         "storage",
         "read-object",
-        "(handle: borrow<falcone:host@0.1.0/storage.object>) -> result<list<u8>, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.object>) -> result<list<u8>, host-error>",
     ),
     (
         "storage",
         "write-object",
-        "(handle: borrow<falcone:host@0.1.0/storage.object>, data: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.object>, data: list<u8>) -> result<_, host-error>",
     ),
     (
         "storage",
         "open-checkpoint",
-        "(key: string) -> result<own<falcone:host@0.1.0/storage.checkpoint>, host-error>",
+        "(key: string) -> result<own<falcone:host@0.2.0/storage.checkpoint>, host-error>",
     ),
     (
         "storage",
         "read-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<list<u8>, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>) -> result<list<u8>, host-error>",
     ),
     (
         "storage",
         "write-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>, data: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>, data: list<u8>) -> result<_, host-error>",
     ),
     (
         "http",
@@ -64,12 +64,12 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "workflows",
         "start",
-        "(workflow: string, input: list<u8>) -> result<own<falcone:host@0.1.0/workflows.execution>, host-error>",
+        "(workflow: string, input: list<u8>) -> result<own<falcone:host@0.2.0/workflows.execution>, host-error>",
     ),
     (
         "workflows",
         "signal",
-        "(handle: borrow<falcone:host@0.1.0/workflows.execution>, name: string, payload: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/workflows.execution>, name: string, payload: list<u8>) -> result<_, host-error>",
     ),
     (
         "logging",
@@ -84,7 +84,12 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "progress",
         "report-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>) -> result<_, host-error>",
+    ),
+    (
+        "handler",
+        "handle",
+        "(params: list<u8>) -> result<list<u8>, handler-error>",
     ),
     ("invocation-context", "invocation-key", "() -> string"),
     ("invocation-context", "attempt-id", "() -> string"),
@@ -189,8 +194,8 @@ fn render_type(resolve: &Resolve, ty: Type) -> String {
 fn check(resolve: &Resolve, package: PackageId) -> Vec<String> {
     let mut violations = Vec::new();
     let package_data = &resolve.packages[package];
-    if package_data.name.to_string() != "falcone:host@0.1.0" {
-        violations.push("package must be falcone:host@0.1.0".into());
+    if package_data.name.to_string() != "falcone:host@0.2.0" {
+        violations.push("package must be falcone:host@0.2.0".into());
     }
     let Some(world) = package_data.worlds.get("function") else {
         return vec!["missing world function".into()];
@@ -218,6 +223,51 @@ fn check(resolve: &Resolve, package: PackageId) -> Vec<String> {
         if !imports.contains(name) {
             violations.push(format!("missing interface: {name}"));
         }
+    }
+    // The only export is the guest handler, from this very package.
+    let mut exports = Vec::new();
+    for (key, item) in &world.exports {
+        let WorldItem::Interface { id, .. } = item else {
+            violations.push("non-interface export".into());
+            continue;
+        };
+        let interface = &resolve.interfaces[*id];
+        if interface.package != Some(package) {
+            violations.push(format!("non-falcone:host export: {key:?}"));
+        }
+        exports.push(interface.name.as_deref().unwrap_or("<inline>"));
+    }
+    if exports != ["handler"] {
+        violations.push(format!(
+            "world must export exactly handler, got {exports:?}"
+        ));
+    }
+    let handler_error = package_data
+        .interfaces
+        .get("handler")
+        .and_then(|id| resolve.interfaces[*id].types.get("handler-error"))
+        .map(|id| &resolve.types[*id].kind);
+    match handler_error {
+        Some(TypeDefKind::Variant(variant)) => {
+            let cases: Vec<_> = variant
+                .cases
+                .iter()
+                .map(|case| {
+                    (
+                        case.name.as_str(),
+                        case.ty.map(|ty| render_type(resolve, ty)),
+                    )
+                })
+                .collect();
+            let expected = [
+                ("invalid-input", Some("string".to_string())),
+                ("failed", Some("string".to_string())),
+            ];
+            if cases != expected {
+                violations.push(format!("handler-error: wrong cases {cases:?}"));
+            }
+        }
+        _ => violations.push("handler-error must be a variant".into()),
     }
 
     // Check every interface in the package, including any not linked by this world.
@@ -380,7 +430,7 @@ fn readme_agrees_with_resolved_contract() {
 // Inline fixtures are independent of the canonical file: contract edits cannot
 // silently repair a negative fixture. Each fixture must resolve before checking.
 const FIXTURE: &str = r#"
-package falcone:host@0.1.0;
+package falcone:host@0.2.0;
 interface cancellation {
     variant host-error { denied, limit-exceeded, timeout, cancelled }
     is-cancelled: func() -> bool;
@@ -432,6 +482,10 @@ interface invocation-context {
     attempt-id: func() -> string;
     idempotency-key: func() -> string;
 }
+interface handler {
+    variant handler-error { invalid-input(string), failed(string) }
+    handle: func(params: list<u8>) -> result<list<u8>, handler-error>;
+}
 world function {
     import storage;
     import http;
@@ -441,6 +495,7 @@ world function {
     import cancellation;
     import progress;
     import invocation-context;
+    export handler;
 }
 "#;
 const FIXTURE_DOCS: &str = "\n/// max-guest-to-host-bytes: 1048576\n/// max-host-to-guest-bytes: 1048576\n/// host-call-timeout-ms: 30000\n/// cancellation: Blocking calls are cancelled independently of fuel/epoch.\n";
@@ -477,12 +532,12 @@ fn inline_fixture_is_a_valid_control() {
 #[test]
 fn package_version_is_required() {
     rejects(
-        &fixture().replace("@0.1.0", ""),
-        "package must be falcone:host@0.1.0",
+        &fixture().replace("@0.2.0", ""),
+        "package must be falcone:host@0.2.0",
     );
     rejects(
-        &fixture().replace("@0.1.0", "@0.2.0"),
-        "package must be falcone:host@0.1.0",
+        &fixture().replace("@0.2.0", "@0.1.0"),
+        "package must be falcone:host@0.2.0",
     );
 }
 
@@ -539,8 +594,8 @@ fn foreign_authority_is_rejected_after_successful_resolution() {
             "other:host/storage@0.1.0",
         ),
         (
-            "package falcone:host@0.2.0; interface storage {}",
-            "falcone:host/storage@0.2.0",
+            "package falcone:host@0.1.0; interface storage {}",
+            "falcone:host/storage@0.1.0",
         ),
     ] {
         let mut resolve = Resolve::default();
@@ -721,8 +776,8 @@ fn readme_only_version_and_limit_changes_are_rejected() {
     let readme = fs::read_to_string(root.join("README.md")).expect("read WIT README");
     for (before, after, expected) in [
         (
-            "falcone:host@0.1.0",
             "falcone:host@0.2.0",
+            "falcone:host@0.1.0",
             "README package differs from WIT",
         ),
         (
@@ -924,7 +979,8 @@ fn required_operation_signatures_cannot_change() {
 fn every_fallible_operation_requires_the_shared_error_identity() {
     let original = fixture();
     for (interface, operation, signature) in OPERATIONS {
-        if !signature.contains(" -> result<") {
+        // The handler reports its own handler-error to the host, not host-error.
+        if !signature.contains(" -> result<") || *interface == "handler" {
             continue;
         }
         let prefix = format!("{operation}: func(");
@@ -946,5 +1002,68 @@ fn every_fallible_operation_requires_the_shared_error_identity() {
             &source,
             &format!("{interface}.{operation}: must return result with shared host-error"),
         );
+    }
+}
+
+#[test]
+fn world_requires_exactly_the_handler_export() {
+    rejects(
+        &fixture().replace("export handler;", ""),
+        "world must export exactly handler",
+    );
+    rejects(
+        &fixture().replace(
+            "world function {",
+            "interface extra {}\nworld function { export extra;",
+        ),
+        "world must export exactly handler",
+    );
+    rejects(
+        &fixture()
+            .replace(
+                "world function {",
+                "interface other-handler {}\nworld function { export other-handler;",
+            )
+            .replace("export handler;", ""),
+        "world must export exactly handler",
+    );
+    rejects(
+        &fixture().replace("export handler;", "export ambient-run: func();"),
+        "non-interface export",
+    );
+}
+
+#[test]
+fn handler_signature_and_error_cannot_change() {
+    for (before, after, expected) in [
+        (
+            "handle: func(params: list<u8>) -> result<list<u8>, handler-error>",
+            "handle: func(params: string) -> result<list<u8>, handler-error>",
+            "handler.handle: wrong signature",
+        ),
+        (
+            "handle: func(params: list<u8>) -> result<list<u8>, handler-error>",
+            "handle: func(params: list<u8>) -> list<u8>",
+            "handler.handle: wrong signature",
+        ),
+        (
+            "handle: func(params: list<u8>) -> result<list<u8>, handler-error>",
+            "handle: func(params: list<u8>) -> result<string, handler-error>",
+            "handler.handle: wrong signature",
+        ),
+        (
+            "invalid-input(string), failed(string)",
+            "failed(string)",
+            "handler-error: wrong cases",
+        ),
+        (
+            "invalid-input(string), failed(string)",
+            "invalid-input(string), failed(u32)",
+            "handler-error: wrong cases",
+        ),
+    ] {
+        let source = fixture().replace(before, after);
+        assert_ne!(source, fixture(), "mutation must apply: {after}");
+        rejects(&source, expected);
     }
 }

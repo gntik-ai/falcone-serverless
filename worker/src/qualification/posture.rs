@@ -1,5 +1,10 @@
 //! Restricted-posture contract v1 and separately wired worker capability host.
 
+#[path = "../artifact/mod.rs"]
+pub mod artifact;
+#[cfg(target_os = "linux")]
+#[path = "../cache/mod.rs"]
+pub mod cache;
 #[path = "../host/mod.rs"]
 pub mod host;
 

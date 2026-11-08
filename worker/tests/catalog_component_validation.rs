@@ -13,7 +13,7 @@ fn accepts_valid_component() {
     };
     assert_eq!(
         accepted.digest,
-        "sha256:5389acc3864c7951ea6d7d9b976086092bb3d23b639e6392bc297051d8a7e9c9"
+        "sha256:234c53c4d5aca2c007ba17593939441e8e5ea24b45561fc92826bed57178f3ed"
     );
     assert_eq!(accepted.imports, Vec::<String>::new());
 }

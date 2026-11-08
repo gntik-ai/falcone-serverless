@@ -5,4 +5,6 @@
     local.get 0
     ;; OPERATIONS
   )
-))
+)
+  ;; HANDLER
+)

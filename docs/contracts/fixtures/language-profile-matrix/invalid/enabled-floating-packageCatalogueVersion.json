@@ -9,7 +9,7 @@
       "toolchainVersion": "1.0.0",
       "packageCatalogueVersion": ">=1.0.0",
       "allowedInterfaces": [
-        "falcone:host/logging@0.1.0"
+        "falcone:host/logging@0.2.0"
       ],
       "testedExamples": [
         "fixture-only:legacy-javascript-envelope"

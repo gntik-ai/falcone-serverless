@@ -80,8 +80,11 @@ fixture. Production budgets remain owned by WAS-01/profile policy.
 
 Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
 precompiled input), full component-model validation, component-only check, then
-exact top-level interface-instance imports from `falcone:host@0.1.0` world
-`function`. Nested core modules are validated too. AVC-R5/profile declared-memory
+exact top-level interface-instance imports from `falcone:host@0.2.0` world
+`function`, then exactly one top-level export, the instance
+`falcone:host/handler@0.2.0`; a missing, different (including `@0.1.0`) or
+additional export is `missing_handler_export`. Nested core modules are validated
+too. AVC-R5/profile declared-memory
 checks and guest memory/epoch enforcement remain RUN-01 work; this module does
 not claim to implement them. No runtime consumer is wired into the worker.
 
@@ -130,6 +133,7 @@ Diagnostics identify the failed element and use these stable codes. Diagnostic p
 | `compile_cancelled` | Caller went away or compilation was otherwise cancelled. |
 | `unsupported_feature` | Wasm feature or requested version unsupported by the qualified profile. |
 | `undeclared_import` | Import outside the declared, permitted versioned interfaces. |
+| `missing_handler_export` | The component does not export exactly `falcone:host/handler@0.2.0` as its only top-level export. The diagnostic is the code alone. |
 | `trusted_cache_unavailable` | No verified trusted-compiler cache entry is available. |
 | `buffer_limit_exceeded` | Aggregate guest/host transfer exceeds the capability-host ceiling; destination is unchanged. |
 | `compile_failed` | Trusted compiler failed, a required budget could not be applied, or an unknown child exit occurred. |

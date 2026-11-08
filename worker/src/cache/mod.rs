@@ -93,6 +93,11 @@ impl Cache {
         })
     }
 
+    /// The engine that built every component this cache returns; run them only on it.
+    pub fn engine(&self) -> load::Engine {
+        self.engine.clone()
+    }
+
     pub fn spawn_count(&self) -> usize {
         self.supervisor.spawn_count()
     }

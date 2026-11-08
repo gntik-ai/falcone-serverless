@@ -1,17 +1,49 @@
 # Falcone host capability contract
 
-package: falcone:host@0.1.0
+package: falcone:host@0.2.0
 
 The package stays pre-1.0 until WAS-03 qualification. Consumers pin the exact
-version. A breaking change requires a new version; once a revision pins 0.1.0,
+version. A breaking change requires a new version; once a revision pins 0.2.0,
 publish a corrected version rather than modifying that pinned contract. Raising
 a ceiling is compatible; lowering one breaks guests.
 
+Version notes:
+
+- 0.2.0 adds the exported `handler` interface and exports it from world
+  `function`. The eight imports and every existing signature are unchanged.
+  Every `0.1.0` name (imports, linker instances, allow-list, cache interface
+  version) moved to `0.2.0` together; a component that still imports or
+  exports a `0.1.0` name is rejected at the validator and never linked. No
+  profile was enabled on 0.1.0, so no deployed guest is affected.
+- 0.1.0 declared imports only, so a guest could not receive parameters or
+  return a result.
+
 World `function` imports exactly `storage`, `http`, `events`, `workflows`,
-`logging`, `cancellation`, `progress` and `invocation-context`. Linking is
-deny-by-default: only these versioned Falcone interfaces are permitted. This
-package grants no WASI filesystem, sockets, generic HTTP, environment or secret
-interface. WAS-03 owns any separately qualified WASI language profile.
+`logging`, `cancellation`, `progress` and `invocation-context`, and exports
+exactly `handler`. Linking is deny-by-default: only these versioned Falcone
+interfaces are permitted. This package grants no WASI filesystem, sockets,
+generic HTTP, environment or secret interface. WAS-03 owns any separately
+qualified WASI language profile.
+
+## Guest handler export
+
+```wit
+interface handler {
+    variant handler-error { invalid-input(string), failed(string) }
+    handle: func(params: list<u8>) -> result<list<u8>, handler-error>;
+}
+```
+
+`params` is the JSON legacy envelope and the result is the JSON result envelope.
+The artifact validator requires exactly one top-level export,
+`falcone:host/handler@0.2.0`, as an instance; a missing, different or additional
+export is rejected with `missing_handler_export`. The worker `execute` path
+enforces `max-host-to-guest-bytes` on `params` before any byte is written to
+guest memory and `max-guest-to-host-bytes` on the result after its length is
+read and before it is copied; both fail with `limit_exceeded`. A trap, an epoch
+deadline (`timeout`), cancellation and a `handler-error` (`handler_invalid_input`,
+`handler_failed`, with the guest string truncated to 256 bytes) each map to one
+stable code, and a failed call never returns partial output.
 
 ## Per-call ceilings
 
@@ -56,4 +88,5 @@ events, workflows, progress and logging results:
 
 Failures must not expose credentials or internal binding details. Log fields
 are structured and redacted by the host. No runtime bindings consume this
-contract yet; this change is merge-only and adds no guest execution behavior.
+contract yet and no language profile is enabled; the worker `execute` command
+runs a validated component with no platform bindings for qualification.

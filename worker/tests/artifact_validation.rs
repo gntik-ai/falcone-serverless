@@ -38,12 +38,36 @@ fn raw_component_accepts_exact_world_function_interfaces() {
                 panic!("interface import")
             };
             format!(
-                "falcone:host/{}@0.1.0",
-                resolve.interfaces[*id].name.as_ref().unwrap()
+                "falcone:host/{}@{}",
+                resolve.interfaces[*id].name.as_ref().unwrap(),
+                package.name.version.as_ref().unwrap()
             )
         })
         .collect();
     assert_eq!(expected.len(), 8);
+    assert!(expected.iter().all(|name| name.ends_with("@0.2.0")));
+    // The one export of world function is the handler, at the package version.
+    let exports: Vec<_> = world
+        .exports
+        .values()
+        .map(|item| {
+            let WorldItem::Interface { id, .. } = item else {
+                panic!("interface export")
+            };
+            format!(
+                "falcone:host/{}@{}",
+                resolve.interfaces[*id].name.as_ref().unwrap(),
+                package.name.version.as_ref().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(exports, ["falcone:host/handler@0.2.0"]);
+    assert_eq!(artifact::validate::HANDLER_EXPORT, exports[0]);
+    // The execute path looks up the very instance the validator requires.
+    assert_eq!(
+        falcone_serverless_worker::host::execute::HANDLER_INSTANCE,
+        exports[0]
+    );
     assert_eq!(
         artifact::validate::ALLOWED_IMPORTS
             .iter()
@@ -98,7 +122,7 @@ fn validation_order_and_input_boundary() {
     assert_eq!(error.code, "undeclared_import");
     assert_eq!(error.import.as_deref(), Some("wasi:filesystem/types@0.2.0"));
     let wrong_kind = wat::parse_str(
-        "(component (type (func)) (import \"falcone:host/http@0.1.0\" (func (type 0))))",
+        "(component (type (func)) (import \"falcone:host/http@0.2.0\" (func (type 0))))",
     )
     .unwrap();
     assert_eq!(
@@ -111,6 +135,85 @@ fn validation_order_and_input_boundary() {
         validate(&invalid_nested, 1024).unwrap_err().code,
         "invalid_module"
     );
+}
+
+fn catalog(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/catalog")
+        .join(format!("{name}.wat"));
+    wat::parse_str(std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn handler_export_gate_accepts_only_the_exact_0_2_0_surface() {
+    use artifact::validate::validate;
+    for name in ["valid_handler", "valid_no_imports"] {
+        let bytes = catalog(name);
+        let validated = validate(&bytes, bytes.len()).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert!(
+            validated
+                .imports
+                .iter()
+                .all(|import| import.starts_with("falcone:host/") && import.ends_with("@0.2.0")),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        validate(&catalog("valid_handler"), usize::MAX)
+            .unwrap()
+            .imports
+            .len(),
+        8
+    );
+    for (name, code, import) in [
+        // A WASI import is undeclared even though the handler export is present.
+        (
+            "import_wasi",
+            "undeclared_import",
+            Some("wasi:filesystem/types@0.2.0"),
+        ),
+        // The previous interface version is no longer an allowed import.
+        (
+            "import_v0_1",
+            "undeclared_import",
+            Some("falcone:host/logging@0.1.0"),
+        ),
+        ("no_export", "missing_handler_export", None),
+        ("export_v0_1", "missing_handler_export", None),
+        ("extra_export", "missing_handler_export", None),
+        ("wrong_export_kind", "missing_handler_export", None),
+    ] {
+        let bytes = catalog(name);
+        let error = validate(&bytes, bytes.len()).unwrap_err();
+        assert_eq!(error.code, code, "{name}");
+        assert_eq!(error.import.as_deref(), import, "{name}");
+    }
+    // Nothing but the exact handler export satisfies the gate: the empty component fails.
+    assert_eq!(
+        validate(b"\0asm\x0d\0\x01\0", 100).unwrap_err().code,
+        "missing_handler_export"
+    );
+}
+
+#[test]
+fn rejection_diagnostics_stay_bounded_and_never_include_artifact_bytes() {
+    use artifact::validate::validate;
+    let long = format!("falcone:host/{}@0.2.0", "x".repeat(4096));
+    let bytes = wat::parse_str(format!(
+        "(component (type (instance)) (import \"{long}\" (instance (type 0))))"
+    ))
+    .unwrap();
+    let error = validate(&bytes, bytes.len()).unwrap_err();
+    assert_eq!(error.code, "undeclared_import");
+    assert_eq!(error.import.unwrap().chars().count(), 256);
+    // The export diagnostic carries a code only, never an artifact-supplied name.
+    let bytes = wat::parse_str(format!(
+        "(component (core module $m) (core instance $i (instantiate $m)) (instance $e) (export \"{long}\" (instance $e)))"
+    ))
+    .unwrap();
+    let error = validate(&bytes, bytes.len()).unwrap_err();
+    assert_eq!(error.code, "missing_handler_export");
+    assert_eq!(error.import, None);
 }
 
 #[test]
@@ -181,15 +284,26 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert_eq!(supervisor.spawn_count(), 1);
     assert!(supervisor.last_child_status().unwrap().unwrap().success());
     assert!(result.as_str().starts_with("sha256:"));
-    let empty = b"\0asm\x0d\0\x01\0";
+    let valid = include_bytes!("fixtures/was-02/valid.wasm");
     let result = supervisor
-        .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
+        .compile(valid, limits(), &std::sync::atomic::AtomicBool::new(false))
         .unwrap();
     assert!(
         result
             .as_str()
-            .contains("24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29")
+            .contains("4be4e0203281744c6e1c29e60c85207588801f765d4a32a7d0c0b4645a1ea055")
     );
+    // The empty component has no handler export: rejected before any child is spawned.
+    let spawned = supervisor.spawn_count();
+    let error = supervisor
+        .compile(
+            b"\0asm\x0d\0\x01\0",
+            limits(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "missing_handler_export");
+    assert_eq!(supervisor.spawn_count(), spawned);
 }
 
 #[test]
@@ -231,8 +345,9 @@ fn heavy() -> &'static [u8] {
         let function =
             include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
         wat::parse_str(format!(
-            "(component (core module {}))",
-            function.repeat(128)
+            "(component (core module {}) {})",
+            function.repeat(128),
+            include_str!("fixtures/was-02/handler.wat")
         ))
         .unwrap()
     })

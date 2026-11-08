@@ -1,4 +1,4 @@
-package falcone:host@0.1.0;
+package falcone:host@0.2.0;
 
 /// max-guest-to-host-bytes: 1048576
 /// max-host-to-guest-bytes: 1048576
@@ -129,6 +129,24 @@ interface invocation-context {
     idempotency-key: func() -> string;
 }
 
+/// The single guest export. The worker passes the JSON legacy envelope and the guest returns
+/// the JSON result envelope. Neither buffer exceeds max-host-to-guest-bytes (params) or
+/// max-guest-to-host-bytes (result); the host rejects an oversized buffer without copying it.
+/// Guest-supplied error strings are truncated by the host and never carry credentials.
+/// max-guest-to-host-bytes: 1048576
+/// max-host-to-guest-bytes: 1048576
+/// host-call-timeout-ms: 30000
+/// cancellation: The guest is interrupted by the epoch deadline and host cancellation, independent of fuel.
+interface handler {
+    variant handler-error {
+        invalid-input(string),
+        failed(string),
+    }
+
+    /// params: the JSON legacy envelope; returns the JSON result envelope.
+    handle: func(params: list<u8>) -> result<list<u8>, handler-error>;
+}
+
 world function {
     import storage;
     import http;
@@ -138,4 +156,5 @@ world function {
     import cancellation;
     import progress;
     import invocation-context;
+    export handler;
 }
