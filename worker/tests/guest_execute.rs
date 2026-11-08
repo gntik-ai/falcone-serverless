@@ -285,15 +285,45 @@ fn cancellation_interrupts_a_running_guest_and_blocks_a_new_one() {
     assert_eq!(code(result), "cancelled");
 }
 
+/// A binding that cancels the invocation while the guest's last host call is in flight.
+struct CancelOnSecondCall {
+    calls: AtomicUsize,
+    flag: std::sync::Mutex<Option<Arc<AtomicBool>>>,
+}
+
+impl Bindings for CancelOnSecondCall {
+    fn call(&self, _context: &Context, _operation: Operation) -> Result<Reply, HostError> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 1
+            && let Some(flag) = self.flag.lock().unwrap().as_ref()
+        {
+            flag.store(true, Ordering::Release);
+        }
+        Ok(Reply::Empty)
+    }
+}
+
 #[test]
 fn a_cancelled_invocation_returns_no_output_even_if_the_guest_finishes() {
     let executor = executor();
-    let component = load(&executor, ECHO);
-    let finished = host();
-    finished.cancellation().store(true, Ordering::Release);
+    let component = Component::new(executor.engine(), reporting_component()).unwrap();
+    let bindings = Arc::new(CancelOnSecondCall {
+        calls: AtomicUsize::new(0),
+        flag: std::sync::Mutex::new(None),
+    });
+    let host = Host::new(Context::default(), bindings.clone());
+    *bindings.flag.lock().unwrap() = Some(host.cancellation());
+    // Cancelled during the guest's final host call; the guest ignores the error and echoes.
+    let result = executor.execute(&component, host, b"x", limits());
+    assert_eq!(code(result), "cancelled");
+    // Control: without cancellation the same guest completes and echoes.
+    let quiet = Arc::new(CancelOnSecondCall {
+        calls: AtomicUsize::new(0),
+        flag: std::sync::Mutex::new(None),
+    });
+    let host = Host::new(Context::default(), quiet);
     assert_eq!(
-        code(executor.execute(&component, finished, b"x", limits())),
-        "cancelled"
+        executor.execute(&component, host, b"x", limits()).unwrap(),
+        b"x"
     );
 }
 
@@ -605,8 +635,36 @@ mod cli {
                 "{name}: {message}"
             );
             // Diagnostics are bounded and never carry artifact bytes.
-            assert!(message.len() < 512, "{name}: {message}");
+            assert!(message.chars().count() <= 257, "{name}: {message}");
         }
+    }
+
+    #[test]
+    fn a_long_undeclared_import_keeps_the_whole_diagnostic_within_256_characters() {
+        let dir = Dir::new("long-import");
+        let long = format!("falcone:host/{}@0.2.0", "x".repeat(4096));
+        let imports = format!(r#"(import "{long}" (instance (type $host)))"#);
+        let wasm = wat::parse_str(super::handler_component(
+            &imports,
+            super::BUMP_REALLOC,
+            super::ECHO,
+        ))
+        .unwrap();
+        let artifact = dir.write("long.wasm", &wasm);
+        let params = dir.write("params.json", b"{}");
+        let output = execute(
+            &dir,
+            &[artifact.to_str().unwrap(), params.to_str().unwrap()],
+        );
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.stdout, b"");
+        let message = stderr(&output);
+        assert!(
+            message.starts_with("execute failed: undeclared_import"),
+            "{message}"
+        );
+        // The line is the diagnostic plus one newline.
+        assert_eq!(message.trim_end_matches('\n').chars().count(), 256);
     }
 
     #[test]

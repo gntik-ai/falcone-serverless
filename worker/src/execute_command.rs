@@ -93,6 +93,16 @@ impl Drop for Scratch {
     }
 }
 
+/// The whole rendered diagnostic, prefix and detail included, is at most this many characters.
+const MAX_DIAGNOSTIC_CHARS: usize = 256;
+
+fn failure(detail: std::fmt::Arguments<'_>) -> String {
+    format!("execute failed: {detail}")
+        .chars()
+        .take(MAX_DIAGNOSTIC_CHARS)
+        .collect()
+}
+
 /// `args` follow the `execute` word. Success writes exactly the result bytes to `stdout`;
 /// every failure writes nothing there and returns one `execute failed: CODE` line.
 pub fn run(args: &[OsString], stdout: &mut dyn Write) -> Result<(), String> {
@@ -120,12 +130,12 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write) -> Result<(), String> {
             &AtomicBool::new(false),
         )
         .map_err(|error| match error.import {
-            // Bounded to 256 characters by the validator; escaped, since it is artifact text.
-            Some(import) => format!("execute failed: {}: {import:?}", error.code),
-            None => format!("execute failed: {}", error.code),
+            // Escaped, since it is artifact text; the whole line is bounded by `failure`.
+            Some(import) => failure(format_args!("{}: {import:?}", error.code)),
+            None => failure(format_args!("{}", error.code)),
         })?;
     let executor =
-        Executor::new(cache.engine()).map_err(|failure| format!("execute failed: {failure}"))?;
+        Executor::new(cache.engine()).map_err(|error| failure(format_args!("{error}")))?;
     let host = Host::new(Context::default(), Arc::new(Unbound));
     let limits = Limits {
         deadline: arguments.deadline,
@@ -134,7 +144,7 @@ pub fn run(args: &[OsString], stdout: &mut dyn Write) -> Result<(), String> {
     };
     let output = executor
         .execute(&loaded.component, host, &params, limits)
-        .map_err(|failure| format!("execute failed: {failure}"))?;
+        .map_err(|error| failure(format_args!("{error}")))?;
     stdout
         .write_all(&output)
         .and_then(|()| stdout.flush())
