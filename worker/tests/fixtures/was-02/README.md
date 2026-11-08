@@ -93,7 +93,7 @@ FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluste
 ```
 
 The live test is ignored by default with the visible reason
-`not run: FS_TEST_CLUSTER unset`, skips client construction, and keeps workspace
+`UNVERIFIED: FS_TEST_CLUSTER unset`, skips client construction, and keeps workspace
 CI green. The operator command explicitly selects it with `--ignored` and sets
 `FS_TEST_CLUSTER=1`. Any set value other than `1`, or missing/invalid inputs when
 opted in, fails closed. The pod uses RuntimeDefault
@@ -128,8 +128,10 @@ another store's tick and then this store's tick after the wall-clock check and
 before re-arm. It does not use sleeps to select that interleaving.
 
 Cancellation is not proof of rollback. Once a mutating operation is handed to
-the helper, only a binding reply acknowledges completion. An unacknowledged
-write, publish, workflow start/signal, progress/checkpoint or HTTP operation is
+the helper, only a completed binding reply acknowledges completion. A timeout or
+cancelled reply cannot establish that an external effect was rolled back, including
+when the HTTP gate produces the error after a successful response or redirect. An
+unacknowledged write, publish, workflow start/signal, progress/checkpoint or HTTP operation is
 recorded as `Uncertain` on cancellation, timeout or helper failure. HTTP is
 conservatively mutating even for nominally read-only methods. A later epoch or
 memory trap cannot erase that record. Reads may report `Cancelled`. WIT stays
@@ -141,8 +143,14 @@ Guest-to-host excess is rejected before calling the binding; host-to-guest exces
 is rejected after the binding produces its reply and before lowering into guest
 memory. A host result cannot be measured before the binding produces it.
 
-The cancellation-ignoring termination probe re-execs a fixed trusted qualification
-binary and terminates/reaps only that child, while a concurrent valid guest runs.
+The cancellation-ignoring termination supervisor re-execs a fixed trusted
+qualification binary. Once the child acknowledges that its cooperative cancellation
+flag is set, the supervisor waits for the validated termination budget, escalates
+to kill, and reaps only that child, while a concurrent valid guest runs. It records
+the budget and elapsed time; CLI tests supply validated contracts with 80 ms and
+250 ms budgets to verify escalation follows the configured grace period. The
+`--termination-fallback` mode accepts an optional complete version-1 limits JSON
+argument; the combined runner uses the 500 ms compatibility budget.
 It neither selects nor accepts ADR 0004's production process model. Ordinary helper
 permit/detach accounting is retained, including its destructor qualification.
 
@@ -164,9 +172,12 @@ validated contract. The small runtime fixtures use 2 MiB guest memory and 128-by
 aggregates to exercise configurable enforcement, with the deadlines above.
 `--limits-cancellation` on `compile-cache-qualification` emits one JSON result per
 case; any failed assertion, compiler outcome, recovery or termination check makes
-the runner fail. The three guest WAT sources are also embedded under
-`worker/src/qualification/limits_fixtures` for source-only image builds; tests
-compare the embedded sources with these raw fixture files to prevent drift.
+the runner fail. The three guest WAT sources live under
+`worker/src/qualification/limits_fixtures` for source-only image builds. The raw
+fixture paths here are repository-relative symlinks to those canonical sources;
+tests parse them and check that both paths resolve to identical bytes. Both cluster
+suites consume `worker/tests/support/was02_cluster.rs` for their opt-in, restricted
+pod, namespace ownership and cleanup gates.
 The instantiation helper remains qualification-only and consumes the caller's
 engine configuration. Deadline fixtures enable epoch instrumentation explicitly;
 the blocked-read control and cancellation-ignoring child deliberately disable

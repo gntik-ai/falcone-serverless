@@ -472,7 +472,15 @@ impl Host {
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
-                Ok(reply) => return reply,
+                Ok(reply) => {
+                    // A timeout/cancellation reply does not acknowledge that an
+                    // external effect was rolled back. The HTTP gate can also
+                    // produce this error after a successful exchange or redirect.
+                    if matches!(reply, Err(HostError::Timeout | HostError::Cancelled)) {
+                        self.unacknowledged(mutating);
+                    }
+                    return reply;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     self.unacknowledged(mutating);

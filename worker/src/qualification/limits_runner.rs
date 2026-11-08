@@ -87,7 +87,7 @@ fn valid_guest() -> Result<(), String> {
     Ok(())
 }
 
-pub fn termination() -> Result<(), String> {
+pub fn termination(contract: Limits) -> Result<(), String> {
     let mut child = ChildGuard(
         Command::new(std::env::current_exe().map_err(|_| "executable")?)
             .arg("--limits-ignore-cancellation")
@@ -122,13 +122,22 @@ pub fn termination() -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    let budget = Limits::compatibility().duration(Field::TerminationBudgetMs);
+    let budget = contract.duration(Field::TerminationBudgetMs);
     let start = Instant::now();
     let valid = std::thread::spawn(valid_guest);
-    // Let the guest observe the cancelled flag and keep running without epochs.
-    std::thread::sleep(Duration::from_millis(20));
-    if child.0.try_wait().map_err(|_| "child status")?.is_some() {
-        return Err("guest did not ignore cancellation".into());
+    // Readiness acknowledges the cooperative cancellation flag was set. Give
+    // that cancellation exactly the validated grace budget, then escalate. This
+    // supervisor owns only the re-exec qualification child, not production work.
+    let deadline = start + budget;
+    loop {
+        if child.0.try_wait().map_err(|_| "child status")?.is_some() {
+            return Err("guest did not ignore cancellation".into());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(2)));
     }
     child.0.kill().map_err(|_| "termination")?;
     let status = child.0.wait().map_err(|_| "reap")?;
@@ -138,6 +147,14 @@ pub fn termination() -> Result<(), String> {
     if child.0.try_wait().map_err(|_| "reaped status")?.is_none() {
         return Err("child not reaped".into());
     }
+    println!(
+        "{}",
+        serde_json::json!({
+            "check": "termination_escalation",
+            "budget_ms": contract.value(Field::TerminationBudgetMs),
+            "elapsed_ms": start.elapsed().as_millis()
+        })
+    );
     valid.join().map_err(|_| "valid guest panic")??;
     Ok(())
 }
@@ -155,7 +172,11 @@ fn emit(check: &str, result: Result<(), String>) -> bool {
 }
 
 pub fn termination_main() -> ExitCode {
-    if emit("termination_fallback", termination()) {
+    let contract = std::env::args().nth(2).map_or_else(
+        || Ok(Limits::compatibility()),
+        |config| Limits::parse(&config).map_err(|_| "invalid termination limits".to_owned()),
+    );
+    if emit("termination_fallback", contract.and_then(termination)) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -164,7 +185,8 @@ pub fn termination_main() -> ExitCode {
 
 pub fn main() -> ExitCode {
     let cases: &[(&str, fn())] = &[
-        ("acknowledged_read_timeout", super::limits_cases::acknowledged_read_timeout_cannot_be_classified_as_success),
+        ("http_completion_cancellation", super::limits_cases::http_completion_at_cancellation_preserves_uncertainty),
+        ("binding_timeout", super::limits_cases::binding_timeout_is_cancelled_only_for_reads),
         ("mutation_cancellation", super::limits_cases::cancellation_after_mutation_dispatch_never_claims_plain_cancelled),
         ("buffer_boundaries", super::limits_cases::configured_buffer_boundaries_are_enforced_before_dispatch_or_guest_lowering),
         ("guest_memory", super::limits_cases::guest_memory_exhaustion_is_typed_and_a_following_fixture_succeeds),
@@ -187,7 +209,7 @@ pub fn main() -> ExitCode {
     }
     passed &= emit("compiler_cpu", compiler_case(CompileLimitError::Cpu));
     passed &= emit("compiler_memory", compiler_case(CompileLimitError::Memory));
-    passed &= emit("termination_fallback", termination());
+    passed &= emit("termination_fallback", termination(Limits::compatibility()));
     if emit(
         "limits_cancellation",
         if passed {

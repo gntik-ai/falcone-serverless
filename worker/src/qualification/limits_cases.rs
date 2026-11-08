@@ -9,6 +9,82 @@ use wasmtime as engine;
 
 const TOLERANCE: Duration = Duration::from_secs(2);
 
+#[cfg_attr(test, test)]
+pub fn http_completion_at_cancellation_preserves_uncertainty() {
+    use host::net::{PinnedRequest, Response};
+    struct HttpCompletion {
+        cancel: Mutex<Option<Arc<AtomicBool>>>,
+        reply: Result<u16, HostError>,
+        committed: AtomicBool,
+    }
+    impl Bindings for HttpCompletion {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            Err(HostError::Denied)
+        }
+        fn resolve(&self, _: &str) -> Result<Vec<std::net::IpAddr>, HostError> {
+            Ok(vec!["8.8.8.8".parse().unwrap()])
+        }
+        fn http(&self, _: &Context, _: &PinnedRequest) -> Result<Response, HostError> {
+            // The external effect commits before completion is reported. A timeout
+            // reply is not an acknowledgement that this effect was rolled back.
+            self.committed.store(true, Ordering::Release);
+            let status = self.reply?;
+            self.cancel
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .store(true, Ordering::Release);
+            Ok(Response {
+                status,
+                headers: vec![host::Pair {
+                    name: "location".into(),
+                    value: "/next".into(),
+                }],
+                body: vec![],
+            })
+        }
+    }
+    for reply in [
+        Err(HostError::Timeout),
+        Err(HostError::Cancelled),
+        Ok(200),
+        Ok(302),
+    ] {
+        let context = Context {
+            grants: Grants {
+                hosts: vec!["allowed.test".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let binding = Arc::new(HttpCompletion {
+            cancel: Mutex::new(None),
+            reply,
+            committed: AtomicBool::new(false),
+        });
+        let host = Host::new(context, binding.clone());
+        *binding.cancel.lock().unwrap() = Some(host.cancellation());
+        let (mut store, instance) = host::instantiate(
+            &engine::Engine::default(),
+            include_str!("fixtures/capability-http.wat"),
+            host,
+        )
+        .unwrap();
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        let result = run.call(&mut store, (0,)).unwrap();
+        assert!(matches!(result, (3,) | (4,)), "{result:?}");
+        assert!(binding.committed.load(Ordering::Acquire));
+        assert_eq!(
+            host::outcome::classify(store.data(), Ok(())),
+            host::outcome::InvocationOutcome::Uncertain,
+            "HTTP completion {reply:?} must require reconciliation before retry"
+        );
+    }
+}
+
 struct DelayedMutation {
     dispatched: mpsc::SyncSender<()>,
     release: Mutex<mpsc::Receiver<()>>,
@@ -201,7 +277,7 @@ pub fn never_yielding_guest_obeys_the_configured_deadline() {
     );
     assert!(
         elapsed >= Duration::from_millis(100),
-        "another store's early tick must not interrupt early: {elapsed:?}"
+        "guest must not interrupt before its configured deadline: {elapsed:?}"
     );
     assert!(
         elapsed <= Duration::from_millis(100) + TOLERANCE,
@@ -350,33 +426,35 @@ pub fn configured_storage_keys_are_bounded_before_host_copy_or_binding() {
 }
 
 #[cfg_attr(test, test)]
-pub fn acknowledged_read_timeout_cannot_be_classified_as_success() {
+pub fn binding_timeout_is_cancelled_only_for_reads() {
     struct TimedOut;
     impl Bindings for TimedOut {
         fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
             Err(HostError::Timeout)
         }
     }
-    let context = Context {
-        grants: Grants {
-            prefixes: vec!["objects/".into()],
+    for (mode, expected) in [
+        (0, host::outcome::InvocationOutcome::Cancelled),
+        (4, host::outcome::InvocationOutcome::Uncertain),
+    ] {
+        let context = Context {
+            grants: Grants {
+                prefixes: vec!["objects/".into()],
+                ..Default::default()
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    };
-    let (mut store, instance) = host::instantiate(
-        &engine::Engine::default(),
-        include_str!("limits_fixtures/buffers.wat"),
-        Host::with_limits(context, Arc::new(TimedOut), small_limits()),
-    )
-    .unwrap();
-    let run = instance
-        .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+        };
+        let source = include_str!("limits_fixtures/buffers.wat").replace("1048577", "0");
+        let (mut store, instance) = host::instantiate(
+            &engine::Engine::default(),
+            source,
+            Host::with_limits(context, Arc::new(TimedOut), small_limits()),
+        )
         .unwrap();
-    assert_eq!(run.call(&mut store, (0,)).unwrap(), (3,));
-    assert_eq!(
-        host::outcome::classify(store.data(), Ok(())),
-        host::outcome::InvocationOutcome::Cancelled
-    );
-    assert!(!store.data().uncertain_host_call());
+        let run = instance
+            .get_typed_func::<(u32,), (u32,)>(&mut store, "run")
+            .unwrap();
+        assert_eq!(run.call(&mut store, (mode,)).unwrap(), (3,));
+        assert_eq!(host::outcome::classify(store.data(), Ok(())), expected);
+    }
 }
