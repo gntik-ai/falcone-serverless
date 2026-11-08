@@ -1,8 +1,7 @@
 // Command controller is the falcone-serverless namespaced pool controller.
 //
-// Placeholder until DEP-03 (#23): it manages no Kubernetes objects yet. The real
-// controller writes only standard Deployments, Services and Leases in preprovisioned
-// namespaces and is the sole writer of pool replica counts.
+// Until DEP-03 (#23), only the leader-election Lease is managed. Pool resource
+// reconciliation and the authenticated status transport remain deferred.
 //
 // At start-up it runs a read-only preflight (OPS-01): SelfSubjectAccessReviews prove
 // its namespaced authority and the values file must declare every prerequisite. It
@@ -16,9 +15,12 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/gntik-ai/falcone-serverless/controller/internal/leader"
 	"github.com/gntik-ai/falcone-serverless/controller/internal/preflight"
 	"github.com/gntik-ai/falcone-serverless/controller/internal/status"
 )
@@ -38,56 +40,74 @@ type deps struct {
 	readFile func(string) ([]byte, error)
 	client   *http.Client  // built from the service account CA when nil
 	timeout  time.Duration // per access review; preflight.DefaultTimeout when zero
-	start    func()        // runs once, only after a passed preflight
+	start    func()        // replaces production startup in preflight-only tests
 	stdout   io.Writer
+	ctx      context.Context
 }
 
 func main() {
-	os.Exit(run(deps{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(deps{
 		getenv:   os.Getenv,
 		readFile: os.ReadFile,
-		start:    func() { fmt.Printf("falcone-serverless-controller %s\n", Version) },
 		stdout:   os.Stdout,
-	}))
+		ctx:      ctx,
+	})
+	stop()
+	os.Exit(code)
 }
 
-// run executes the preflight, prints the report once and returns the exit code: 0
-// after calling start on a passed result, 1 without calling it otherwise.
+// run prints one preflight report. Failed preflight exits 1; passed preflight
+// enters the election loop until shutdown (or calls the injected startup hook).
 func run(d deps) int {
-	report := runPreflight(d)
+	if d.ctx == nil {
+		d.ctx = context.Background()
+	}
+	report, election := runPreflight(d)
 	enc := json.NewEncoder(d.stdout)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(report)
 	if report.Preflight.Result != status.ResultPassed {
 		return 1
 	}
-	d.start()
+	if d.start != nil {
+		d.start()
+	} else {
+		// No pool writes exist before DEP-03. That duty must use Gate.Write with
+		// fresh authoritative desired state and receiver-enforced fencing.
+		election.Run(d.ctx, nil, func(err error) { fmt.Fprintln(os.Stderr, "leader:", err) })
+	}
 	return 0
 }
 
-func runPreflight(d deps) status.Report {
+func runPreflight(d deps) (status.Report, *leader.Elector) {
 	path := d.getenv(valuesEnv)
 	if path == "" {
 		path = defaultValuesPath
 	}
 	data, err := d.readFile(path)
 	if err != nil {
-		return status.NewReport(nil, preflight.MissingPrerequisites(), "values file is unreadable")
+		return status.NewReport(nil, preflight.MissingPrerequisites(), "values file is unreadable"), nil
 	}
 	values, err := preflight.ParseValues(data)
 	if err != nil {
-		return status.NewReport(nil, preflight.MissingPrerequisites(), strings.ReplaceAll(err.Error(), "\n", "; "))
+		return status.NewReport(nil, preflight.MissingPrerequisites(), strings.ReplaceAll(err.Error(), "\n", "; ")), nil
 	}
 	prerequisites := values.Prerequisites()
+	if d.start == nil {
+		if err := leader.ValidateIdentity(d.getenv("POD_NAME"), d.getenv("POD_NAMESPACE"), values.ControllerNamespace); err != nil {
+			return status.NewReport(nil, prerequisites, err.Error()), nil
+		}
+	}
 
 	base, err := preflight.APIBase(d.getenv("KUBERNETES_SERVICE_HOST"), d.getenv("KUBERNETES_SERVICE_PORT"))
 	if err != nil {
-		return status.NewReport(nil, prerequisites, err.Error())
+		return status.NewReport(nil, prerequisites, err.Error()), nil
 	}
 	tokenBytes, err := d.readFile(serviceAccountDir + "token")
 	token := strings.TrimSpace(string(tokenBytes))
 	if err != nil || token == "" {
-		return status.NewReport(nil, prerequisites, "service account token is unreadable or empty")
+		return status.NewReport(nil, prerequisites, "service account token is unreadable or empty"), nil
 	}
 	client := d.client
 	if client == nil {
@@ -96,10 +116,25 @@ func runPreflight(d deps) status.Report {
 			client, err = preflight.NewHTTPClient(ca)
 		}
 		if err != nil {
-			return status.NewReport(nil, prerequisites, "service account CA is unreadable or invalid")
+			return status.NewReport(nil, prerequisites, "service account CA is unreadable or invalid"), nil
 		}
 	}
 	api := preflight.Client{APIBase: base, Token: token, HTTP: client, Timeout: d.timeout}
-	checks := api.Run(context.Background(), preflight.Table(values.WatchedPoolNamespaces, values.ControllerNamespace))
-	return status.NewReport(checks, prerequisites, "")
+	checks := api.Run(d.ctx, preflight.Table(values.WatchedPoolNamespaces, values.ControllerNamespace))
+	report := status.NewReport(checks, prerequisites, "")
+	if report.Preflight.Result != status.ResultPassed || d.start != nil {
+		return report, nil
+	}
+	leaseClient, err := leader.NewHTTPClient(base, token, client)
+	if err != nil {
+		return status.NewReport(checks, prerequisites, err.Error()), nil
+	}
+	cfg := leader.DefaultConfig(d.getenv("POD_NAMESPACE"), d.getenv("POD_NAME"))
+	cfg.ControllerNamespace = values.ControllerNamespace
+	cfg.PreflightPassed = true
+	election, err := leader.New(cfg, leaseClient, leader.RealClock{})
+	if err != nil {
+		return status.NewReport(checks, prerequisites, err.Error()), nil
+	}
+	return report, election
 }
