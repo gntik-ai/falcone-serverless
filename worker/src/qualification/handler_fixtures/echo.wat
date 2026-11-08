@@ -1,0 +1,22 @@
+(component
+  (core module $guest
+    (memory (export "memory") 32)
+    (global $heap (mut i32) (i32.const 4096))
+    (func (export "realloc") (param $old i32) (param $old_size i32) (param $align i32) (param $new_size i32) (result i32)
+      (local $ptr i32)
+      (local.set $ptr (global.get $heap))
+      (global.set $heap (i32.add (global.get $heap) (local.get $new_size)))
+      (local.get $ptr))
+    ;; result<list<u8>, handler-error> through a return pointer: ok(params).
+    (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
+      (i32.store8 (i32.const 16) (i32.const 0))
+      (i32.store (i32.const 20) (local.get $ptr))
+      (i32.store (i32.const 24) (local.get $len))
+      (i32.const 16)))
+  (core instance $guest (instantiate $guest))
+  (type $error (variant (case "invalid-input" string) (case "failed" string)))
+  (type $reply (result (list u8) (error $error)))
+  (func $handle (param "params" (list u8)) (result $reply)
+    (canon lift (core func $guest "handle") (memory $guest "memory") (realloc (func $guest "realloc"))))
+  (instance $handler (export "handler-error" (type $error)) (export "handle" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler)))

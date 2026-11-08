@@ -5,11 +5,17 @@ pub mod transfer;
 pub struct Error {
     pub code: &'static str,
     pub import: Option<String>,
+    /// Bounded name of the offending top-level export, for handler-gate diagnostics.
+    pub export: Option<String>,
 }
 
 impl Error {
     fn new(code: &'static str) -> Self {
-        Self { code, import: None }
+        Self {
+            code,
+            import: None,
+            export: None,
+        }
     }
 }
 pub mod cache_key;

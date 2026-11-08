@@ -11,6 +11,8 @@ pub mod namespace;
 const QUALIFICATION_PREFIX: &str = "was02-gates";
 const QUALIFICATION_FLAG: &str = "--capability-gates";
 const QUALIFICATION_CHECK: &str = "capability_gates";
+/// This qualification reports no per-case records; the aggregate record is enough.
+const REQUIRED_CASES: &[&str] = &[];
 const CLUSTER_TEST: &str = "cluster_capability_gates";
 
 include!("support/was02_cluster.rs");

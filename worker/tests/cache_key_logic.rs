@@ -259,7 +259,10 @@ fn untrusted_entries_are_misses_before_any_native_load() {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
                 let requested: serde_json::Value =
                     serde_json::from_slice(&entry[4..4 + size]).unwrap();
-                let other = wat::parse_str("(component)").unwrap();
+                let other = wat::parse_str(include_str!(
+                    "../src/qualification/handler_fixtures/modes.wat"
+                ))
+                .unwrap();
                 let loaded = cache
                     .compile(3, &other, limits(), &AtomicBool::new(false))
                     .unwrap();
@@ -350,6 +353,32 @@ fn identity_is_stable_and_changes_for_every_contract_input() {
     }
 }
 
+/// The WAT encoder appends a `component-name` custom section at the very end, while the
+/// fixture encoder keeps the echo guest's own name section ahead of the heavy module.
+/// Names carry no code, so compare every other top-level section byte for byte.
+fn without_custom_sections(component: &[u8]) -> Vec<u8> {
+    let mut kept = component[..8].to_vec();
+    let mut rest = &component[8..];
+    while !rest.is_empty() {
+        let (mut size, mut shift, mut used) = (0_usize, 0, 1);
+        loop {
+            let byte = rest[used];
+            size |= usize::from(byte & 0x7f) << shift;
+            shift += 7;
+            used += 1;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        let (section, tail) = rest.split_at(used + size);
+        if section[0] != 0 {
+            kept.extend_from_slice(section);
+        }
+        rest = tail;
+    }
+    kept
+}
+
 #[test]
 fn qualification_binary_fixtures_match_the_independent_wat_oracle() {
     assert_eq!(
@@ -364,20 +393,34 @@ fn qualification_binary_fixtures_match_the_independent_wat_oracle() {
         fixtures::INVALID,
         include_bytes!("fixtures/was-02/invalid.wasm")
     );
-    assert_eq!(fixtures::small(), wat::parse_str("(component)").unwrap());
+    let echo_wat = include_str!("../src/qualification/handler_fixtures/echo.wat");
+    assert_eq!(fixtures::small(), wat::parse_str(echo_wat).unwrap());
+    // The heavy module follows the echo guest's items inside one component, so the
+    // handler gate accepts it and the heavy module is only ever compiled.
+    let echo_items = echo_wat
+        .trim()
+        .strip_prefix("(component")
+        .and_then(|wat| wat.strip_suffix(')'))
+        .unwrap();
+    let with_handler =
+        |heavy: String| heavy.replacen("(component", &format!("(component{echo_items}\n"), 1);
     let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
     let function =
         include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
-    let cpu_wat =
-        include_str!("fixtures/was-02/cpu-heavy.wat").replace(";; FUNCTIONS", &function.repeat(64));
+    let cpu_wat = with_handler(
+        include_str!("fixtures/was-02/cpu-heavy.wat").replace(";; FUNCTIONS", &function.repeat(64)),
+    );
     let expected_cpu = wat::parse_str(cpu_wat).unwrap();
     // Avoid printing megabytes of fixture bytes on a calibration mismatch.
-    assert!(fixtures::cpu() == expected_cpu);
-    let memory_wat = include_str!("fixtures/was-02/memory-heavy.wat").replace(
+    assert!(without_custom_sections(&fixtures::cpu()) == without_custom_sections(&expected_cpu));
+    let memory_wat = with_handler(include_str!("fixtures/was-02/memory-heavy.wat").replace(
         ";; OPERATIONS",
         &"i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(131072),
+    ));
+    assert!(
+        without_custom_sections(&fixtures::memory())
+            == without_custom_sections(&wat::parse_str(memory_wat).unwrap())
     );
-    assert_eq!(fixtures::memory(), wat::parse_str(memory_wat).unwrap());
 }
 
 #[test]
@@ -438,10 +481,15 @@ impl ChildFixture {
 #[test]
 fn child_limit_exit_during_input_transfer_keeps_its_diagnostic() {
     use cache::LoadEvent::*;
-    // Larger than a pipe buffer, but still a valid, otherwise empty component.
+    // Larger than a pipe buffer, but still a valid component with only the echo handler.
     let bytes = wat::parse_str(format!(
-        "(component (@custom \"padding\" \"{}\"))",
-        "x".repeat(1024 * 1024)
+        "(component (@custom \"padding\" \"{}\") {})",
+        "x".repeat(1024 * 1024),
+        include_str!("../src/qualification/handler_fixtures/echo.wat")
+            .trim()
+            .strip_prefix("(component")
+            .and_then(|wat| wat.strip_suffix(')'))
+            .unwrap()
     ))
     .unwrap();
     for (termination, diagnostic) in [

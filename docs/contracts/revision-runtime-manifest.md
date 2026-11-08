@@ -38,7 +38,7 @@ in this version. Digests use `sha256:` followed by exactly 64 lowercase hex digi
 | `languageProfile` | Closed object with required `name` and `version`; an exact approved profile pin, not an alias. |
 | `engineVersion` | Exact qualified engine release selected by Falcone; the schema does not select a Wasmtime release. |
 | `wasiVersion` | Exact WASI version supported by the selected profile. |
-| `interfaceVersion` | Constant `0.1.0`, from the authoritative `falcone:host@0.1.0` package. |
+| `interfaceVersion` | Constant `0.2.0`, from the authoritative `falcone:host@0.2.0` package (`0.1.0` is superseded; a manifest naming it is invalid). |
 | `imports` | Array of non-empty import names, recording the validated artifact's supported imports; empty means none. Falcone must verify compatibility and grant coverage. |
 | `budgets` | Closed object: required positive integers `fuel` (guest computation units), `memoryBytes` (guest memory bytes), `timeoutMs` (invocation wall-clock milliseconds) and `maxHostCalls` (host-call count). These are limits, not observations. |
 | `grants` | Array of verified capability grants as defined below; an empty array grants nothing. |
@@ -59,10 +59,10 @@ The family selects both the exact interface and the closed scope shape:
 
 | `family` | `interface` | Required scope field |
 | --- | --- | --- |
-| `storage` | `falcone:host/storage@0.1.0` | `prefixes`: allowed storage prefixes |
-| `http` | `falcone:host/http@0.1.0` | `hosts`: allowed HTTP destination hosts |
-| `event` | `falcone:host/events@0.1.0` | `topics`: allowed event topics |
-| `workflow` | `falcone:host/workflows@0.1.0` | `targets`: allowed workflow targets |
+| `storage` | `falcone:host/storage@0.2.0` | `prefixes`: allowed storage prefixes |
+| `http` | `falcone:host/http@0.2.0` | `hosts`: allowed HTTP destination hosts |
+| `event` | `falcone:host/events@0.2.0` | `topics`: allowed event topics |
+| `workflow` | `falcone:host/workflows@0.2.0` | `targets`: allowed workflow targets |
 
 Each scope field is a non-empty list of non-empty strings. A bare `*` is forbidden
 in every list. A scope has exactly its family's field; cross-family fields and

@@ -2,6 +2,8 @@
 
 #[path = "../src/artifact/mod.rs"]
 mod artifact;
+#[path = "../src/qualification/handler_fixtures.rs"]
+pub mod handler_fixtures;
 
 #[test]
 fn bounded_transfer_preserves_destination_on_rejection() {
@@ -38,7 +40,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
                 panic!("interface import")
             };
             format!(
-                "falcone:host/{}@0.1.0",
+                "falcone:host/{}@0.2.0",
                 resolve.interfaces[*id].name.as_ref().unwrap()
             )
         })
@@ -98,7 +100,7 @@ fn validation_order_and_input_boundary() {
     assert_eq!(error.code, "undeclared_import");
     assert_eq!(error.import.as_deref(), Some("wasi:filesystem/types@0.2.0"));
     let wrong_kind = wat::parse_str(
-        "(component (type (func)) (import \"falcone:host/http@0.1.0\" (func (type 0))))",
+        "(component (type (func)) (import \"falcone:host/http@0.2.0\" (func (type 0))))",
     )
     .unwrap();
     assert_eq!(
@@ -181,14 +183,18 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert_eq!(supervisor.spawn_count(), 1);
     assert!(supervisor.last_child_status().unwrap().unwrap().success());
     assert!(result.as_str().starts_with("sha256:"));
-    let empty = b"\0asm\x0d\0\x01\0";
+    // Independent literal: `sha256sum handler_fixtures/modes.wasm`.
     let result = supervisor
-        .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
+        .compile(
+            handler_fixtures::MODES,
+            limits(),
+            &std::sync::atomic::AtomicBool::new(false),
+        )
         .unwrap();
     assert!(
         result
             .as_str()
-            .contains("24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29")
+            .contains("debbb2c56fb044a8e5e0f5e60636247a0ad8068f169c2ad47d7174ceb69de024")
     );
 }
 
@@ -200,7 +206,7 @@ fn rejected_input_never_spawns_a_compiler() {
     let core = wat::parse_str("(module)").unwrap();
     let malformed = b"\0asm\x0d\0\x01\0\xff";
     let unlisted = wat::parse_str(
-        "(component (type (instance)) (import \"other:host/http@0.1.0\" (instance (type 0))))",
+        "(component (type (instance)) (import \"other:host/http@0.2.0\" (instance (type 0))))",
     )
     .unwrap();
     let oversized = vec![0; limits().input_bytes + 1];
@@ -230,8 +236,14 @@ fn heavy() -> &'static [u8] {
         let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
         let function =
             include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
+        // The echo guest's items come first so the handler gate accepts the component.
+        let echo = include_str!("../src/qualification/handler_fixtures/echo.wat")
+            .trim()
+            .strip_prefix("(component")
+            .and_then(|wat| wat.strip_suffix(')'))
+            .unwrap();
         wat::parse_str(format!(
-            "(component (core module {}))",
+            "(component{echo}\n(core module {}))",
             function.repeat(128)
         ))
         .unwrap()
@@ -456,4 +468,392 @@ fn budgets_are_mandatory_and_applied_before_input_reaches_child() {
         .unwrap_err();
     assert_eq!(error.code, "compile_failed");
     assert_eq!(supervisor.spawn_count(), 0);
+}
+
+// --- falcone:host/handler@0.2.0 export gate -------------------------------------------
+
+const HANDLER: &str = "falcone:host/handler@0.2.0";
+const ERROR: &str = r#"(variant (case "invalid-input" string) (case "failed" string))"#;
+
+/// One handler component, varied in a single dimension per test. The core module's
+/// signature fits every probed `handle` type (two flat params, one flat or pointer result).
+struct Probe<'a> {
+    imports: &'a str,
+    error: &'a str,
+    param_name: &'a str,
+    param: &'a str,
+    result: &'a str,
+    export: &'a str,
+    extra: &'a str,
+}
+
+impl Default for Probe<'_> {
+    fn default() -> Self {
+        Probe {
+            imports: "",
+            error: ERROR,
+            param_name: "params",
+            param: "(list u8)",
+            result: "(result (list u8) (error $error))",
+            export: HANDLER,
+            extra: "",
+        }
+    }
+}
+
+impl Probe<'_> {
+    fn wasm(&self) -> Vec<u8> {
+        wat::parse_str(format!(
+            r#"(component
+  {imports}
+  (core module $guest
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 8)
+    (func (export "handle") (param i32 i32) (result i32) i32.const 0))
+  (core instance $guest (instantiate $guest))
+  (type $error {error})
+  (func $handle (param "{param_name}" {param}) (result {result})
+    (canon lift (core func $guest "handle") (memory $guest "memory") (realloc (func $guest "realloc"))))
+  (instance $handler (export "handler-error" (type $error)) (export "handle" (func $handle)))
+  (export "{export}" (instance $handler))
+  {extra})"#,
+            imports = self.imports,
+            error = self.error,
+            param_name = self.param_name,
+            param = self.param,
+            result = self.result,
+            export = self.export,
+            extra = self.extra,
+        ))
+        .unwrap()
+    }
+}
+
+fn gate(bytes: &[u8]) -> Result<(), artifact::Error> {
+    artifact::validate::validate(bytes, bytes.len()).map(drop)
+}
+
+fn code(bytes: &[u8]) -> &'static str {
+    gate(bytes)
+        .expect_err("the gate must reject this component")
+        .code
+}
+
+#[test]
+fn handler_gate_accepts_the_exact_export_with_only_falcone_host_imports() {
+    gate(&Probe::default().wasm()).unwrap();
+    gate(&small()).unwrap();
+    for fixture in [
+        handler_fixtures::ECHO,
+        handler_fixtures::MODES,
+        handler_fixtures::START_LOGS_WITH_HANDLE,
+    ] {
+        gate(fixture).unwrap();
+    }
+}
+
+#[test]
+fn handler_fixture_binaries_match_their_wat_sources() {
+    macro_rules! pair {
+        ($name:literal, $binary:expr) => {
+            (
+                $name,
+                include_str!(concat!(
+                    "../src/qualification/handler_fixtures/",
+                    $name,
+                    ".wat"
+                )),
+                $binary,
+            )
+        };
+    }
+    for (name, source, binary) in [
+        pair!("echo", handler_fixtures::ECHO),
+        pair!("modes", handler_fixtures::MODES),
+        pair!(
+            "start-logs-without-handle",
+            handler_fixtures::START_LOGS_WITHOUT_HANDLE
+        ),
+        pair!(
+            "start-logs-with-handle",
+            handler_fixtures::START_LOGS_WITH_HANDLE
+        ),
+        pair!("wrong-result", handler_fixtures::WRONG_RESULT),
+    ] {
+        assert_eq!(
+            wat::parse_str(source).unwrap(),
+            binary,
+            "{name}.wasm is stale"
+        );
+    }
+}
+
+#[test]
+fn import_gate_still_rejects_wasi_and_the_previous_interface_version() {
+    for import in [
+        r#"(import "wasi:cli/environment@0.2.0" (instance))"#,
+        r#"(import "wasi:filesystem/types@0.2.0" (instance))"#,
+        r#"(import "falcone:host/http@0.1.0" (instance))"#,
+        r#"(import "falcone:host/http@0.3.0" (instance))"#,
+    ] {
+        let error = gate(
+            &Probe {
+                imports: import,
+                ..Probe::default()
+            }
+            .wasm(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "undeclared_import", "{import}");
+        assert!(error.import.is_some() && error.export.is_none(), "{import}");
+    }
+}
+
+#[test]
+fn a_missing_or_misnamed_export_is_missing_handler_export() {
+    assert_eq!(code(b"\0asm\x0d\0\x01\0"), "missing_handler_export");
+    for export in [
+        "falcone:host/handler@0.1.0",
+        "falcone:host/handler@0.3.0",
+        "falcone:host/handler",
+        "handler",
+        "wasi:cli/run@0.2.0",
+    ] {
+        let error = gate(
+            &Probe {
+                export,
+                ..Probe::default()
+            }
+            .wasm(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "missing_handler_export", "{export}");
+        assert_eq!(error.export.as_deref(), Some(export));
+    }
+    // The right name, but not an instance.
+    let function = wat::parse_str(
+        r#"(component
+  (core module $guest (func (export "f")))
+  (core instance $guest (instantiate $guest))
+  (func $f (canon lift (core func $guest "f")))
+  (export "falcone:host/handler@0.2.0" (func $f)))"#,
+    )
+    .unwrap();
+    assert_eq!(code(&function), "missing_handler_export");
+}
+
+#[test]
+fn an_extra_top_level_export_is_rejected_with_a_bounded_diagnostic() {
+    let extra = Probe {
+        extra: r#"(export "extra" (instance $handler))"#,
+        ..Probe::default()
+    };
+    let error = gate(&extra.wasm()).unwrap_err();
+    assert_eq!(error.code, "missing_handler_export");
+    assert_eq!(error.export.as_deref(), Some("extra"));
+    let long = "x".repeat(4096);
+    let extra = format!(r#"(export "{long}" (instance $handler))"#);
+    let error = gate(
+        &Probe {
+            extra: &extra,
+            ..Probe::default()
+        }
+        .wasm(),
+    )
+    .unwrap_err();
+    assert_eq!(error.export.unwrap().chars().count(), 256);
+}
+
+#[test]
+fn an_empty_or_incomplete_handler_instance_is_an_invalid_signature() {
+    let empty = wat::parse_str(
+        r#"(component (instance $handler) (export "falcone:host/handler@0.2.0" (instance $handler)))"#,
+    )
+    .unwrap();
+    assert_eq!(code(&empty), "invalid_handler_signature");
+    assert_eq!(
+        code(handler_fixtures::START_LOGS_WITHOUT_HANDLE),
+        "invalid_handler_signature"
+    );
+    // A function under another name is not `handle`; a module is not a function.
+    let renamed = wat::parse_str(
+        r#"(component
+  (core module $guest
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 8)
+    (func (export "handle") (param i32 i32) (result i32) i32.const 0))
+  (core instance $guest (instantiate $guest))
+  (func $handle (param "params" (list u8)) (result (list u8))
+    (canon lift (core func $guest "handle") (memory $guest "memory") (realloc (func $guest "realloc"))))
+  (instance $handler (export "handler" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler)))"#,
+    )
+    .unwrap();
+    assert_eq!(code(&renamed), "invalid_handler_signature");
+}
+
+#[test]
+fn a_handle_with_the_wrong_parameter_or_result_type_is_an_invalid_signature() {
+    let other_error = r#"(variant (case "invalid-input" string) (case "crashed" string))"#;
+    let payloadless = r#"(variant (case "invalid-input" string) (case "failed"))"#;
+    let swapped = r#"(variant (case "failed" string) (case "invalid-input" string))"#;
+    let three =
+        r#"(variant (case "invalid-input" string) (case "failed" string) (case "other" string))"#;
+    for (name, probe) in [
+        (
+            "param string",
+            Probe {
+                param: "string",
+                ..Probe::default()
+            },
+        ),
+        (
+            "param list u16",
+            Probe {
+                param: "(list u16)",
+                ..Probe::default()
+            },
+        ),
+        (
+            "param renamed",
+            Probe {
+                param_name: "input",
+                ..Probe::default()
+            },
+        ),
+        (
+            "result u32",
+            Probe {
+                result: "u32",
+                ..Probe::default()
+            },
+        ),
+        (
+            "result list",
+            Probe {
+                result: "(list u8)",
+                ..Probe::default()
+            },
+        ),
+        (
+            "result string ok",
+            Probe {
+                result: "(result string (error $error))",
+                ..Probe::default()
+            },
+        ),
+        (
+            "result no error",
+            Probe {
+                result: "(result (list u8))",
+                ..Probe::default()
+            },
+        ),
+        (
+            "result string error",
+            Probe {
+                result: "(result (list u8) (error string))",
+                ..Probe::default()
+            },
+        ),
+        (
+            "error case renamed",
+            Probe {
+                error: other_error,
+                ..Probe::default()
+            },
+        ),
+        (
+            "error case payloadless",
+            Probe {
+                error: payloadless,
+                ..Probe::default()
+            },
+        ),
+        (
+            "error cases reordered",
+            Probe {
+                error: swapped,
+                ..Probe::default()
+            },
+        ),
+        (
+            "error extra case",
+            Probe {
+                error: three,
+                ..Probe::default()
+            },
+        ),
+    ] {
+        assert_eq!(code(&probe.wasm()), "invalid_handler_signature", "{name}");
+    }
+    assert_eq!(
+        code(handler_fixtures::WRONG_RESULT),
+        "invalid_handler_signature"
+    );
+}
+
+#[test]
+fn a_second_function_in_the_handler_instance_is_rejected() {
+    let bytes = wat::parse_str(
+        r#"(component
+  (core module $guest
+    (memory (export "memory") 1)
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 8)
+    (func (export "handle") (param i32 i32) (result i32) i32.const 0))
+  (core instance $guest (instantiate $guest))
+  (type $error (variant (case "invalid-input" string) (case "failed" string)))
+  (type $reply (result (list u8) (error $error)))
+  (func $handle (param "params" (list u8)) (result $reply)
+    (canon lift (core func $guest "handle") (memory $guest "memory") (realloc (func $guest "realloc"))))
+  (instance $handler (export "handler-error" (type $error)) (export "handle" (func $handle)) (export "other" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler)))"#,
+    )
+    .unwrap();
+    assert_eq!(code(&bytes), "invalid_handler_signature");
+}
+
+#[test]
+fn nested_component_exports_do_not_satisfy_the_gate() {
+    let nested = wat::parse_str(
+        r#"(component
+  (component $inner
+    (core module $guest (func (export "f")))
+    (core instance $guest (instantiate $guest))
+    (instance $handler)
+    (export "falcone:host/handler@0.2.0" (instance $handler))))"#,
+    )
+    .unwrap();
+    assert_eq!(code(&nested), "missing_handler_export");
+}
+
+#[test]
+fn interface_version_is_0_2_0_so_a_0_1_0_native_cache_can_never_match() {
+    use artifact::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
+    assert_eq!(INTERFACE_VERSION, "falcone:host@0.2.0");
+    let key = |interface| {
+        CacheKey::new([7; 32], ENGINE_VERSION, "x86_64", ENGINE_CONFIG, interface).unwrap()
+    };
+    assert_ne!(key(INTERFACE_VERSION), key("falcone:host@0.1.0"));
+}
+
+#[test]
+fn catalog_bases_keep_the_import_policy_but_need_no_handler() {
+    use artifact::validate::{validate, validate_catalog};
+    // A base component is composed into function components later and exports no handler.
+    let base = b"\0asm\x0d\0\x01\0";
+    validate_catalog(base, base.len()).unwrap();
+    assert_eq!(
+        validate(base, base.len()).unwrap_err().code,
+        "missing_handler_export"
+    );
+    let wasi = Probe {
+        imports: r#"(import "wasi:cli/environment@0.2.0" (instance))"#,
+        ..Probe::default()
+    }
+    .wasm();
+    assert_eq!(
+        validate_catalog(&wasi, wasi.len()).unwrap_err().code,
+        "undeclared_import"
+    );
 }

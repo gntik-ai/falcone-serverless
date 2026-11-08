@@ -11,6 +11,8 @@ pub mod namespace;
 const QUALIFICATION_PREFIX: &str = "was02-limits";
 const QUALIFICATION_FLAG: &str = "--limits-cancellation";
 const QUALIFICATION_CHECK: &str = "limits_cancellation";
+/// This qualification reports no per-case records; the aggregate record is enough.
+const REQUIRED_CASES: &[&str] = &[];
 const CLUSTER_TEST: &str = "cluster_limits_cancellation";
 
 include!("support/was02_cluster.rs");

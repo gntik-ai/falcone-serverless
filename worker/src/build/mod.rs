@@ -32,7 +32,7 @@ pub fn validate_catalog_component(
             detail: "Native binaries are not raw Wasm components".into(),
         });
     }
-    match crate::artifact::validate::validate(bytes, input_bytes) {
+    match crate::artifact::validate::validate_catalog(bytes, input_bytes) {
         Ok(validated) => {
             let mut digest = String::from("sha256:");
             for byte in validated.artifact_digest {

@@ -53,7 +53,11 @@ impl Manifest {
 }
 
 fn error(code: &'static str) -> Error {
-    Error { code, import: None }
+    Error {
+        code,
+        import: None,
+        export: None,
+    }
 }
 
 fn active(limits: CompileLimits, cancelled: &AtomicBool) -> Result<(), Error> {

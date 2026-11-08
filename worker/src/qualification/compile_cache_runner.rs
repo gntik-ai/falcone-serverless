@@ -8,6 +8,9 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod guest_execute_cases;
+mod guest_execute_runner;
+mod handler_fixtures;
 mod limits_cases;
 mod limits_runner;
 pub use falcone_serverless_worker::host;
@@ -132,6 +135,7 @@ fn main() -> std::process::ExitCode {
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),
         Some("--limits-cancellation") => return limits_runner::main(),
+        Some("--guest-execute") => return guest_execute_runner::main(),
         Some("binding_drop_probe") => {
             capability_invocations::binding_drop_probe();
             return std::process::ExitCode::SUCCESS;

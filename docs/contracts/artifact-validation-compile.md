@@ -80,8 +80,19 @@ fixture. Production budgets remain owned by WAS-01/profile policy.
 
 Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
 precompiled input), full component-model validation, component-only check, then
-exact top-level interface-instance imports from `falcone:host@0.1.0` world
-`function`. Nested core modules are validated too. AVC-R5/profile declared-memory
+exact top-level interface-instance imports from `falcone:host@0.2.0` world
+`function`, then the handler export. Nested core modules are validated too.
+
+The handler gate runs on the validated component's resolved types, before any
+compilation or instantiation, so a rejected component has run no guest code (a start
+function included) and spawned no compiler. The component must have exactly one
+top-level export, the instance `falcone:host/handler@0.2.0`. That instance must contain
+`handle` with exactly `func(params: list<u8>) -> result<list<u8>, handler-error>`,
+where `handler-error` is `variant { invalid-input(string), failed(string) }` in that
+case order (the order fixes the canonical-ABI discriminants), and may also contain the
+`handler-error` type export; nothing else. Parameter names are part of the signature.
+The worker repeats the same check on the compiled component's type in `host::execute`,
+so the execute entry point is safe for any component it is handed. AVC-R5/profile declared-memory
 checks and guest memory/epoch enforcement remain RUN-01 work; this module does
 not claim to implement them. No runtime consumer is wired into the worker.
 
@@ -130,6 +141,8 @@ Diagnostics identify the failed element and use these stable codes. Diagnostic p
 | `compile_cancelled` | Caller went away or compilation was otherwise cancelled. |
 | `unsupported_feature` | Wasm feature or requested version unsupported by the qualified profile. |
 | `undeclared_import` | Import outside the declared, permitted versioned interfaces. |
+| `missing_handler_export` | The component does not export exactly the instance `falcone:host/handler@0.2.0`: no export, an extra or differently named export, or that name with a non-instance kind. `export` carries the offending name, cut to 256 characters. |
+| `invalid_handler_signature` | The handler instance lacks `handle`, has another function or item, or `handle` is not exactly `func(params: list<u8>) -> result<list<u8>, handler-error>`. |
 | `trusted_cache_unavailable` | No verified trusted-compiler cache entry is available. |
 | `buffer_limit_exceeded` | Aggregate guest/host transfer exceeds the capability-host ceiling; destination is unchanged. |
 | `compile_failed` | Trusted compiler failed, a required budget could not be applied, or an unknown child exit occurred. |
@@ -202,3 +215,28 @@ add compiler confinement or certify production budgets.
 Source builds belong to `ctr-source-build-api` ([source-build.md](source-build.md)); revision metadata belongs to `ctr-revision-runtime-manifest` (WAS-02.t2). Compiler image/runtime configuration and build authorization belong to DEP-01. This contract defines none of those interfaces. No credentials, keys, secret paths or Secret values are specified here.
 
 The contract test remains a documentation gate; WAS-02.t5 adds Linux executable validation and compile-containment fixtures. These do not claim WAS-01 runtime qualification. Rollout is merge-only with no runtime consumer; revert Version 2 and its implementation before a consumer pins it. Future runtime implementation and semantic review must preserve every boundary above.
+
+## Guest execute outcomes
+
+`host::execute::execute` (the worker's `execute COMPONENT PARAMS` command calls it after
+validation and trusted compilation) calls `handle` and returns the result bytes or one of
+these codes. A failure never carries partial output; a guest-supplied message is echoed
+only for the two handler errors, cut to 256 characters with control characters replaced.
+
+| Code | Meaning |
+| --- | --- |
+| `missing_handler_export`, `invalid_handler_signature` | The handler gate, on the compiled component, before instantiation (zero host calls). |
+| `buffer_limit_exceeded` | Params over `max-host-to-guest-bytes` (refused before any guest code runs), a result over `max-guest-to-host-bytes`, or a host call that hit a buffer ceiling. Exactly at the ceiling succeeds. |
+| `uncertain_effect` | A detached mutating host call may still commit. |
+| `guest_memory_limit` | The guest hit the store's memory limit. |
+| `cancelled` | The invocation was cancelled, including during the guest's last host call. |
+| `timeout` | The guest deadline passed, including an invocation that otherwise returned a value or a handler error. |
+| `guest_trapped` | The guest trapped. No guest text. |
+| `invalid_input`, `handler_failed` | The guest returned `handler-error`. |
+| `instantiation_failed`, `engine_unsupported` | Linking was refused (a denied import), or the engine has no epoch interruption. |
+
+Precedence, applied to every outcome (a value, a handler error, a trap): uncertain
+effect, guest memory limit, cancellation, the deadline, the buffer ceiling, and only
+then the guest's own result. A guest cancelled during its last host call is therefore
+`cancelled`, never `handler_failed` or a success, and an invocation past its deadline is
+`timeout`, never an application error.

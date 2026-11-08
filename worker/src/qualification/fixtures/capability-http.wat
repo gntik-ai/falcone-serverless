@@ -1,5 +1,5 @@
 (component
-  (import "falcone:host/http@0.1.0" (instance $http
+  (import "falcone:host/http@0.2.0" (instance $http
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (type $header-type (record (field "name" string) (field "value" string)))

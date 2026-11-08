@@ -320,6 +320,7 @@ pub struct Host {
     buffer_limited: AtomicBool,
     memory_limited: bool,
     ticker: Option<EpochTicker>,
+    guest_deadline: Option<Instant>,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
     uncertain: AtomicBool,
@@ -348,6 +349,7 @@ impl Host {
             buffer_limited: AtomicBool::new(false),
             memory_limited: false,
             ticker: None,
+            guest_deadline: None,
             call_timeout: contract.duration(Field::HostCallDeadlineMs),
             cancelled: Arc::new(AtomicBool::new(false)),
             uncertain: AtomicBool::new(false),
@@ -381,10 +383,18 @@ impl Host {
         self.call_cancelled.store(true, Ordering::Release);
     }
 
-    fn input_limit(&self) -> usize {
+    /// When the invocation's guest deadline falls; set once the store is built.
+    pub(super) fn guest_deadline(&self) -> Option<Instant> {
+        self.guest_deadline
+    }
+    pub(super) fn cancel_requested(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub(super) fn input_limit(&self) -> usize {
         self.contract.value(Field::GuestToHostBytes) as usize
     }
-    fn output_limit(&self) -> usize {
+    pub(super) fn output_limit(&self) -> usize {
         self.contract.value(Field::HostToGuestBytes) as usize
     }
     pub fn memory_limited(&self) -> bool {
@@ -563,14 +573,7 @@ fn storage_resource<T: Send + 'static>(
     )
 }
 
-/// Qualification-only: compiles raw source in process, never native artifacts.
-/// A runtime adapter must use the supervised trusted compiler for tenant input;
-/// this fixture entry point does not enforce compilation CPU or memory budgets.
-pub fn instantiate(
-    engine: &Engine,
-    source: impl AsRef<[u8]>,
-    host: Host,
-) -> wasmtime::Result<(Store<Host>, Instance)> {
+fn check_context_size(host: &Host) -> wasmtime::Result<()> {
     let mut context_bytes = Bytes::new(host.output_limit());
     for value in [
         &host.context.invocation_key,
@@ -582,22 +585,52 @@ pub fn instantiate(
             .and_then(|()| context_bytes.add(value.len()))
             .map_err(|_| wasmtime::Error::msg("limit-exceeded: invocation context"))?;
     }
+    Ok(())
+}
+
+/// Qualification-only: compiles raw source in process, never native artifacts.
+/// A runtime adapter must use the supervised trusted compiler for tenant input;
+/// this fixture entry point does not enforce compilation CPU or memory budgets.
+pub fn instantiate(
+    engine: &Engine,
+    source: impl AsRef<[u8]>,
+    host: Host,
+) -> wasmtime::Result<(Store<Host>, Instance)> {
+    check_context_size(&host)?;
     let component = Component::new(engine, source)?;
+    let (store, instance) = instantiate_component(engine, &component, host)?;
+    Ok((store, instance?))
+}
+
+/// Link and instantiate an already compiled component under the host's limits.
+///
+/// The store is returned even when instantiation itself fails (a start function can
+/// trap, be interrupted or be cancelled), so the caller can still classify the outcome
+/// from the host's cancellation and limit state. Only failures to build the store
+/// (denied imports, an oversized context) have no store to return.
+pub(super) fn instantiate_component(
+    engine: &Engine,
+    component: &Component,
+    mut host: Host,
+) -> wasmtime::Result<(Store<Host>, wasmtime::Result<Instance>)> {
+    check_context_size(&host)?;
     for (name, _) in component.component_type().imports(engine) {
         if !import_allowed(name, &host.context.grants) {
             return Err(wasmtime::Error::msg(format!("denied import: {name}")));
         }
     }
+    let guest_deadline = Instant::now() + host.contract.duration(Field::GuestDeadlineMs);
+    host.guest_deadline = Some(guest_deadline);
     let mut linker = Linker::new(engine);
     linker
-        .instance("falcone:host/cancellation@0.1.0")?
+        .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(
             "is-cancelled",
             |store: StoreContextMut<'_, Host>, (): ()| {
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
-    let mut context = linker.instance("falcone:host/invocation-context@0.1.0")?;
+    let mut context = linker.instance("falcone:host/invocation-context@0.2.0")?;
     context.func_wrap(
         "invocation-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
@@ -613,7 +646,7 @@ pub fn instantiate(
             Ok((store.data().context.idempotency_key.clone(),))
         },
     )?;
-    let mut progress = linker.instance("falcone:host/progress@0.1.0")?;
+    let mut progress = linker.instance("falcone:host/progress@0.2.0")?;
     progress.resource(
         "checkpoint",
         ResourceType::host::<Checkpoint>(),
@@ -651,7 +684,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.topics.is_empty() {
-        linker.instance("falcone:host/events@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/events@0.2.0")?.func_wrap(
             "publish",
             |mut store: StoreContextMut<'_, Host>,
              (destination, payload): (WasmStr, WasmList<u8>)| {
@@ -681,7 +714,7 @@ pub fn instantiate(
             },
         )?;
     }
-    linker.instance("falcone:host/logging@0.1.0")?.func_wrap(
+    linker.instance("falcone:host/logging@0.2.0")?.func_wrap(
         "log",
         |mut store: StoreContextMut<'_, Host>,
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
@@ -711,7 +744,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.prefixes.is_empty() {
-        let mut storage = linker.instance("falcone:host/storage@0.1.0")?;
+        let mut storage = linker.instance("falcone:host/storage@0.2.0")?;
         storage_resource::<Object>(
             &mut storage,
             ["object", "open-object", "read-object", "write-object"],
@@ -729,7 +762,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.targets.is_empty() {
-        let mut workflows = linker.instance("falcone:host/workflows@0.1.0")?;
+        let mut workflows = linker.instance("falcone:host/workflows@0.2.0")?;
         workflows.resource(
             "execution",
             ResourceType::host::<Execution>(),
@@ -824,7 +857,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.hosts.is_empty() {
-        linker.instance("falcone:host/http@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/http@0.2.0")?.func_wrap(
             "request",
             |mut store: StoreContextMut<'_, Host>,
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
@@ -849,19 +882,23 @@ pub fn instantiate(
     }
     let mut store = Store::new(engine, host);
     store.limiter(|host| host);
+    // Fuel is not a limit of this contract: the wall-clock epoch deadline is. A store on a
+    // fuel-metering engine starts with none, so grant the maximum; engines without fuel
+    // metering refuse the call, which is the intended no-op.
+    let _ = store.set_fuel(u64::MAX);
     // Wasmtime charges lazy cursors as if eagerly lifted. Keep that finite
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
     store.set_hostcall_fuel(store.data().contract.value(Field::GuestMemoryBytes) as usize * 16);
     if engine.get_epoch_interruption() {
-        let deadline = Instant::now() + store.data().contract.duration(Field::GuestDeadlineMs);
+        let deadline = guest_deadline;
         // The store owns the ticker until drop, including while a callback runs.
         // A single-shot tick can lose the deadline: Continue(1) is relative to the current
         // epoch, so a racing tick could otherwise be the final guaranteed tick.
         store.data_mut().ticker = Some(EpochTicker::start(engine.clone())?);
         arm_deadline(&mut store, deadline, || {});
     }
-    let instance = linker.instantiate(&mut store, &component)?;
+    let instance = linker.instantiate(&mut store, component);
     Ok((store, instance))
 }
 

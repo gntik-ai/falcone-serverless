@@ -1,9 +1,9 @@
 # Falcone host capability contract
 
-package: falcone:host@0.1.0
+package: falcone:host@0.2.0
 
 The package stays pre-1.0 until WAS-03 qualification. Consumers pin the exact
-version. A breaking change requires a new version; once a revision pins 0.1.0,
+version. A breaking change requires a new version; once a revision pins a version,
 publish a corrected version rather than modifying that pinned contract. Raising
 a ceiling is compatible; lowering one breaks guests.
 
@@ -12,6 +12,30 @@ World `function` imports exactly `storage`, `http`, `events`, `workflows`,
 deny-by-default: only these versioned Falcone interfaces are permitted. This
 package grants no WASI filesystem, sockets, generic HTTP, environment or secret
 interface. WAS-03 owns any separately qualified WASI language profile.
+
+World `function` also exports exactly one interface, `handler`, the guest entry point
+the worker calls once per invocation:
+
+`handle: func(params: list<u8>) -> result<list<u8>, handler-error>` with
+`variant handler-error { invalid-input(string), failed(string) }`.
+
+`params` is the JSON legacy envelope and is at most `max-host-to-guest-bytes`; the
+result is the JSON result envelope and is at most `max-guest-to-host-bytes`. The
+worker checks the export and this exact signature on the component's type before it
+instantiates the component, so a component whose `handle` is missing or typed
+differently never runs a start function. The handler is not a host capability: the
+per-call ceilings below and the shared `host-error` do not apply to it, and the
+guest deadline and cancellation are enforced by the host around the call.
+
+## Version history
+
+- `0.2.0`: adds the exported `handler` interface and `handler-error`. The eight imports
+  are byte-identical to `0.1.0` apart from the version. Every `@0.1.0` name was replaced:
+  the import gate, the capability host, the native-cache interface version (so a native
+  cache compiled for `0.1.0` can never match a `0.2.0` key), the manifest schema
+  (`interfaceVersion`) and the language-profile matrix. A `0.1.0` import is rejected as
+  `undeclared_import`.
+- `0.1.0`: the eight imports only. No guest could receive params or return a result.
 
 ## Per-call ceilings
 
@@ -55,5 +79,5 @@ events, workflows, progress and logging results:
 - `cancelled`: the invocation or operation was cancelled.
 
 Failures must not expose credentials or internal binding details. Log fields
-are structured and redacted by the host. No runtime bindings consume this
-contract yet; this change is merge-only and adds no guest execution behavior.
+are structured and redacted by the host. No language profile is enabled yet, so
+nothing changes at runtime until a WAS-03 qualification publishes one.

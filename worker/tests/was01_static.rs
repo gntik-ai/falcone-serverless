@@ -157,6 +157,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
         "host/mod.rs",
         "host/net.rs",
         "host/runtime.rs",
+        "host/execute.rs",
         "qualification/capability_http.rs",
         "qualification/capability_invocations.rs",
     ]
@@ -174,6 +175,12 @@ fn scan_sources(dir: &Path, prefix: &Path) {
         let path = entry.unwrap().path();
         if path.is_dir() {
             scan_sources(&path, prefix);
+        } else if path
+            .extension()
+            .is_some_and(|extension| extension == "wasm")
+        {
+            // Binary handler fixtures are not source text. Each is pinned byte for byte to
+            // its `.wat` source (scanned here) by `handler_fixture_binaries_match_their_wat_sources`.
         } else {
             assert!(
                 source_valid(

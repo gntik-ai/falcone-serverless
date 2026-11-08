@@ -8,6 +8,26 @@ trait Cluster: namespace::NamespaceApi {
     ) -> Result<(), String>;
 }
 
+/// The pod passed only if it printed the aggregate record and, for a qualification that
+/// reports its cases one by one, a passed record for every required case.
+fn qualification_passed(logs: &str) -> Result<(), String> {
+    let records: Vec<serde_json::Value> = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    if !records.contains(&serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})) {
+        return Err("WAS-02 qualification success record missing".into());
+    }
+    for case in REQUIRED_CASES {
+        let passed =
+            serde_json::json!({"check":QUALIFICATION_CHECK,"case":case,"status":"passed"});
+        if !records.contains(&passed) {
+            return Err(format!("qualification case {case} did not report passed"));
+        }
+    }
+    Ok(())
+}
+
 fn run(cluster: &impl Cluster, image: &str, mode: &NamespaceMode) -> Result<(), String> {
     let plan = NamespacePlan::new(QUALIFICATION_PREFIX, mode)?;
     let pod = pod_manifest(&plan, image)?;
@@ -374,15 +394,7 @@ impl Cluster for RealCluster {
                     .runtime
                     .block_on(pods.logs(name, &LogParams::default()))
                     .map_err(api_error)?;
-                return if logs.lines().any(|line| {
-                    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|record| {
-                        record == serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})
-                    })
-                }) {
-                    Ok(())
-                } else {
-                    Err("WAS-02 qualification success record missing".into())
-                };
+                return qualification_passed(&logs);
             }
             if std::time::Instant::now() >= deadline {
                 return Err("WAS-02 qualification observation deadline".into());
@@ -562,5 +574,27 @@ fn unset_gate_is_skipped_and_invalid_opt_in_fails_closed() {
             )
             .is_err()
         );
+    }
+}
+
+#[test]
+fn every_required_case_must_report_passed_beside_the_aggregate() {
+    let aggregate = serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"});
+    let mut logs = format!("noise\n{aggregate}\n");
+    for case in REQUIRED_CASES {
+        let record = serde_json::json!({"check":QUALIFICATION_CHECK,"case":case,"status":"passed"});
+        logs.push_str(&format!("{record}\n"));
+    }
+    qualification_passed(&logs).unwrap();
+    assert!(qualification_passed("").is_err(), "no aggregate");
+    for missing in REQUIRED_CASES {
+        let record = serde_json::json!({"check":QUALIFICATION_CHECK,"case":missing,"status":"passed"});
+        let without = logs.replace(&format!("{record}\n"), "");
+        assert!(qualification_passed(&without).is_err(), "{missing} is required");
+        let failed = logs.replace(
+            &record.to_string(),
+            &serde_json::json!({"check":QUALIFICATION_CHECK,"case":missing,"status":"failed"}).to_string(),
+        );
+        assert!(qualification_passed(&failed).is_err(), "{missing} failed");
     }
 }

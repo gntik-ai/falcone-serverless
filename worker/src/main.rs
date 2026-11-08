@@ -1,12 +1,21 @@
 //! Falcone serverless execution worker.
 //!
-//! Placeholder binary so the workspace, CI and Hermes test commands exist before the
-//! Wasmtime host lands (EP-RUN, #18). It embeds no engine and runs no guest code yet.
+//! `execute COMPONENT PARAMS` is the one guest-running command: it validates the raw
+//! component, compiles it in the trusted child process through the authenticated cache,
+//! and calls the exported `handle` under the capability host's limits. Everything else
+//! here (`--version`, `--check-config`) runs no guest code.
+
+#[path = "artifact/mod.rs"]
+pub mod artifact;
+#[path = "cache/mod.rs"]
+pub mod cache;
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
 mod config;
+
+mod execute;
 
 #[cfg(test)]
 mod runtime_metrics;
@@ -19,7 +28,7 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Run CLI arguments excluding the executable name; validation runs no guest code.
+/// Run CLI arguments excluding the executable name.
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
     run_with_io(
         args,
@@ -44,6 +53,18 @@ pub fn run_with_io(
 }
 
 fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    if let [verb, rest @ ..] = args
+        && verb == "execute"
+    {
+        // Raw result bytes, no trailing newline; nothing is written on any failure.
+        return match rest {
+            [component, params] => {
+                let result = execute::run(component.as_ref(), params.as_ref())?;
+                stdout.write_all(&result).map_err(|error| error.to_string())
+            }
+            _ => Err("usage: falcone-serverless-worker execute COMPONENT PARAMS".into()),
+        };
+    }
     let output = match args {
         [] => format!("falcone-serverless-worker {}", version()),
         [flag] if flag == "--version" => format!("falcone-serverless-worker {}", version()),
@@ -56,7 +77,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS]".into(),
             );
         }
     };

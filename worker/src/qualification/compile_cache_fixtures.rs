@@ -15,8 +15,12 @@ pub fn limits() -> CompileLimits {
     }
 }
 
+/// The smallest component the handler gate accepts: the echo guest. The WAT oracle for
+/// these bytes is `handler_fixtures/echo.wat`.
+const HANDLER: &[u8] = include_bytes!("handler_fixtures/echo.wasm");
+
 pub fn small() -> Vec<u8> {
-    b"\0asm\x0d\0\x01\0".to_vec()
+    HANDLER.to_vec()
 }
 
 pub fn cpu() -> Vec<u8> {
@@ -66,7 +70,9 @@ fn component(functions: usize, operations: usize) -> Vec<u8> {
         code.extend_from_slice(&body);
     }
     section(10, &code, &mut module);
-    let mut component = b"\0asm\x0d\0\x01\0".to_vec();
+    // The handler guest comes first so module index 0 is the (unused) echo module and the
+    // heavy module is only ever compiled, never instantiated.
+    let mut component = HANDLER.to_vec();
     section(1, &module, &mut component);
     component
 }
