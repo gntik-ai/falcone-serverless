@@ -111,13 +111,25 @@ fn validate(schema: &Value, matrix: &Value) -> Result<(), String> {
         return Err(errors.join("\n"));
     }
     let mut resolve = wit_parser::Resolve::default();
-    let (package, _) = resolve
+    let (package_id, _) = resolve
         .push_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/host.wit"))
         .map_err(|e| format!("allowedInterfaces: parse authoritative WIT: {e}"))?;
-    let package = &resolve.packages[package];
-    let interfaces: BTreeSet<_> = package
-        .interfaces
-        .keys()
+    let package = &resolve.packages[package_id];
+    // Grantable capabilities are the imports of world function; the exported
+    // handler is the guest entry point, never an allowedInterfaces entry.
+    let world = resolve
+        .worlds
+        .iter()
+        .find(|(_, world)| world.name == "function" && world.package == Some(package_id))
+        .map(|(_, world)| world)
+        .ok_or("allowedInterfaces: world function not found")?;
+    let interfaces: BTreeSet<_> = world
+        .imports
+        .values()
+        .filter_map(|item| match item {
+            wit_parser::WorldItem::Interface { id, .. } => resolve.interfaces[*id].name.as_deref(),
+            _ => None,
+        })
         .map(|name| package.name.interface_id(name))
         .collect();
     let mut ids = BTreeSet::new();
@@ -344,6 +356,7 @@ fn language_profile_matrix_json_contract() {
     for name in [
         "wildcard-interface",
         "unknown-interface",
+        "handler-export-interface",
         "wrong-interface-version",
         "unversioned-interface",
         "duplicate-interface",
