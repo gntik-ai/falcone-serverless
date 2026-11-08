@@ -306,6 +306,7 @@ pub struct Host {
     pub bindings: Arc<dyn Bindings>,
     limits: StoreLimits,
     call_timeout: Duration,
+    invocation_deadline: Option<Instant>,
     cancelled: Arc<AtomicBool>,
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
@@ -324,6 +325,7 @@ impl Host {
                 .table_elements(GUEST_TABLE_ELEMENTS)
                 .build(),
             call_timeout: Duration::from_secs(30),
+            invocation_deadline: None,
             cancelled: Arc::new(AtomicBool::new(false)),
             keys: BTreeMap::new(),
             next_handle: 0,
@@ -333,6 +335,12 @@ impl Host {
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
         self.call_timeout = timeout.min(Duration::from_secs(30));
+    }
+
+    /// Absolute end of the invocation: no host call may outlive it, however much of the
+    /// per-call timeout remains, and a reply that arrives after it is discarded.
+    pub fn set_invocation_deadline(&mut self, deadline: Instant) {
+        self.invocation_deadline = Some(deadline);
     }
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
@@ -363,7 +371,10 @@ impl Host {
         if self.cancelled.load(Ordering::Acquire) {
             return Err(HostError::Cancelled);
         }
-        let deadline = Instant::now() + self.call_timeout;
+        let mut deadline = Instant::now() + self.call_timeout;
+        if let Some(invocation) = self.invocation_deadline {
+            deadline = deadline.min(invocation);
+        }
         let permit = permit(&self.bindings, deadline, &self.cancelled)?;
         let ticket = permit.0.clone();
         let (send, receive) = mpsc::sync_channel(1);
@@ -401,7 +412,15 @@ impl Host {
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
-                Ok(reply) => return reply,
+                Ok(reply) => {
+                    if self
+                        .invocation_deadline
+                        .is_some_and(|invocation| Instant::now() >= invocation)
+                    {
+                        return Err(HostError::Timeout);
+                    }
+                    return reply;
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HostError::Denied),
             }

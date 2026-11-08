@@ -8,9 +8,11 @@
 use falcone_serverless_worker::host::execute::{
     Executor, Failure, Limits, MAX_ERROR_MESSAGE_BYTES, Unbound, engine,
 };
-use falcone_serverless_worker::host::{BUFFER_BYTES, Context, Host};
+use falcone_serverless_worker::host::{
+    BUFFER_BYTES, Bindings, Context, Host, HostError, Operation, Reply,
+};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use wasmtime::component::Component;
 
@@ -316,6 +318,106 @@ fn a_component_without_the_handler_export_is_not_executed() {
     assert_eq!(
         code(run(&executor, &component, b"x")),
         "missing_handler_export"
+    );
+}
+
+/// A binding that answers the first `progress.report` after `first` and every later one
+/// after `later`, the way a slow platform service would.
+struct Slow {
+    calls: AtomicUsize,
+    first: Duration,
+    later: Duration,
+}
+
+impl Bindings for Slow {
+    fn call(&self, _context: &Context, _operation: Operation) -> Result<Reply, HostError> {
+        let delay = if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.first
+        } else {
+            self.later
+        };
+        std::thread::sleep(delay);
+        Ok(Reply::Empty)
+    }
+}
+
+/// A handler that calls the ungated `progress.report` twice, then echoes its params.
+fn reporting_component() -> String {
+    format!(
+        r#"(component
+  (type $progress (instance
+    (type $host-error (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
+    (export "host-error" (type $herr (eq $host-error)))
+    (export "report" (func (param "completed" u64) (param "total" u64) (param "message" string) (result (result (error $herr)))))))
+  (import "falcone:host/progress@0.2.0" (instance $p (type $progress)))
+  (core module $mem (memory (export "memory") 18))
+  (core instance $m (instantiate $mem))
+  (alias export $p "report" (func $report))
+  (core func $report-lowered (canon lower (func $report) (memory $m "memory")))
+  (core module $main
+    (import "m" "memory" (memory 18))
+    (import "p" "report" (func $report (param i64 i64 i32 i32 i32)))
+    (global $heap (mut i32) (i32.const 64))
+    (func (export "realloc") (param i32 i32 i32 i32) (result i32) {BUMP_REALLOC})
+    (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
+      (call $report (i64.const 0) (i64.const 0) (i32.const 32) (i32.const 0) (i32.const 256))
+      (call $report (i64.const 1) (i64.const 1) (i32.const 32) (i32.const 0) (i32.const 256))
+      {ECHO}))
+  (core instance $i (instantiate $main
+    (with "m" (instance $m))
+    (with "p" (instance (export "report" (func $report-lowered))))))
+  (type $handler-error (variant (case "invalid-input" string) (case "failed" string)))
+  (type $handle-type (func (param "params" (list u8)) (result (result (list u8) (error $handler-error)))))
+  (func $handle (type $handle-type)
+    (canon lift (core func $i "handle") (memory $m "memory") (realloc (func $i "realloc"))))
+  (instance $handler
+    (export "handler-error" (type $handler-error))
+    (export "handle" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler)))"#
+    )
+}
+
+#[test]
+fn a_late_blocking_host_call_cannot_outlive_the_invocation_deadline() {
+    let executor = executor();
+    let component = Component::new(executor.engine(), reporting_component()).unwrap();
+    // Sanity: with fast bindings the same guest completes and echoes.
+    let fast = Host::new(
+        Context::default(),
+        Arc::new(Slow {
+            calls: AtomicUsize::new(0),
+            first: Duration::ZERO,
+            later: Duration::ZERO,
+        }),
+    );
+    let output = executor.execute(&component, fast, b"ok", limits()).unwrap();
+    assert_eq!(output, b"ok");
+    // The first call spends most of the 600 ms allowance; the second would block for seconds.
+    // Restarting the per-call timeout would let it run to about 1050 ms.
+    let deadline = Duration::from_millis(600);
+    let slow = Host::new(
+        Context::default(),
+        Arc::new(Slow {
+            calls: AtomicUsize::new(0),
+            first: Duration::from_millis(450),
+            later: Duration::from_secs(5),
+        }),
+    );
+    let started = Instant::now();
+    let result = executor.execute(
+        &component,
+        slow,
+        b"x",
+        Limits {
+            deadline,
+            fuel: u64::MAX,
+        },
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(code(result), "timeout");
+    assert!(
+        elapsed < deadline + Duration::from_millis(250),
+        "{elapsed:?}"
     );
 }
 

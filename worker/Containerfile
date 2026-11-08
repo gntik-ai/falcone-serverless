@@ -5,9 +5,11 @@ COPY compiler/Cargo.toml compiler/Cargo.toml
 COPY compiler/src compiler/src
 COPY worker/Cargo.toml worker/Cargo.toml
 COPY worker/src worker/src
-RUN cargo build --release --locked -p falcone-serverless-worker
+RUN cargo build --release --locked -p falcone-serverless-worker --bin falcone-serverless-worker --bin artifact-compile-child
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 COPY --from=build /build/target/release/falcone-serverless-worker /usr/local/bin/falcone-serverless-worker
+# `execute` compiles through the trusted helper found beside the worker executable.
+COPY --from=build /build/target/release/artifact-compile-child /usr/local/bin/artifact-compile-child
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/falcone-serverless-worker"]

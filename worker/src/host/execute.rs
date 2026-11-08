@@ -161,8 +161,9 @@ impl Executor {
             return Err(Failure::new("cancelled"));
         }
         let deadline = Instant::now() + limits.deadline;
-        // A blocking host call must not outlive the guest deadline.
+        // A blocking host call must not outlive the guest deadline, whenever it starts.
         host.set_call_timeout(limits.deadline);
+        host.set_invocation_deadline(deadline);
         let observed = cancelled.clone();
         let (mut store, instance) =
             instantiate_component(&self.engine, component, host, move |store| {
@@ -214,6 +215,10 @@ impl Executor {
         };
         if cancelled.load(Ordering::Acquire) {
             return Err(Failure::new("cancelled"));
+        }
+        // A result that arrives after the deadline is expired and is never returned.
+        if Instant::now() >= deadline {
+            return Err(Failure::new("timeout"));
         }
         Ok(output)
     }
