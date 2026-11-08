@@ -8,9 +8,9 @@
 use super::Host;
 use super::runtime::{BUFFER_BYTES, Bytes, instantiate_component};
 use std::time::Instant;
-use wasmtime::Engine;
 use wasmtime::component::types::{ComponentFunc, ComponentItem, Type};
 use wasmtime::component::{Component, ComponentType, Lift};
+use wasmtime::{CallHook, Engine};
 
 pub const HANDLER_EXPORT: &str = "falcone:host/handler@0.2.0";
 
@@ -71,8 +71,9 @@ impl ExecuteError {
 /// 4. Every outcome, including handler errors, passes the same completion checks:
 ///    cancellation first, then the deadline, and only then the outcome is mapped
 ///    (uncertain effects, memory limit, buffer ceiling, the guest's own result).
-///    The store's hostcall fuel is the transfer ceiling, so Wasmtime refuses to lift a
-///    result or error text over it before copying a byte into host memory.
+///    While the guest's return values are lifted the store's hostcall fuel is
+///    `BUFFER_BYTES`, so Wasmtime refuses to lift a result or error text over it before
+///    copying a byte into host memory. See `bound_result_transfer`.
 ///
 /// The engine must have epoch interruption enabled, which the trusted cache's does.
 pub fn execute(component: &Component, host: Host, params: &[u8]) -> Result<Vec<u8>, ExecuteError> {
@@ -86,10 +87,7 @@ pub fn execute(component: &Component, host: Host, params: &[u8]) -> Result<Vec<u
     }
     let (mut store, instance) = instantiate_component(engine, component, host)
         .map_err(|_| ExecuteError::new("instantiation_failed"))?;
-    // Wasmtime charges every list and string it lifts against this fuel before it copies
-    // them, so a guest cannot make the host allocate more than the transfer ceiling for
-    // its result, an error text, or an argument of a host call.
-    store.set_hostcall_fuel(BUFFER_BYTES);
+    bound_result_transfer(&mut store);
     let outcome = instance.and_then(|instance| {
         let export = component
             .get_export_index(None, HANDLER_EXPORT)
@@ -101,6 +99,28 @@ pub fn execute(component: &Component, host: Host, params: &[u8]) -> Result<Vec<u
     });
     // The store, and with it the epoch ticker thread, is released on return.
     finish(store.data(), outcome)
+}
+
+/// Wasmtime charges what it lifts from the guest against the store's hostcall fuel before
+/// it copies it. The instantiation's fuel is sized for the existing capabilities, whose
+/// lazily lifted lists are charged by element size, not by the bytes they account, so
+/// lowering it for the whole run would trap calls the capabilities accept. Only the lift
+/// of the handler's return value is bounded by the transfer ceiling: the fuel is that
+/// ceiling from the moment guest code returns to the host, and the instantiation's again
+/// whenever guest code is entered or a host call returns to it. Host calls lift their
+/// arguments after the guest entered the host, so they always see the full allowance.
+fn bound_result_transfer(store: &mut wasmtime::Store<Host>) {
+    let allowance = store.hostcall_fuel();
+    store.call_hook(move |mut store, hook| {
+        match hook {
+            CallHook::CallingWasm | CallHook::ReturningFromHost => {
+                store.set_hostcall_fuel(allowance)
+            }
+            CallHook::ReturningFromWasm => store.set_hostcall_fuel(BUFFER_BYTES),
+            CallHook::CallingHost => {}
+        }
+        Ok(())
+    });
 }
 
 fn finish(

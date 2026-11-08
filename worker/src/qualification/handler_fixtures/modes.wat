@@ -5,6 +5,7 @@
 ;;   't' trap                'k' log, then return ok("done")         'm' log, then failed("boom")
 ;;   'n' log, then invalid-input("bad input")
 ;;   'G' failed(string of u32-LE(params[1..5]) NUL bytes)
+;;   'F' log with u32-LE(params[1..5]) empty fields, then return ok("done")
 (component
   (import "falcone:host/logging@0.2.0" (instance $logging
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
@@ -60,6 +61,10 @@
         (return (call $err (i32.const 1) (i32.const 16384) (i32.const 1000)))))
       (if (i32.eq (local.get $mode) (i32.const 71)) (then
         (return (call $err (i32.const 1) (i32.const 16384) (i32.load (i32.add (local.get $ptr) (i32.const 1)))))))
+      (if (i32.eq (local.get $mode) (i32.const 70)) (then
+        (call $log (i32.const 0) (i32.const 2096) (i32.const 4) (i32.const 65536)
+          (i32.load (i32.add (local.get $ptr) (i32.const 1))) (i32.const 64))
+        (return (call $ok (i32.const 2096) (i32.const 4)))))
       (if (i32.eq (local.get $mode) (i32.const 108)) (then (loop $forever (br $forever))))
       (if (i32.eq (local.get $mode) (i32.const 116)) (then unreachable))
       (if (i32.eq (local.get $mode) (i32.const 107)) (then

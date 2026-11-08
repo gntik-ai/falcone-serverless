@@ -17,7 +17,7 @@ const TOLERANCE: Duration = Duration::from_secs(2);
 const CEILING: usize = 1_048_576;
 
 /// Every case, by the name the cluster pod reports it under.
-pub const CASES: [(&str, fn()); 10] = [
+pub const CASES: [(&str, fn()); 11] = [
     (
         "successful_handler_call",
         successful_handler_call_returns_exactly_the_params,
@@ -50,6 +50,10 @@ pub const CASES: [(&str, fn()); 10] = [
     (
         "signature_rejection",
         handler_gate_rejects_before_any_host_call,
+    ),
+    (
+        "capability_allowances_hold",
+        host_calls_keep_their_allowance_inside_execute,
     ),
     (
         "limits_are_configurable",
@@ -319,6 +323,36 @@ pub fn a_host_call_timeout_is_not_a_cancellation() {
             }
         }
     }
+}
+
+/// Bounding what the guest hands back must not shrink what the existing capabilities
+/// accept: Wasmtime charges a lazily lifted `list<field>` by its element size, not by the
+/// eight metadata bytes the capability accounts, so a transfer fuel set to the buffer
+/// ceiling would trap these calls before the binding ran.
+#[cfg_attr(test, test)]
+pub fn host_calls_keep_their_allowance_inside_execute() {
+    let engine = shared_engine();
+    let modes = component(&engine, fixtures::MODES);
+    let binding = Arc::new(Recording::default());
+    // 40,000 empty fields account 320,000 bytes, well inside the 1 MiB ceiling.
+    let fields = |count: u32| mode(b'F', &count.to_le_bytes());
+    let result = execute(
+        &modes,
+        host(binding.clone(), Limits::compatibility()),
+        &fields(40_000),
+    );
+    assert_eq!(result.unwrap(), b"done");
+    assert_eq!(binding.calls(), 1);
+    // As many empty fields as the guest's memory holds past the fixture's list offset
+    // (126,976, about 992 KiB accounted) are still within the ceiling.
+    let binding = Arc::new(Recording::default());
+    let result = execute(
+        &modes,
+        host(binding.clone(), Limits::compatibility()),
+        &fields(126_976),
+    );
+    assert_eq!(result.unwrap(), b"done");
+    assert_eq!(binding.calls(), 1);
 }
 
 #[cfg_attr(test, test)]

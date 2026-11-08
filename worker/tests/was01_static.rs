@@ -32,7 +32,14 @@ fn pinned_versions_and_inventory() {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["cranelift", "runtime", "std", "wat", "component-model"]
+        [
+            "cranelift",
+            "runtime",
+            "std",
+            "wat",
+            "component-model",
+            "call-hook"
+        ]
     );
     assert_eq!(
         document("worker/Cargo.toml")["dependencies"]["wasmtime"]["workspace"].as_bool(),

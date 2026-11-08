@@ -20,10 +20,11 @@ fn the_runner_table_holds_one_distinct_case_per_security_criterion() {
         "deadline_precedence",
         "host_call_timeout_is_not_cancellation",
         "oversized_guest_data",
+        "capability_allowances_hold",
         "bounded_errors",
         "signature_rejection",
     ] {
         assert_eq!(names.iter().filter(|name| **name == required).count(), 1);
     }
-    assert_eq!(names.len(), 10);
+    assert_eq!(names.len(), 11);
 }

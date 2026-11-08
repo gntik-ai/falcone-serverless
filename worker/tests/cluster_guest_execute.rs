@@ -4,6 +4,11 @@
 //! are in `guest_execute.rs`.
 #![cfg(target_os = "linux")]
 
+pub use falcone_serverless_worker::{host, limits};
+#[path = "../src/qualification/guest_execute_cases.rs"]
+pub mod cases;
+#[path = "../src/qualification/handler_fixtures.rs"]
+pub mod handler_fixtures;
 #[path = "support/image.rs"]
 pub mod image;
 #[path = "support/kubeconfig.rs"]
@@ -26,6 +31,7 @@ const REQUIRED_CASES: &[&str] = &[
     "deadline_precedence",
     "host_call_timeout_is_not_cancellation",
     "oversized_guest_data",
+    "capability_allowances_hold",
     "bounded_errors",
     "signature_rejection",
     "trusted_compile_path",
@@ -54,16 +60,15 @@ fn pod_selects_the_requested_qualification() {
 }
 
 #[test]
-fn every_required_case_exists_in_the_runner() {
-    let cases = include_str!("../src/qualification/guest_execute_cases.rs");
-    let runner = include_str!("../src/qualification/guest_execute_runner.rs");
-    for case in REQUIRED_CASES {
-        let quoted = format!("\"{case}\"");
-        assert!(
-            cases.contains(&quoted) || runner.contains(&quoted),
-            "runner does not run {case}"
-        );
-    }
+fn every_required_case_is_registered_in_the_runner_table() {
+    // The runner iterates this table, so registration is what the pod runs and reports.
+    // The trusted compile path is the runner's own step, not a table entry.
+    let mut registered: Vec<&str> = cases::CASES.iter().map(|(name, _)| *name).collect();
+    registered.push("trusted_compile_path");
+    registered.sort_unstable();
+    let mut required = REQUIRED_CASES.to_vec();
+    required.sort_unstable();
+    assert_eq!(registered, required);
     // And the runner is reachable through the flag the pod uses.
     assert!(
         include_str!("../src/qualification/compile_cache_runner.rs")

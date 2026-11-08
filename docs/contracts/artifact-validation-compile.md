@@ -243,9 +243,13 @@ and an invocation past its deadline is `timeout`, never an application error, in
 when a host call timed out on its own deadline in the meantime. An uncertain effect is
 never erased: it is carried on the failure whatever code wins.
 
-Guest data is bounded before it is copied. The store's hostcall fuel is the transfer
-ceiling, and Wasmtime charges every list and string it lifts against it before copying
-a byte, so a guest cannot make the host allocate up to its memory allowance for a result
-or a handler-error text that is going to be refused. Either one over the ceiling is
-`buffer_limit_exceeded`; so is a host-call argument over the ceiling, which on this path
-ends the guest instead of returning the `limit-exceeded` host error.
+Guest data is bounded before it is copied. While the host lifts the handler's return
+value, the store's hostcall fuel is the transfer ceiling, and Wasmtime charges every list
+and string it lifts against it before copying a byte, so a guest cannot make the host
+allocate up to its memory allowance for a result or a handler-error text that is going
+to be refused. Either one over the ceiling is `buffer_limit_exceeded`. The fuel is the
+transfer ceiling only for that lift: whenever guest code is entered or a host call
+returns to it, it is again the instantiation's allowance, which is sized to the existing
+capabilities (Wasmtime charges a lazily lifted `list<field>` by element size, not by the
+eight bytes the capability accounts). Host-call arguments therefore keep exactly the
+limits and the `limit-exceeded` host error they have outside `execute`.
