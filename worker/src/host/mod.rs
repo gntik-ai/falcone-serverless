@@ -2,6 +2,7 @@
 //! guest data never supplies a tenant, workspace, binding or grant.
 
 pub mod net;
+pub mod outcome;
 mod runtime;
 pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, instantiate};
 use wasmtime::component::{ComponentType, Lift, Lower};

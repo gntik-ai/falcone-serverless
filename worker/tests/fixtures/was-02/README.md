@@ -103,3 +103,71 @@ existing namespace guard and `FS_TEST_NAMESPACE_MODE`/`FS_TEST_NAMESPACE` rules.
 No live cluster evidence is claimed by the in-process suite. Sandbox socket
 checks report `NOT RUN: EPERM (sandbox), PR CI runs them`; the pod mode fails
 closed if it cannot create its required listeners.
+
+## Limits and cancellation contract (#125)
+
+Version 1 requires every field; `Limits::parse` returns a typed error with the
+field name for missing, zero, unbounded, invalid or unsupported values. No tenant
+value can raise the existing 1 MiB buffer, 256 MiB guest memory or 30 s host-call
+ceilings. Compiler qualification ceilings are 120 s CPU and 4 GiB virtual address
+space (RLIMIT_AS, not RSS). Compiler fixture controls retain the existing 300 s
+wall deadline. These are qualification values, pending production profile review.
+
+The qualification profile uses a 100 ms guest deadline, 50 ms independent
+host-call deadline and 500 ms termination budget. Timing assertions allow 2 s
+of scheduler tolerance, separately from the configured budget. This is evidence
+under the test scheduler, not a real-time guarantee. CPU and memory failures must
+leave the compile cache empty, and a following small component must compile.
+
+Wasmtime epoch deadlines are relative to the engine's current epoch. Each store
+with a pending guest deadline owns a recurring 5 ms epoch ticker until the store
+is dropped. An early tick from another store may re-arm this store to current+1;
+a tick racing that re-arm cannot lose the deadline because subsequent ticks are
+guaranteed while this store remains alive. The deterministic regression forces
+another store's tick and then this store's tick after the wall-clock check and
+before re-arm. It does not use sleeps to select that interleaving.
+
+Cancellation is not proof of rollback. Once a mutating operation is handed to
+the helper, only a binding reply acknowledges completion. An unacknowledged
+write, publish, workflow start/signal, progress/checkpoint or HTTP operation is
+recorded as `Uncertain` on cancellation, timeout or helper failure. HTTP is
+conservatively mutating even for nominally read-only methods. A later epoch or
+memory trap cannot erase that record. Reads may report `Cancelled`. WIT stays
+unchanged; the typed invocation outcome carries information beyond its host-error
+variant. Retrying an `Uncertain` invocation requires platform reconciliation.
+
+Buffer sizes include canonical aggregate overhead, as in the capability gates.
+Guest-to-host excess is rejected before calling the binding; host-to-guest excess
+is rejected after the binding produces its reply and before lowering into guest
+memory. A host result cannot be measured before the binding produces it.
+
+The cancellation-ignoring termination probe re-execs a fixed trusted qualification
+binary and terminates/reaps only that child, while a concurrent valid guest runs.
+It neither selects nor accepts ADR 0004's production process model. Ordinary helper
+permit/detach accounting is retained, including its destructor qualification.
+
+Cluster evidence is **unverified** in an offline maker run. The operator builds
+and digest-pins the existing qualification image and runs:
+
+```sh
+FS_TEST_CLUSTER=1 cargo test --locked -p falcone-serverless-worker --test cluster_limits_cancellation -- --ignored
+```
+
+The live test is ignored unless explicitly selected and requires the environment
+gate. It reuses the restricted namespace guard, arbitrary non-root UID,
+RuntimeDefault seccomp, read-only root and labelled shared-namespace cleanup.
+No cluster access or credentials are needed by ordinary fixture tests.
+
+`Host::new` uses the explicit compatibility profile (including the existing 30 s
+call cap); it supplies no parsing defaults. `Host::with_limits` accepts only a
+validated contract. The small runtime fixtures use 2 MiB guest memory and 128-byte
+aggregates to exercise configurable enforcement, with the deadlines above.
+`--limits-cancellation` on `compile-cache-qualification` emits one JSON result per
+case; any failed assertion, compiler outcome, recovery or termination check makes
+the runner fail. The three guest WAT sources are also embedded under
+`worker/src/qualification/limits_fixtures` for source-only image builds; tests
+compare the embedded sources with these raw fixture files to prevent drift.
+The instantiation helper remains qualification-only and consumes the caller's
+engine configuration. Deadline fixtures enable epoch instrumentation explicitly;
+the blocked-read control and cancellation-ignoring child deliberately disable
+both fuel and epochs. This helper is not a production engine/budget admission API.

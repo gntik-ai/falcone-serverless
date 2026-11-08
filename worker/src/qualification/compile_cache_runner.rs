@@ -8,7 +8,10 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod limits_cases;
+mod limits_runner;
 pub use falcone_serverless_worker::host;
+pub use falcone_serverless_worker::limits;
 
 use artifact::supervisor::CompileLimits;
 use cache::Cache;
@@ -126,6 +129,9 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
 
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
+        Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
+        Some("--termination-fallback") => return limits_runner::termination_main(),
+        Some("--limits-cancellation") => return limits_runner::main(),
         Some("binding_drop_probe") => {
             capability_invocations::binding_drop_probe();
             return std::process::ExitCode::SUCCESS;

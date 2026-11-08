@@ -1,5 +1,6 @@
 //! Host-layer destination gate while ADR 0005 remains Proposed.
-use super::{BUFFER_BYTES, Bindings, Context, HostError, Pair};
+use super::{Bindings, Context, HostError, Pair};
+use crate::limits::{Field, Limits};
 use std::net::{IpAddr, Ipv4Addr};
 use std::{
     net::{SocketAddr, TcpStream},
@@ -92,12 +93,12 @@ fn check_call(deadline: Instant, cancelled: &AtomicBool) -> Result<(), HostError
     }
 }
 
-fn size(headers: &[Pair], body: &[u8], initial: usize) -> Result<(), HostError> {
+fn size(headers: &[Pair], body: &[u8], initial: usize, limit: usize) -> Result<(), HostError> {
     let mut total = initial
         .checked_add(8)
         .and_then(|n| n.checked_add(body.len()))
         .ok_or(HostError::LimitExceeded)?;
-    if headers.len() > BUFFER_BYTES / 8 || total > BUFFER_BYTES {
+    if headers.len() > limit / 8 || total > limit {
         return Err(HostError::LimitExceeded);
     }
     for pair in headers {
@@ -105,7 +106,7 @@ fn size(headers: &[Pair], body: &[u8], initial: usize) -> Result<(), HostError> 
             .checked_add(8)
             .and_then(|n| n.checked_add(pair.name.len()))
             .and_then(|n| n.checked_add(pair.value.len()))
-            .filter(|n| *n <= BUFFER_BYTES)
+            .filter(|n| *n <= limit)
             .ok_or(HostError::LimitExceeded)?;
     }
     Ok(())
@@ -191,6 +192,7 @@ pub(super) fn request(
     mut request: Request,
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
+    contract: Limits,
 ) -> Result<Response, HostError> {
     if request.method.is_empty() || !request.method.bytes().all(|byte| byte.is_ascii_uppercase()) {
         return Err(HostError::Denied);
@@ -226,6 +228,7 @@ pub(super) fn request(
                 .checked_add(request.method.len())
                 .and_then(|n| n.checked_add(8))
                 .ok_or(HostError::LimitExceeded)?,
+            contract.value(Field::GuestToHostBytes) as usize,
         )?;
         let url = parse_url(&request.url)?;
         if !context
@@ -257,7 +260,12 @@ pub(super) fn request(
         };
         let response = binding.http(context, &pinned)?;
         check_call(deadline, &cancelled)?;
-        size(&response.headers, &response.body, 2)?;
+        size(
+            &response.headers,
+            &response.body,
+            2,
+            contract.value(Field::HostToGuestBytes) as usize,
+        )?;
         if ![301, 302, 303, 307, 308].contains(&response.status) {
             return Ok(response);
         }

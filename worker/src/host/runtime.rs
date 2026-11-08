@@ -15,10 +15,10 @@ use wasmtime::component::{
     Component, ComponentType, Instance, Lift, Linker, LinkerInstance, Resource, ResourceType,
     WasmList, WasmStr,
 };
-use wasmtime::{Engine, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
+use wasmtime::{Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits, StoreLimitsBuilder};
 
-pub const BUFFER_BYTES: usize = 1_048_576;
-pub const GUEST_MEMORY_BYTES: usize = 256 * 1024 * 1024;
+pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
+use crate::limits::{Field, Limits};
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -160,6 +160,7 @@ struct Helper {
     operation: Option<Operation>,
     send: mpsc::SyncSender<Result<Reply, HostError>>,
     deadline: Instant,
+    contract: Limits,
 }
 impl Helper {
     fn run(mut self) {
@@ -170,6 +171,7 @@ impl Helper {
                 request,
                 self.deadline,
                 self.cancelled.clone(),
+                self.contract,
             )
             .map(Reply::Http),
             operation => self.binding.call(&self.context, operation),
@@ -178,14 +180,23 @@ impl Helper {
     }
 }
 
-#[derive(Default)]
-struct Bytes(usize);
+struct Bytes {
+    used: usize,
+    limit: usize,
+}
 impl Bytes {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
     fn add(&mut self, bytes: usize) -> Result<(), HostError> {
-        if !super::aggregate_within_limit(&[self.0, bytes]) {
+        if self
+            .used
+            .checked_add(bytes)
+            .is_none_or(|sum| sum > self.limit)
+        {
             return Err(HostError::LimitExceeded);
         }
-        self.0 += bytes;
+        self.used += bytes;
         Ok(())
     }
 }
@@ -266,7 +277,7 @@ fn preflight(
     fields: Option<&WasmList<LazyPair>>,
     overhead: usize,
 ) -> Result<(), HostError> {
-    let mut bytes = Bytes::default();
+    let mut bytes = Bytes::new(store.data().input_limit());
     bytes.add(overhead)?;
     for list in lists {
         bytes.add(4)?;
@@ -305,8 +316,14 @@ pub struct Host {
     pub context: Context,
     pub bindings: Arc<dyn Bindings>,
     limits: StoreLimits,
+    contract: Limits,
+    buffer_limited: AtomicBool,
+    memory_limited: bool,
+    ticker: Option<EpochTicker>,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
+    uncertain: AtomicBool,
+    call_cancelled: AtomicBool,
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
     executions: BTreeMap<u32, (String, String)>,
@@ -314,17 +331,27 @@ pub struct Host {
 
 impl Host {
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
+        Self::with_limits(context, bindings, Limits::compatibility())
+    }
+
+    pub fn with_limits(context: Context, bindings: Arc<dyn Bindings>, contract: Limits) -> Self {
         Self {
             context,
             bindings,
             limits: StoreLimitsBuilder::new()
-                .memory_size(GUEST_MEMORY_BYTES)
+                .memory_size(contract.value(Field::GuestMemoryBytes) as usize)
                 .memories(1)
                 .tables(4)
                 .table_elements(GUEST_TABLE_ELEMENTS)
                 .build(),
-            call_timeout: Duration::from_secs(30),
+            contract,
+            buffer_limited: AtomicBool::new(false),
+            memory_limited: false,
+            ticker: None,
+            call_timeout: contract.duration(Field::HostCallDeadlineMs),
             cancelled: Arc::new(AtomicBool::new(false)),
+            uncertain: AtomicBool::new(false),
+            call_cancelled: AtomicBool::new(false),
             keys: BTreeMap::new(),
             next_handle: 0,
             executions: BTreeMap::new(),
@@ -332,11 +359,48 @@ impl Host {
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
-        self.call_timeout = timeout.min(Duration::from_secs(30));
+        self.call_timeout = timeout.min(self.contract.duration(Field::HostCallDeadlineMs));
     }
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
+    }
+
+    pub fn uncertain_host_call(&self) -> bool {
+        self.uncertain.load(Ordering::Acquire)
+    }
+
+    pub fn cancelled_host_call(&self) -> bool {
+        self.call_cancelled.load(Ordering::Acquire)
+    }
+
+    fn unacknowledged(&self, mutating: bool) {
+        if mutating {
+            self.uncertain.store(true, Ordering::Release);
+        }
+        self.call_cancelled.store(true, Ordering::Release);
+    }
+
+    fn input_limit(&self) -> usize {
+        self.contract.value(Field::GuestToHostBytes) as usize
+    }
+    fn output_limit(&self) -> usize {
+        self.contract.value(Field::HostToGuestBytes) as usize
+    }
+    pub fn memory_limited(&self) -> bool {
+        self.memory_limited
+    }
+    pub fn buffer_limited(&self) -> bool {
+        self.buffer_limited.load(Ordering::Acquire)
+    }
+    fn record<T>(&self, result: &Result<T, HostError>) {
+        match result {
+            Err(HostError::LimitExceeded) => self.buffer_limited.store(true, Ordering::Release),
+            Err(HostError::Timeout | HostError::Cancelled) => {
+                self.call_cancelled.store(true, Ordering::Release)
+            }
+            _ => {}
+        }
     }
 
     fn handle(&mut self) -> Result<u32, HostError> {
@@ -360,7 +424,11 @@ impl Host {
     }
 
     fn call(&self, operation: Operation) -> Result<Reply, HostError> {
+        // Dispatch is the handoff to the helper, not entry into the binding.
+        // Conservatively include HTTP and progress, which can have external effects.
+        let mutating = !matches!(operation, Operation::Read { .. } | Operation::Log { .. });
         if self.cancelled.load(Ordering::Acquire) {
+            self.call_cancelled.store(true, Ordering::Release);
             return Err(HostError::Cancelled);
         }
         let deadline = Instant::now() + self.call_timeout;
@@ -374,6 +442,7 @@ impl Host {
             operation: Some(operation),
             send,
             deadline,
+            contract: self.contract,
         };
         // Each permit covers one helper and its joiner. If the helper cannot be
         // spawned, its closure, and with it the reply sender, is dropped, so the
@@ -393,17 +462,22 @@ impl Host {
         loop {
             if self.cancelled.load(Ordering::Acquire) {
                 ticket.detach();
+                self.unacknowledged(mutating);
                 return Err(HostError::Cancelled);
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 ticket.detach();
+                self.unacknowledged(mutating);
                 return Err(HostError::Timeout);
             }
             match receive.recv_timeout(remaining.min(Duration::from_millis(2))) {
                 Ok(reply) => return reply,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(HostError::Denied),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.unacknowledged(mutating);
+                    return Err(HostError::Denied);
+                }
             }
         }
     }
@@ -423,6 +497,9 @@ fn storage_resource<T: Send + 'static>(
         move |mut store: StoreContextMut<'_, Host>, (key,): (WasmStr,)| {
             let result: Result<Resource<T>, HostError> = (|| {
                 let key = key.to_str(&store).map_err(|_| HostError::Denied)?;
+                let mut bytes = Bytes::new(store.data().input_limit());
+                bytes.add(4)?;
+                bytes.add(key.len())?;
                 if key.len() > STORAGE_KEY_BYTES {
                     return Err(HostError::LimitExceeded);
                 }
@@ -434,6 +511,7 @@ fn storage_resource<T: Send + 'static>(
                 store.data_mut().keys.insert(rep, (checkpoint, key));
                 Ok(Resource::new_own(rep))
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )?;
@@ -446,11 +524,12 @@ fn storage_resource<T: Send + 'static>(
                 else {
                     return Err(HostError::Denied);
                 };
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::new(store.data().output_limit());
                 bytes.add(4)?;
                 bytes.add(data.len())?;
                 Ok(data)
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )?;
@@ -461,7 +540,7 @@ fn storage_resource<T: Send + 'static>(
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[], &[&data_arg], None, 4)?;
                 let key = store.data().key(handle.rep(), checkpoint)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::new(store.data().input_limit());
                 bytes.add(4)?;
                 let data = data(&data_arg, &mut store, &mut bytes)?;
                 empty(store.data().call(Operation::Write {
@@ -470,6 +549,7 @@ fn storage_resource<T: Send + 'static>(
                     data,
                 })?)
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )
@@ -483,7 +563,7 @@ pub fn instantiate(
     source: impl AsRef<[u8]>,
     host: Host,
 ) -> wasmtime::Result<(Store<Host>, Instance)> {
-    let mut context_bytes = Bytes::default();
+    let mut context_bytes = Bytes::new(host.output_limit());
     for value in [
         &host.context.invocation_key,
         &host.context.attempt_id,
@@ -538,7 +618,7 @@ pub fn instantiate(
         "report",
         |store: StoreContextMut<'_, Host>, (completed, total, message): (u64, u64, WasmStr)| {
             let result: Result<(), HostError> = (|| {
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::new(store.data().input_limit());
                 bytes.add(16)?;
                 let message = string(&message, &store, &mut bytes)?;
                 empty(store.data().call(Operation::Progress {
@@ -547,6 +627,7 @@ pub fn instantiate(
                     message,
                 })?)
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )?;
@@ -557,6 +638,7 @@ pub fn instantiate(
                 let key = store.data().key(handle.rep(), true)?;
                 empty(store.data().call(Operation::ProgressCheckpoint { key })?)
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )?;
@@ -567,7 +649,7 @@ pub fn instantiate(
              (destination, payload): (WasmStr, WasmList<u8>)| {
                 let result = (|| {
                     preflight(&mut store, &[&destination], &[&payload], None, 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::new(store.data().input_limit());
                     let destination = string(&destination, &store, &mut bytes)?;
                     // Check list length before reading or copying even one element.
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -586,6 +668,7 @@ pub fn instantiate(
                         payload,
                     })?)
                 })();
+                store.data().record(&result);
                 Ok((result,))
             },
         )?;
@@ -596,7 +679,7 @@ pub fn instantiate(
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[&message], &[], Some(&fields), 1)?;
-                let mut bytes = Bytes::default();
+                let mut bytes = Bytes::new(store.data().input_limit());
                 bytes.add(1)?;
                 let message = string(&message, &store, &mut bytes)?;
                 let mut fields = pairs(&fields, &mut store, &mut bytes)?;
@@ -615,6 +698,7 @@ pub fn instantiate(
                     fields,
                 })?)
             })();
+            store.data().record(&result);
             Ok((result,))
         },
     )?;
@@ -659,7 +743,7 @@ pub fn instantiate(
                     {
                         return Err(HostError::LimitExceeded);
                     }
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::new(store.data().input_limit());
                     let workflow = string(&workflow, &store, &mut bytes)?;
                     let input = data(&input, &mut store, &mut bytes)?;
                     if !store
@@ -691,6 +775,7 @@ pub fn instantiate(
                         .insert(rep, (workflow, execution));
                     Ok(Resource::new_own(rep))
                 })();
+                store.data().record(&result);
                 Ok((result,))
             },
         )?;
@@ -700,7 +785,7 @@ pub fn instantiate(
              (handle, name, payload): (Resource<Execution>, WasmStr, WasmList<u8>)| {
                 let result: Result<(), HostError> = (|| {
                     preflight(&mut store, &[&name], &[&payload], None, 4)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::new(store.data().input_limit());
                     bytes.add(4)?;
                     let name = string(&name, &store, &mut bytes)?;
                     let payload = data(&payload, &mut store, &mut bytes)?;
@@ -725,6 +810,7 @@ pub fn instantiate(
                         payload,
                     })?)
                 })();
+                store.data().record(&result);
                 Ok((result,))
             },
         )?;
@@ -736,7 +822,7 @@ pub fn instantiate(
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
                 let result: Result<super::net::Response, HostError> = (|| {
                     preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
-                    let mut bytes = Bytes::default();
+                    let mut bytes = Bytes::new(store.data().input_limit());
                     let url = string(&url, &store, &mut bytes)?;
                     let method = string(&method, &store, &mut bytes)?;
                     let headers = pairs(&headers, &mut store, &mut bytes)?;
@@ -748,16 +834,248 @@ pub fn instantiate(
                         _ => Err(HostError::Denied),
                     }
                 })();
-                Ok((result,))
+                store.data().record(&result);
+            Ok((result,))
             },
         )?;
     }
     let mut store = Store::new(engine, host);
-    store.limiter(|host| &mut host.limits);
+    store.limiter(|host| host);
     // Wasmtime charges lazy cursors as if eagerly lifted. Keep that finite
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
-    store.set_hostcall_fuel(GUEST_MEMORY_BYTES * 16);
+    store.set_hostcall_fuel(store.data().contract.value(Field::GuestMemoryBytes) as usize * 16);
+    if engine.get_epoch_interruption() {
+        let deadline = Instant::now() + store.data().contract.duration(Field::GuestDeadlineMs);
+        // The store owns the ticker until drop, including while a callback runs.
+        // A single-shot tick can lose the deadline: Continue(1) is relative to the current
+        // epoch, so a racing tick could otherwise be the final guaranteed tick.
+        store.data_mut().ticker = Some(EpochTicker::start(engine.clone())?);
+        arm_deadline(&mut store, deadline, || {});
+    }
     let instance = linker.instantiate(&mut store, &component)?;
     Ok((store, instance))
+}
+
+// Only a host-imposed memory refusal is a guest memory-limit outcome. A normal
+// module-declared maximum still has WebAssembly's ordinary memory.grow semantics.
+impl ResourceLimiter for Host {
+    fn memory_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        if desired > self.contract.value(Field::GuestMemoryBytes) as usize {
+            self.memory_limited = true;
+            return Err(wasmtime::Error::msg("guest-memory-limit"));
+        }
+        self.limits.memory_growing(current, desired, maximum)
+    }
+    fn memory_grow_failed(&mut self, error: wasmtime::Error) -> wasmtime::Result<()> {
+        self.memory_limited = true;
+        Err(error)
+    }
+    fn table_growing(
+        &mut self,
+        current: usize,
+        desired: usize,
+        maximum: Option<usize>,
+    ) -> wasmtime::Result<bool> {
+        self.limits.table_growing(current, desired, maximum)
+    }
+    fn tables(&self) -> usize {
+        self.limits.tables()
+    }
+    fn memories(&self) -> usize {
+        self.limits.memories()
+    }
+    fn instances(&self) -> usize {
+        self.limits.instances()
+    }
+}
+
+const EPOCH_TICK: Duration = Duration::from_millis(5);
+
+struct EpochTicker {
+    stop: mpsc::Sender<()>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+impl EpochTicker {
+    fn start(engine: Engine) -> wasmtime::Result<Self> {
+        Self::start_observed(engine, Instant::now() + EPOCH_TICK, || {})
+    }
+    fn start_observed(
+        engine: Engine,
+        first_tick: Instant,
+        mut on_tick: impl FnMut() + Send + 'static,
+    ) -> wasmtime::Result<Self> {
+        let (stop, receive) = mpsc::channel();
+        let thread = std::thread::Builder::new()
+            .name("guest-epoch".into())
+            .spawn(move || {
+                let mut wait = first_tick.saturating_duration_since(Instant::now());
+                while matches!(
+                    receive.recv_timeout(wait),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    engine.increment_epoch();
+                    on_tick();
+                    wait = EPOCH_TICK;
+                }
+            })?;
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn arm_deadline(
+    store: &mut Store<Host>,
+    deadline: Instant,
+    mut before_rearm: impl FnMut() + Send + Sync + 'static,
+) {
+    store.set_epoch_deadline(1);
+    store.epoch_deadline_callback(move |store| {
+        if Instant::now() >= deadline || store.data().cancelled.load(Ordering::Acquire) {
+            return Ok(wasmtime::UpdateDeadline::Interrupt);
+        }
+        // Test instrumentation can force a tick in this precise race window.
+        // Recurring ticks, rather than the hook or a second wall-clock check,
+        // guarantee interruption even when the next deadline becomes current+1.
+        before_rearm();
+        Ok(wasmtime::UpdateDeadline::Continue(1))
+    });
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    use crate::host::outcome::{InvocationOutcome, classify};
+
+    const TOLERANCE: Duration = Duration::from_secs(2);
+
+    struct NoBindings;
+    impl Bindings for NoBindings {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            Err(HostError::Denied)
+        }
+    }
+
+    fn shared_engine_interleaving(recurring: bool) -> (Duration, bool) {
+        let mut config = wasmtime::Config::new();
+        config.epoch_interruption(true);
+        let engine = Engine::new(&config).unwrap();
+        let module =
+            wasmtime::Module::new(&engine, "(module (func (export \"run\") (loop br 0)))").unwrap();
+        let mut store = Store::new(&engine, Host::new(Context::default(), Arc::new(NoBindings)));
+        let mut other = Store::new(&engine, ());
+        other.set_epoch_deadline(1000);
+        let valid = wasmtime::Module::new(
+            &engine,
+            "(module (func (export \"run\") (result i32) i32.const 42))",
+        )
+        .unwrap();
+        let valid = wasmtime::Instance::new(&mut other, &valid, &[]).unwrap();
+        assert_eq!(
+            valid
+                .get_typed_func::<(), i32>(&mut other, "run")
+                .unwrap()
+                .call(&mut other, ())
+                .unwrap(),
+            42
+        );
+        let instance = wasmtime::Instance::new(&mut store, &module, &[]).unwrap();
+        let run = instance
+            .get_typed_func::<(), ()>(&mut store, "run")
+            .unwrap();
+        let (checked, check) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let released = Mutex::new(released);
+        let mut first = true;
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        arm_deadline(&mut store, deadline, move || {
+            if first {
+                first = false;
+                checked.send(()).unwrap();
+                released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+            }
+        });
+        // Another store's tick invokes A's callback before A's wall deadline.
+        other.engine().increment_epoch();
+        let (done, finished) = mpsc::channel();
+        let rescued = Arc::new(AtomicBool::new(false));
+        std::thread::scope(|scope| {
+            let rescued = rescued.clone();
+            let engine = engine.clone();
+            scope.spawn(move || {
+                check.recv_timeout(Duration::from_secs(5)).unwrap();
+                // Start A's timer only after its callback has checked the clock.
+                // Its first actual tick is acknowledged before allowing re-arm.
+                let (ticked, tick) = mpsc::sync_channel(1);
+                let _ticker = if recurring {
+                    Some(
+                        EpochTicker::start_observed(engine.clone(), deadline, move || {
+                            let _ = ticked.try_send(());
+                        })
+                        .unwrap(),
+                    )
+                } else {
+                    // A single-shot timer at the same absolute guest deadline.
+                    // The callback is held by channels, not scheduler sleeps.
+                    let (_keep_open, timer) = mpsc::channel::<()>();
+                    let _ = timer.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+                    engine.increment_epoch();
+                    ticked.send(()).unwrap();
+                    None
+                };
+                tick.recv_timeout(Duration::from_secs(5)).unwrap();
+                let timer_reached_deadline = Instant::now() >= deadline;
+                release.send(()).unwrap();
+                if finished.recv_timeout(TOLERANCE).is_err() {
+                    // Bound the regression even with the predecessor's single-shot
+                    // algorithm. A rescue is an explicit failed deadline verdict.
+                    rescued.store(true, Ordering::Release);
+                    engine.increment_epoch();
+                }
+                assert!(
+                    timer_reached_deadline,
+                    "own timer must tick at its wall-clock deadline inside the callback window"
+                );
+            });
+            let result = run.call(&mut store, ());
+            let elapsed = start.elapsed();
+            assert_eq!(
+                classify(store.data(), result.as_ref().map(|_| ())),
+                InvocationOutcome::GuestInterrupted
+            );
+            let _ = done.send(());
+            elapsed
+        });
+        (start.elapsed(), rescued.load(Ordering::Acquire))
+    }
+
+    #[test]
+    fn recurring_deadline_survives_shared_engine_check_tick_rearm_race() {
+        // Sensitivity control: this exact schedule loses a single-shot tick.
+        assert!(shared_engine_interleaving(false).1);
+        let (elapsed, rescued) = shared_engine_interleaving(true);
+        assert!(!rescued, "a final tick was lost during re-arm");
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(elapsed <= Duration::from_millis(100) + TOLERANCE);
+    }
 }
