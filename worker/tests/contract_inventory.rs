@@ -701,6 +701,15 @@ fn is_synthetic(id: &str) -> bool {
             && number.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// A serialized `__ow_body` is JSON text: decode it so the identifier and
+/// sensitive-field checks reach what the handler would parse, not an opaque string.
+fn json_body(key: &str, value: &Value) -> Option<Value> {
+    if key != "__ow_body" {
+        return None;
+    }
+    serde_json::from_str(value.as_str()?).ok()
+}
+
 fn check_synthetic(value: &Value) -> Result<(), String> {
     const ID_KEYS: [&str; 13] = [
         "x-auth-tenant-id",
@@ -736,6 +745,9 @@ fn check_synthetic(value: &Value) -> Result<(), String> {
                     return Err("non-synthetic identifier in __ow_path".into());
                 }
                 check_synthetic(child)?;
+                if let Some(body) = json_body(key, child) {
+                    check_synthetic(&body)?;
+                }
             }
             Ok(())
         }
@@ -765,7 +777,11 @@ fn check_sensitive_fields(value: &Value, sensitive: bool) -> Result<(), String> 
                 || SENSITIVE_KEYWORDS
                     .iter()
                     .any(|keyword| lower.contains(keyword));
-            check_sensitive_fields(child, sensitive)
+            check_sensitive_fields(child, sensitive)?;
+            match json_body(key, child) {
+                Some(body) => check_sensitive_fields(&body, sensitive),
+                None => Ok(()),
+            }
         }),
         Value::Array(items) => items
             .iter()
@@ -1497,6 +1513,29 @@ fn oversized_body_must_exceed_the_host_limit_by_one_byte() {
             text.replacen(old, new, 1)
         });
         rejects_because(&docs, "bytes against limit 1048576");
+    }
+}
+
+#[test]
+fn identifiers_and_secrets_inside_a_serialized_body_are_checked() {
+    for (extra, reason) in [
+        (
+            r#","tenantId":"tenant-production""#,
+            "non-synthetic identifier",
+        ),
+        (r#","password":"hunter2""#, "not marked synthetic"),
+    ] {
+        let mut docs = Documents::load();
+        docs.rewrite_fixture("invalid/oversized-body.json", |text| {
+            // Same body length: trim the padding by what the member adds.
+            let escaped = extra.replace('"', "\\\"");
+            text.replacen(&"A".repeat(extra.len()), "", 1).replacen(
+                "\\\"}\"",
+                &format!("\\\"{escaped}}}\""),
+                1,
+            )
+        });
+        rejects_because(&docs, reason);
     }
 }
 
