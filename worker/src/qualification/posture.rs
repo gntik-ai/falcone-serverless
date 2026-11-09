@@ -1,5 +1,8 @@
 //! Restricted-posture contract v1 and separately wired worker capability host.
 
+#[path = "../artifact/mod.rs"]
+pub mod artifact;
+
 #[path = "../host/mod.rs"]
 pub mod host;
 

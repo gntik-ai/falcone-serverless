@@ -1,7 +1,6 @@
 //! Falcone serverless execution worker.
 //!
-//! Placeholder binary so the workspace, CI and Hermes test commands exist before the
-//! Wasmtime host lands (EP-RUN, #18). It embeds no engine and runs no guest code yet.
+//! Configuration checks and qualification-only component execution. No runtime adapter.
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
@@ -45,6 +44,10 @@ pub fn run_with_io(
 
 fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Result<(), String> {
     let output = match args {
+        [verb, artifact, params] if verb == "execute" => {
+            let result = execute_command(artifact, params)?;
+            return stdout.write_all(&result).map_err(|_| "write result".into());
+        }
         [] => format!("falcone-serverless-worker {}", version()),
         [flag] if flag == "--version" => format!("falcone-serverless-worker {}", version()),
         [flag, path] if flag == "--check-config" => {
@@ -56,11 +59,44 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+fn execute_command(
+    artifact: &std::ffi::OsStr,
+    params: &std::ffi::OsStr,
+) -> Result<Vec<u8>, String> {
+    use falcone_serverless_worker::host::{self, Bindings, Context, HostError, Operation, Reply};
+    use std::io::Read;
+    struct NoBindings;
+    impl Bindings for NoBindings {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            Err(HostError::Denied)
+        }
+    }
+    fn bounded(path: &std::ffi::OsStr, limit: usize, code: &str) -> Result<Vec<u8>, String> {
+        let mut data = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|_| "read invocation file")?
+            .take(limit as u64 + 1)
+            .read_to_end(&mut data)
+            .map_err(|_| "read invocation file")?;
+        if data.len() > limit {
+            return Err(code.into());
+        }
+        Ok(data)
+    }
+    let artifact = bounded(artifact, 64 * 1024 * 1024, "compile_size_limit_exceeded")?;
+    let params = bounded(params, host::BUFFER_BYTES, "buffer_limit_exceeded")?;
+    let mut config = wasmtime::Config::new();
+    config.epoch_interruption(true).consume_fuel(true);
+    let engine = wasmtime::Engine::new(&config).map_err(|_| "engine_unavailable")?;
+    let host = host::Host::new(Context::default(), std::sync::Arc::new(NoBindings));
+    host::execute(&engine, &artifact, &params, host).map_err(|error| error.code.into())
 }
 
 fn main() {

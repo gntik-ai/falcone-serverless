@@ -320,6 +320,7 @@ pub struct Host {
     buffer_limited: AtomicBool,
     memory_limited: bool,
     ticker: Option<EpochTicker>,
+    guest_deadline: Option<Instant>,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
     uncertain: AtomicBool,
@@ -348,6 +349,7 @@ impl Host {
             buffer_limited: AtomicBool::new(false),
             memory_limited: false,
             ticker: None,
+            guest_deadline: None,
             call_timeout: contract.duration(Field::HostCallDeadlineMs),
             cancelled: Arc::new(AtomicBool::new(false)),
             uncertain: AtomicBool::new(false),
@@ -366,6 +368,19 @@ impl Host {
         self.cancelled.clone()
     }
 
+    pub(super) fn completion_error(&self) -> Option<&'static str> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Some("cancelled")
+        } else if self
+            .guest_deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            Some("guest_timeout")
+        } else {
+            None
+        }
+    }
+
     pub fn uncertain_host_call(&self) -> bool {
         self.uncertain.load(Ordering::Acquire)
     }
@@ -381,10 +396,10 @@ impl Host {
         self.call_cancelled.store(true, Ordering::Release);
     }
 
-    fn input_limit(&self) -> usize {
+    pub(super) fn input_limit(&self) -> usize {
         self.contract.value(Field::GuestToHostBytes) as usize
     }
-    fn output_limit(&self) -> usize {
+    pub(super) fn output_limit(&self) -> usize {
         self.contract.value(Field::HostToGuestBytes) as usize
     }
     pub fn memory_limited(&self) -> bool {
@@ -431,7 +446,11 @@ impl Host {
             self.call_cancelled.store(true, Ordering::Release);
             return Err(HostError::Cancelled);
         }
-        let deadline = Instant::now() + self.call_timeout;
+        let deadline = self
+            .guest_deadline
+            .map_or(Instant::now() + self.call_timeout, |guest| {
+                guest.min(Instant::now() + self.call_timeout)
+            });
         let permit = permit(&self.bindings, deadline, &self.cancelled)?;
         let ticket = permit.0.clone();
         let (send, receive) = mpsc::sync_channel(1);
@@ -571,6 +590,16 @@ pub fn instantiate(
     source: impl AsRef<[u8]>,
     host: Host,
 ) -> wasmtime::Result<(Store<Host>, Instance)> {
+    let component = Component::new(engine, source)?;
+    instantiate_component(engine, component, host, None)
+}
+
+pub(super) fn instantiate_component(
+    engine: &Engine,
+    component: Component,
+    host: Host,
+    initial_fuel: Option<u64>,
+) -> wasmtime::Result<(Store<Host>, Instance)> {
     let mut context_bytes = Bytes::new(host.output_limit());
     for value in [
         &host.context.invocation_key,
@@ -582,7 +611,6 @@ pub fn instantiate(
             .and_then(|()| context_bytes.add(value.len()))
             .map_err(|_| wasmtime::Error::msg("limit-exceeded: invocation context"))?;
     }
-    let component = Component::new(engine, source)?;
     for (name, _) in component.component_type().imports(engine) {
         if !import_allowed(name, &host.context.grants) {
             return Err(wasmtime::Error::msg(format!("denied import: {name}")));
@@ -590,14 +618,14 @@ pub fn instantiate(
     }
     let mut linker = Linker::new(engine);
     linker
-        .instance("falcone:host/cancellation@0.1.0")?
+        .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(
             "is-cancelled",
             |store: StoreContextMut<'_, Host>, (): ()| {
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
-    let mut context = linker.instance("falcone:host/invocation-context@0.1.0")?;
+    let mut context = linker.instance("falcone:host/invocation-context@0.2.0")?;
     context.func_wrap(
         "invocation-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
@@ -613,7 +641,7 @@ pub fn instantiate(
             Ok((store.data().context.idempotency_key.clone(),))
         },
     )?;
-    let mut progress = linker.instance("falcone:host/progress@0.1.0")?;
+    let mut progress = linker.instance("falcone:host/progress@0.2.0")?;
     progress.resource(
         "checkpoint",
         ResourceType::host::<Checkpoint>(),
@@ -651,7 +679,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.topics.is_empty() {
-        linker.instance("falcone:host/events@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/events@0.2.0")?.func_wrap(
             "publish",
             |mut store: StoreContextMut<'_, Host>,
              (destination, payload): (WasmStr, WasmList<u8>)| {
@@ -681,7 +709,7 @@ pub fn instantiate(
             },
         )?;
     }
-    linker.instance("falcone:host/logging@0.1.0")?.func_wrap(
+    linker.instance("falcone:host/logging@0.2.0")?.func_wrap(
         "log",
         |mut store: StoreContextMut<'_, Host>,
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
@@ -711,7 +739,7 @@ pub fn instantiate(
         },
     )?;
     if !host.context.grants.prefixes.is_empty() {
-        let mut storage = linker.instance("falcone:host/storage@0.1.0")?;
+        let mut storage = linker.instance("falcone:host/storage@0.2.0")?;
         storage_resource::<Object>(
             &mut storage,
             ["object", "open-object", "read-object", "write-object"],
@@ -729,7 +757,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.targets.is_empty() {
-        let mut workflows = linker.instance("falcone:host/workflows@0.1.0")?;
+        let mut workflows = linker.instance("falcone:host/workflows@0.2.0")?;
         workflows.resource(
             "execution",
             ResourceType::host::<Execution>(),
@@ -824,7 +852,7 @@ pub fn instantiate(
         )?;
     }
     if !host.context.grants.hosts.is_empty() {
-        linker.instance("falcone:host/http@0.1.0")?.func_wrap(
+        linker.instance("falcone:host/http@0.2.0")?.func_wrap(
             "request",
             |mut store: StoreContextMut<'_, Host>,
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
@@ -849,12 +877,19 @@ pub fn instantiate(
     }
     let mut store = Store::new(engine, host);
     store.limiter(|host| host);
+    // Execution is bounded by the per-store epoch deadline. A fuel-enabled
+    // shared engine must not leave an execution store with default zero fuel.
+    // The older low-level qualification entry retains caller-controlled fuel.
+    if let Some(fuel) = initial_fuel.filter(|_| engine.get_consume_fuel()) {
+        store.set_fuel(fuel)?;
+    }
     // Wasmtime charges lazy cursors as if eagerly lifted. Keep that finite
     // accounting bound tied to guest memory, while our 1 MiB checks below
     // reject before copying. This lets oversized inputs return the WIT error.
     store.set_hostcall_fuel(store.data().contract.value(Field::GuestMemoryBytes) as usize * 16);
     if engine.get_epoch_interruption() {
         let deadline = Instant::now() + store.data().contract.duration(Field::GuestDeadlineMs);
+        store.data_mut().guest_deadline = Some(deadline);
         // The store owns the ticker until drop, including while a callback runs.
         // A single-shot tick can lose the deadline: Continue(1) is relative to the current
         // epoch, so a racing tick could otherwise be the final guaranteed tick.

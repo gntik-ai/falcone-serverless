@@ -1,5 +1,5 @@
 (component
-  (import "falcone:host/storage@0.1.0" (instance $storage
+  (import "falcone:host/storage@0.2.0" (instance $storage
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "object" (type $object (sub resource)))

@@ -1,6 +1,6 @@
 # Falcone host capability contract
 
-package: falcone:host@0.1.0
+package: falcone:host@0.2.0
 
 The package stays pre-1.0 until WAS-03 qualification. Consumers pin the exact
 version. A breaking change requires a new version; once a revision pins 0.1.0,
@@ -55,5 +55,34 @@ events, workflows, progress and logging results:
 - `cancelled`: the invocation or operation was cancelled.
 
 Failures must not expose credentials or internal binding details. Log fields
-are structured and redacted by the host. No runtime bindings consume this
-contract yet; this change is merge-only and adds no guest execution behavior.
+are structured and redacted by the host. The capability host and qualification execution path consume this contract.
+This change is merge-only; no runtime adapter or profile is deployed.
+
+## Version 0.2.0
+
+This breaking version adds `falcone:host/handler@0.2.0` as the sole export
+of world `function`. The eight imports keep their signatures and resolve at
+`@0.2.0`; imports pinned to `@0.1.0` are rejected. No deployed profile is enabled.
+
+`handle(params: list<u8>) -> result<list<u8>, handler-error>` receives the
+legacy JSON envelope and returns the JSON result envelope. `handler-error` has
+`invalid-input(string)` and `failed(string)` cases. Params use the configured
+host-to-guest ceiling; result and error payloads use the configured guest-to-host
+ceiling, counting UTF-8 bytes without ABI metadata. No partial result is returned.
+Only UTF-8 canonical string encoding is accepted, including on host imports.
+Validation rejects missing exports, incorrect signatures and unsupported encodings
+before compilation or instantiation. Cancellation takes precedence over deadline
+expiry for both successful and application-error completions.
+
+The qualification CLI is `falcone-serverless-worker execute COMPONENT PARAMS`,
+where both paths name bounded files. It writes only a complete result to stdout,
+or a stable error code to stderr. It grants no external bindings. The library
+`host::execute` accepts a verified Host with configured limits; compilation in
+this qualification path is in-process. A production adapter must use the existing
+supervised compiler and trusted cache rather than this fixture compilation path.
+
+Restricted-pod coverage uses `cluster_handler_execution` with
+`FS_TEST_CLUSTER=1`, the existing `FS_TEST_WAS02_IMAGE` digest-pinned qualification
+image and namespace switches, and `--include-ignored`. The pod selects
+`compile-cache-qualification --handler-execution` and reports each security case
+separately. Ordinary tests visibly skip the live case when the gate is unset.

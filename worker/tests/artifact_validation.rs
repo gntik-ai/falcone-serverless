@@ -38,7 +38,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
                 panic!("interface import")
             };
             format!(
-                "falcone:host/{}@0.1.0",
+                "falcone:host/{}@0.2.0",
                 resolve.interfaces[*id].name.as_ref().unwrap()
             )
         })
@@ -98,7 +98,7 @@ fn validation_order_and_input_boundary() {
     assert_eq!(error.code, "undeclared_import");
     assert_eq!(error.import.as_deref(), Some("wasi:filesystem/types@0.2.0"));
     let wrong_kind = wat::parse_str(
-        "(component (type (func)) (import \"falcone:host/http@0.1.0\" (func (type 0))))",
+        "(component (type (func)) (import \"falcone:host/http@0.2.0\" (func (type 0))))",
     )
     .unwrap();
     assert_eq!(
@@ -182,14 +182,14 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert!(supervisor.last_child_status().unwrap().unwrap().success());
     assert!(result.as_str().starts_with("sha256:"));
     let empty = b"\0asm\x0d\0\x01\0";
-    let result = supervisor
-        .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
-        .unwrap();
-    assert!(
-        result
-            .as_str()
-            .contains("24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29")
+    assert_eq!(
+        supervisor
+            .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
+            .unwrap_err()
+            .code,
+        "missing_handler_export"
     );
+    assert_eq!(supervisor.spawn_count(), 1);
 }
 
 #[test]
@@ -231,7 +231,11 @@ fn heavy() -> &'static [u8] {
         let function =
             include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
         wat::parse_str(format!(
-            "(component (core module {}))",
+            "{} (core module {}))",
+            include_str!("../src/qualification/execute_fixtures/echo.wat")
+                .trim_end()
+                .strip_suffix(')')
+                .unwrap(),
             function.repeat(128)
         ))
         .unwrap()

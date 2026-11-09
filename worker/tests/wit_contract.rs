@@ -12,7 +12,7 @@ const INTERFACES: &[&str] = &[
     "progress",
     "invocation-context",
 ];
-// Literal requirements for falcone:host@0.1.0, independent of the canonical WIT.
+// Literal requirements for falcone:host@0.2.0, independent of the canonical WIT.
 // Resource ownership is explicit even where WIT spells an own handle implicitly.
 const RESOURCES: &[(&str, &str)] = &[
     ("storage", "object"),
@@ -24,32 +24,32 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "storage",
         "open-object",
-        "(key: string) -> result<own<falcone:host@0.1.0/storage.object>, host-error>",
+        "(key: string) -> result<own<falcone:host@0.2.0/storage.object>, host-error>",
     ),
     (
         "storage",
         "read-object",
-        "(handle: borrow<falcone:host@0.1.0/storage.object>) -> result<list<u8>, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.object>) -> result<list<u8>, host-error>",
     ),
     (
         "storage",
         "write-object",
-        "(handle: borrow<falcone:host@0.1.0/storage.object>, data: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.object>, data: list<u8>) -> result<_, host-error>",
     ),
     (
         "storage",
         "open-checkpoint",
-        "(key: string) -> result<own<falcone:host@0.1.0/storage.checkpoint>, host-error>",
+        "(key: string) -> result<own<falcone:host@0.2.0/storage.checkpoint>, host-error>",
     ),
     (
         "storage",
         "read-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<list<u8>, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>) -> result<list<u8>, host-error>",
     ),
     (
         "storage",
         "write-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>, data: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>, data: list<u8>) -> result<_, host-error>",
     ),
     (
         "http",
@@ -64,12 +64,12 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "workflows",
         "start",
-        "(workflow: string, input: list<u8>) -> result<own<falcone:host@0.1.0/workflows.execution>, host-error>",
+        "(workflow: string, input: list<u8>) -> result<own<falcone:host@0.2.0/workflows.execution>, host-error>",
     ),
     (
         "workflows",
         "signal",
-        "(handle: borrow<falcone:host@0.1.0/workflows.execution>, name: string, payload: list<u8>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/workflows.execution>, name: string, payload: list<u8>) -> result<_, host-error>",
     ),
     (
         "logging",
@@ -84,7 +84,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     (
         "progress",
         "report-checkpoint",
-        "(handle: borrow<falcone:host@0.1.0/storage.checkpoint>) -> result<_, host-error>",
+        "(handle: borrow<falcone:host@0.2.0/storage.checkpoint>) -> result<_, host-error>",
     ),
     ("invocation-context", "invocation-key", "() -> string"),
     ("invocation-context", "attempt-id", "() -> string"),
@@ -189,8 +189,8 @@ fn render_type(resolve: &Resolve, ty: Type) -> String {
 fn check(resolve: &Resolve, package: PackageId) -> Vec<String> {
     let mut violations = Vec::new();
     let package_data = &resolve.packages[package];
-    if package_data.name.to_string() != "falcone:host@0.1.0" {
-        violations.push("package must be falcone:host@0.1.0".into());
+    if package_data.name.to_string() != "falcone:host@0.2.0" {
+        violations.push("package must be falcone:host@0.2.0".into());
     }
     let Some(world) = package_data.worlds.get("function") else {
         return vec!["missing world function".into()];
@@ -380,7 +380,7 @@ fn readme_agrees_with_resolved_contract() {
 // Inline fixtures are independent of the canonical file: contract edits cannot
 // silently repair a negative fixture. Each fixture must resolve before checking.
 const FIXTURE: &str = r#"
-package falcone:host@0.1.0;
+package falcone:host@0.2.0;
 interface cancellation {
     variant host-error { denied, limit-exceeded, timeout, cancelled }
     is-cancelled: func() -> bool;
@@ -477,12 +477,12 @@ fn inline_fixture_is_a_valid_control() {
 #[test]
 fn package_version_is_required() {
     rejects(
-        &fixture().replace("@0.1.0", ""),
-        "package must be falcone:host@0.1.0",
+        &fixture().replace("@0.2.0", ""),
+        "package must be falcone:host@0.2.0",
     );
     rejects(
-        &fixture().replace("@0.1.0", "@0.2.0"),
-        "package must be falcone:host@0.1.0",
+        &fixture().replace("@0.2.0", "@0.3.0"),
+        "package must be falcone:host@0.2.0",
     );
 }
 
@@ -535,12 +535,12 @@ fn foreign_authority_is_rejected_after_successful_resolution() {
             "wasi:http/outgoing-handler@0.2.0",
         ),
         (
-            "package other:host@0.1.0; interface storage {}",
-            "other:host/storage@0.1.0",
+            "package other:host@0.2.0; interface storage {}",
+            "other:host/storage@0.2.0",
         ),
         (
-            "package falcone:host@0.2.0; interface storage {}",
-            "falcone:host/storage@0.2.0",
+            "package falcone:host@0.3.0; interface storage {}",
+            "falcone:host/storage@0.3.0",
         ),
     ] {
         let mut resolve = Resolve::default();
@@ -721,8 +721,8 @@ fn readme_only_version_and_limit_changes_are_rejected() {
     let readme = fs::read_to_string(root.join("README.md")).expect("read WIT README");
     for (before, after, expected) in [
         (
-            "falcone:host@0.1.0",
             "falcone:host@0.2.0",
+            "falcone:host@0.3.0",
             "README package differs from WIT",
         ),
         (
@@ -947,4 +947,26 @@ fn every_fallible_operation_requires_the_shared_error_identity() {
             &format!("{interface}.{operation}: must return result with shared host-error"),
         );
     }
+}
+
+#[test]
+fn version_two_world_exports_handler_and_preserves_imports() {
+    let mut resolve = Resolve::default();
+    let (package, _) = resolve.push_path("wit/host.wit").unwrap();
+    let package = &resolve.packages[package];
+    assert_eq!(package.name.to_string(), "falcone:host@0.2.0");
+    let world = &resolve.worlds[package.worlds["function"]];
+    assert_eq!(world.imports.len(), 8);
+    assert_eq!(world.exports.len(), 1);
+    let WorldItem::Interface { id, .. } = world.exports.values().next().unwrap() else {
+        panic!("handler interface export");
+    };
+    let interface = &resolve.interfaces[*id];
+    assert_eq!(interface.name.as_deref(), Some("handler"));
+    let handle = &interface.functions["handle"];
+    assert_eq!(render_type(&resolve, handle.params[0].ty), "list<u8>");
+    assert_eq!(
+        render_type(&resolve, handle.result.unwrap()),
+        "result<list<u8>, handler-error>"
+    );
 }

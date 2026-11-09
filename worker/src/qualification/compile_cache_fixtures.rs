@@ -16,7 +16,7 @@ pub fn limits() -> CompileLimits {
 }
 
 pub fn small() -> Vec<u8> {
-    b"\0asm\x0d\0\x01\0".to_vec()
+    include_bytes!("execute_fixtures/echo.wasm").to_vec()
 }
 
 pub fn cpu() -> Vec<u8> {
@@ -66,7 +66,7 @@ fn component(functions: usize, operations: usize) -> Vec<u8> {
         code.extend_from_slice(&body);
     }
     section(10, &code, &mut module);
-    let mut component = b"\0asm\x0d\0\x01\0".to_vec();
+    let mut component = small();
     section(1, &module, &mut component);
     component
 }

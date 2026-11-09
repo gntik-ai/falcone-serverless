@@ -1,6 +1,9 @@
 //! Invocation capability boundary. Callers supply only Falcone-verified scopes;
 //! guest data never supplies a tenant, workspace, binding or grant.
 
+mod execute;
+pub use execute::{ExecutionError, Prepared, execute};
+
 pub mod net;
 pub mod outcome;
 mod runtime;
@@ -158,14 +161,14 @@ impl Grants {
 
 pub fn import_allowed(import: &str, grants: &Grants) -> bool {
     match import {
-        "falcone:host/storage@0.1.0" => !grants.prefixes.is_empty(),
-        "falcone:host/http@0.1.0" => !grants.hosts.is_empty(),
-        "falcone:host/events@0.1.0" => !grants.topics.is_empty(),
-        "falcone:host/workflows@0.1.0" => !grants.targets.is_empty(),
-        "falcone:host/logging@0.1.0"
-        | "falcone:host/cancellation@0.1.0"
-        | "falcone:host/progress@0.1.0"
-        | "falcone:host/invocation-context@0.1.0" => true,
+        "falcone:host/storage@0.2.0" => !grants.prefixes.is_empty(),
+        "falcone:host/http@0.2.0" => !grants.hosts.is_empty(),
+        "falcone:host/events@0.2.0" => !grants.topics.is_empty(),
+        "falcone:host/workflows@0.2.0" => !grants.targets.is_empty(),
+        "falcone:host/logging@0.2.0"
+        | "falcone:host/cancellation@0.2.0"
+        | "falcone:host/progress@0.2.0"
+        | "falcone:host/invocation-context@0.2.0" => true,
         _ => false,
     }
 }

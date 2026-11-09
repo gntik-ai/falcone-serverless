@@ -58,7 +58,7 @@ evidence object make the absence of qualification explicit.
 The `allowedInterfaces` list caps grantable capabilities; membership never grants
 authority by itself. Each entry must resolve at its exact package version in
 [worker/wit/host.wit](../../worker/wit/host.wit), parsed with wit-parser. For
-example, `falcone:host/storage@0.1.0` names an interface, not a grant. Wildcards,
+example, `falcone:host/storage@0.2.0` names an interface, not a grant. Wildcards,
 unknown interfaces and version substitutions are rejected. Empty seed lists
 grant no capabilities. Future consumers must still intersect this ceiling with
 verified invocation grants and enforce scope, limits and cancellation.
@@ -118,3 +118,16 @@ capability ceiling. WASI, language toolchain and package catalogue are
 unqualified. No profile is enabled and no real evidence is produced by this
 contract change. Publication is merge-only; rollback is a revert until a later
 consumer pins a matrix revision.
+
+### Handler and string encoding (WAS-01, version 0.2.0)
+
+`allowedInterfaces` resolve to `falcone:host/*@0.2.0`. Guests import only the
+eight Falcone host interfaces and export `falcone:host/handler@0.2.0` with
+`handle(params: list<u8>) -> result<list<u8>, handler-error>`. WASI imports and
+`@0.1.0` host imports are rejected. This does not enable a language profile.
+
+Canonical string encoding must be UTF-8. The validator rejects `utf16` and
+`latin1+utf16` options, including in nested components, before compilation or
+instantiation. Supported toolchains emit UTF-8; a candidate toolchain emitting
+other encodings is blocked from qualification. The configured size ceilings count
+UTF-8 bytes for results and application error messages before host allocation.

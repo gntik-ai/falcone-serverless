@@ -7,3 +7,6 @@ mod counting_alloc;
 
 #[path = "../src/qualification/capability_invocations.rs"]
 mod qualification;
+
+#[path = "../src/qualification/execute_cases.rs"]
+mod execute_cases;

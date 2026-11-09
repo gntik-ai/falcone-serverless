@@ -4,7 +4,7 @@ use super::Error;
 
 pub const ENGINE_VERSION: &str = "49.0.5";
 pub const ENGINE_CONFIG: &str = "49.0.5-defaults;consume_fuel=true;epoch_interruption=true";
-pub const INTERFACE_VERSION: &str = "falcone:host@0.1.0";
+pub const INTERFACE_VERSION: &str = "falcone:host@0.2.0";
 
 /// In-memory identity only; a matching key establishes no cache provenance.
 #[derive(Debug, PartialEq, Eq)]
