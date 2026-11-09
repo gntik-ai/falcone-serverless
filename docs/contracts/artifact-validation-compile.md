@@ -80,7 +80,7 @@ fixture. Production budgets remain owned by WAS-01/profile policy.
 
 Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
 precompiled input), full component-model validation, component-only check, then
-exact top-level interface-instance imports from `falcone:host@0.1.0` world
+exact top-level interface-instance imports from `falcone:host@0.2.0` world
 `function`. Nested core modules are validated too. AVC-R5/profile declared-memory
 checks and guest memory/epoch enforcement remain RUN-01 work; this module does
 not claim to implement them. No runtime consumer is wired into the worker.

@@ -1,9 +1,9 @@
 # Falcone host capability contract
 
-package: falcone:host@0.1.0
+package: falcone:host@0.2.0
 
 The package stays pre-1.0 until WAS-03 qualification. Consumers pin the exact
-version. A breaking change requires a new version; once a revision pins 0.1.0,
+version. A breaking change requires a new version; once a revision pins 0.2.0,
 publish a corrected version rather than modifying that pinned contract. Raising
 a ceiling is compatible; lowering one breaks guests.
 
@@ -11,7 +11,7 @@ World `function` imports exactly `storage`, `http`, `events`, `workflows`,
 `logging`, `cancellation`, `progress` and `invocation-context`. Linking is
 deny-by-default: only these versioned Falcone interfaces are permitted. This
 package grants no WASI filesystem, sockets, generic HTTP, environment or secret
-interface. WAS-03 owns any separately qualified WASI language profile.
+interface. WAS-03 profiles must use these Falcone imports only.
 
 ## Per-call ceilings
 
@@ -55,5 +55,50 @@ events, workflows, progress and logging results:
 - `cancelled`: the invocation or operation was cancelled.
 
 Failures must not expose credentials or internal binding details. Log fields
-are structured and redacted by the host. No runtime bindings consume this
-contract yet; this change is merge-only and adds no guest execution behavior.
+are structured and redacted by the host. This change is merge-only; no runtime
+adapter or language profile is enabled.
+
+## Version 0.2.0 and handler execution
+
+Version 0.2.0 breaks the 0.1.0 contract by exporting `falcone:host/handler@0.2.0`.
+The same eight imports retain their signatures and move to 0.2.0 together.
+`handler.handle(params: list<u8>) -> result<list<u8>, handler-error>` carries the
+legacy JSON input and result envelopes. `handler-error` has exactly
+`invalid-input(string)` and `failed(string)` cases.
+
+Only UTF-8 canonical string encoding is accepted. The artifact gate checks the
+single handler instance export, its complete function signature, imports and
+canonical encoding options before `Component::new`, instantiation or start code.
+Non-UTF-8 lift/lower options, including nested components, are rejected with
+`unsupported_string_encoding`; invalid handler types use
+`invalid_handler_signature`, and missing or different exports use
+`missing_handler_export`.
+
+`host::execute` and `host::Prepared` retain the Host until every completion has
+passed `outcome::classify`. Uncertainty keeps its existing highest precedence.
+Completion checks cancellation first, then the absolute guest deadline, on both
+success and error paths. No rejected invocation returns partial output.
+Params use the configured host-to-guest byte ceiling. Wasmtime's lifting fuel
+uses the configured guest-to-host ceiling and charges list/UTF-8 string bytes
+before allocating result or error payloads. Standard lifting owns the result
+before guest post-return cleanup runs. The ceiling counts payload bytes, so
+exactly-limit payloads are accepted without a fixed metadata deduction.
+Wasmtime 49.0.5 keeps its fuel-exhaustion error type private; the execution path
+maps that exact pinned engine diagnostic to `buffer_limit_exceeded`.
+
+The local CLI is `falcone-serverless-worker execute COMPONENT PARAMS [LIMITS]`.
+COMPONENT and PARAMS are files; LIMITS is an optional version-1 limits JSON file.
+It writes the result bytes on success and only a stable error code on failure.
+It supplies no platform grants or credentials. This explicit source-based path
+is not the supervised compiler/runtime adapter required for deployment.
+
+`guest_execute` tests cover the public execution and validation boundaries. The
+allocation probes re-execute the existing `compile-cache-qualification` binary,
+keeping the counting allocator within ADR 0014's approved link scope. They bound
+host heap growth below 4 KiB for a rejected 1 MiB payload at both 128 B and 1 MiB
+limits and prove allocator sensitivity with eager negative controls; separate
+checks pin the exact-limit and one-byte-over verdicts.
+`cluster_guest_execute` has separate restricted-pod cases, including four
+allocation cases. It is explicitly ignored without `FS_TEST_CLUSTER`; the
+operator supplies the pinned `FS_TEST_WAS02_IMAGE` and runs it with
+`--include-ignored` in the existing namespace-mode harness.

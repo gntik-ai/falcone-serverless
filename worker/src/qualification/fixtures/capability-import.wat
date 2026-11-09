@@ -1,6 +1,6 @@
 (component
   (import "IMPORT" (instance))
-  (import "falcone:host/logging@0.1.0" (instance $logging
+  (import "falcone:host/logging@0.2.0" (instance $logging
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (type $level-type (enum "debug" "info" "warn" "error"))

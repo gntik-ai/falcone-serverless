@@ -157,6 +157,9 @@ fn source_valid(path: &Path, source: &str) -> bool {
         "host/mod.rs",
         "host/net.rs",
         "host/runtime.rs",
+        "host/execute.rs",
+        "main.rs",
+        "qualification/execute_cases.rs",
         "qualification/capability_http.rs",
         "qualification/capability_invocations.rs",
     ]
@@ -175,10 +178,11 @@ fn scan_sources(dir: &Path, prefix: &Path) {
         if path.is_dir() {
             scan_sources(&path, prefix);
         } else {
+            let bytes = fs::read(&path).unwrap();
             assert!(
                 source_valid(
                     path.strip_prefix(prefix).unwrap(),
-                    &fs::read_to_string(&path).unwrap()
+                    &String::from_utf8_lossy(&bytes)
                 ),
                 "{}",
                 path.display()
@@ -202,6 +206,8 @@ fn qualification_sources_obey_boundaries() {
         ("qualification/engine.rs", "deserialize"),
         ("config.rs", "wasmtime::Engine"),
         ("host/other.rs", "wasmtime::Engine"),
+        ("host/execute.rs.bak", "wasmtime::Engine"),
+        ("qualification/execute_other.rs", "wasmtime::Engine"),
         ("host/nested/runtime.rs", "wasmtime::Engine"),
         ("qualification/capability_other.rs", "wasmtime::Engine"),
         (

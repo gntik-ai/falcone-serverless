@@ -259,7 +259,10 @@ fn untrusted_entries_are_misses_before_any_native_load() {
                 let size = u32::from_be_bytes(entry[..4].try_into().unwrap()) as usize;
                 let requested: serde_json::Value =
                     serde_json::from_slice(&entry[4..4 + size]).unwrap();
-                let other = wat::parse_str("(component)").unwrap();
+                let other = wat::parse_str(include_str!(
+                    "../src/qualification/execute_fixtures/handler-wrapper.wat"
+                ))
+                .unwrap();
                 let loaded = cache
                     .compile(3, &other, limits(), &AtomicBool::new(false))
                     .unwrap();
@@ -364,7 +367,13 @@ fn qualification_binary_fixtures_match_the_independent_wat_oracle() {
         fixtures::INVALID,
         include_bytes!("fixtures/was-02/invalid.wasm")
     );
-    assert_eq!(fixtures::small(), wat::parse_str("(component)").unwrap());
+    assert_eq!(
+        fixtures::small(),
+        wat::parse_str(include_str!(
+            "../src/qualification/execute_fixtures/handler-wrapper.wat"
+        ))
+        .unwrap()
+    );
     let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
     let function =
         include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
@@ -438,12 +447,15 @@ impl ChildFixture {
 #[test]
 fn child_limit_exit_during_input_transfer_keeps_its_diagnostic() {
     use cache::LoadEvent::*;
-    // Larger than a pipe buffer, but still a valid, otherwise empty component.
-    let bytes = wat::parse_str(format!(
+    // Larger than a pipe buffer, with a valid 0.2.0 handler export.
+    let mut bytes = wat::parse_str(format!(
         "(component (@custom \"padding\" \"{}\"))",
         "x".repeat(1024 * 1024)
     ))
     .unwrap();
+    bytes.extend_from_slice(
+        &include_bytes!("../src/qualification/execute_fixtures/handler-wrapper.wasm")[8..],
+    );
     for (termination, diagnostic) in [
         ("exit 66", "compile_memory_limit_exceeded"),
         ("kill -XCPU $$", "compile_cpu_limit_exceeded"),

@@ -8,6 +8,8 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod execute_cases;
+mod execute_runner;
 mod limits_cases;
 mod limits_runner;
 pub use falcone_serverless_worker::host;
@@ -129,6 +131,10 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
 
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
+        Some("--guest-execute-allocation") => return execute_runner::allocation_main(),
+        Some(flag) if flag.starts_with("--guest-execute=") => {
+            return execute_runner::run(&flag[16..]);
+        }
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),
         Some("--limits-cancellation") => return limits_runner::main(),

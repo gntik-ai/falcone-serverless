@@ -1,5 +1,5 @@
 (component
-  (import "falcone:host/storage@0.1.0" (instance $storage
+  (import "falcone:host/storage@0.2.0" (instance $storage
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "checkpoint" (type $checkpoint (sub resource)))
@@ -7,7 +7,7 @@
     (export "read-checkpoint" (func (param "handle" (borrow $checkpoint)) (result (result (list u8) (error $error)))))
     (export "write-checkpoint" (func (param "handle" (borrow $checkpoint)) (param "data" (list u8)) (result (result (error $error)))))))
   (alias export $storage "checkpoint" (type $checkpoint))
-  (import "falcone:host/progress@0.1.0" (instance $progress
+  (import "falcone:host/progress@0.2.0" (instance $progress
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "checkpoint" (type $cp (eq $checkpoint)))

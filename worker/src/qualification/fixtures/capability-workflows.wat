@@ -1,5 +1,5 @@
 (component
-  (import "falcone:host/workflows@0.1.0" (instance $workflows
+  (import "falcone:host/workflows@0.2.0" (instance $workflows
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "execution" (type $execution (sub resource)))

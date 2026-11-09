@@ -6,6 +6,9 @@ pub mod host;
 #[path = "../limits/mod.rs"]
 pub mod limits;
 
+#[path = "../artifact/mod.rs"]
+pub mod artifact;
+
 use serde_json::Value;
 
 const RULE_IDS: [&str; 12] = [

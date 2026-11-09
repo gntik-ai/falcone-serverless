@@ -5,13 +5,13 @@ fn only_exact_world_interfaces_with_required_grants_are_linked() {
     let grants = Grants::default();
     for name in ["storage", "http", "events", "workflows"] {
         assert!(!import_allowed(
-            &format!("falcone:host/{name}@0.1.0"),
+            &format!("falcone:host/{name}@0.2.0"),
             &grants
         ));
     }
     for name in ["logging", "cancellation", "progress", "invocation-context"] {
         assert!(import_allowed(
-            &format!("falcone:host/{name}@0.1.0"),
+            &format!("falcone:host/{name}@0.2.0"),
             &grants
         ));
     }
@@ -31,7 +31,7 @@ fn only_exact_world_interfaces_with_required_grants_are_linked() {
     };
     for name in ["storage", "http", "events", "workflows"] {
         assert!(import_allowed(
-            &format!("falcone:host/{name}@0.1.0"),
+            &format!("falcone:host/{name}@0.2.0"),
             &grants
         ));
     }

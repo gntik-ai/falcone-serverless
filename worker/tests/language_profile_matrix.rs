@@ -115,10 +115,16 @@ fn validate(schema: &Value, matrix: &Value) -> Result<(), String> {
         .push_path(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("wit/host.wit"))
         .map_err(|e| format!("allowedInterfaces: parse authoritative WIT: {e}"))?;
     let package = &resolve.packages[package];
-    let interfaces: BTreeSet<_> = package
-        .interfaces
-        .keys()
-        .map(|name| package.name.interface_id(name))
+    let interfaces: BTreeSet<_> = resolve.worlds[package.worlds["function"]]
+        .imports
+        .values()
+        .filter_map(|item| match item {
+            wit_parser::WorldItem::Interface { id, .. } => resolve.interfaces[*id]
+                .name
+                .as_deref()
+                .map(|name| package.name.interface_id(name)),
+            _ => None,
+        })
         .collect();
     let mut ids = BTreeSet::new();
     for (language, profile) in matrix["profiles"].as_object().unwrap() {
@@ -380,5 +386,21 @@ fn language_profile_matrix_json_contract() {
             .unwrap()
             .is_valid(&no_evidence),
         "enabled-requires-evidence weakening witness"
+    );
+}
+
+#[test]
+fn exported_handler_is_not_a_grantable_import() {
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string(contracts().join("language-profile-matrix.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let mut matrix = fixture("valid", "enabled-all-evidence");
+    matrix["profiles"]["javascript"]["allowedInterfaces"] =
+        serde_json::json!(["falcone:host/handler@0.2.0"]);
+    assert!(
+        validate(&schema, &matrix)
+            .unwrap_err()
+            .contains("allowedInterfaces")
     );
 }
