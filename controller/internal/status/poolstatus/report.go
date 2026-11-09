@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // ContractRevision is the revision the encoder emits. Revision 1.1 stays valid on
@@ -343,7 +344,7 @@ func validate(r Report, extended bool) error {
 	if !extended {
 		return nil
 	}
-	if r.ContractRevision == ContractRevision && (r.ReporterLineage == "" || strings.ContainsAny(r.ReporterLineage, " \t\r\n")) {
+	if r.ContractRevision == ContractRevision && (r.ReporterLineage == "" || strings.IndexFunc(r.ReporterLineage, unicode.IsSpace) >= 0) {
 		return errors.New("revision 1.2 requires a reporterLineage without whitespace")
 	}
 	absenceClaim := r.AbsenceVerified || len(r.VerifiedAbsence) != 0

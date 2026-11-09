@@ -273,7 +273,9 @@ func (e *Elector) campaign(ctx context.Context) time.Duration {
 	}
 	if l.HolderIdentity != "" && now.Sub(e.observedAt) < e.cfg.LeaseDuration {
 		e.setStatus(Status{Reason: ReasonStandby, Detail: "another instance holds the Lease"})
-		return e.cfg.RetryPeriod
+		// Wake no later than the end of the observation window, so a takeover is never
+		// a whole retry period late when the observation is off the retry grid.
+		return min(e.cfg.RetryPeriod, e.observedAt.Add(e.cfg.LeaseDuration).Sub(now))
 	}
 	// The Lease is released or has not been renewed for a lease duration as seen by this
 	// instance's own clock. Take over with the next epoch, conditioned on the

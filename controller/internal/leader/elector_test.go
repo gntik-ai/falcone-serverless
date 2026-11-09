@@ -107,6 +107,31 @@ func TestStandbyAcquiresWithinLeaseDurationPlusRetryPeriodAndFencesTheOldTerm(t 
 	}
 }
 
+// The standby does not poll on a fixed grid: it follows the delays Tick returns, so an
+// observation that is not aligned with the retry period still ends the wait at the
+// lease duration, not a whole retry period later.
+func TestStandbyFollowingTickDelaysTakesOverWithinLeaseDurationPlusRetryPeriod(t *testing.T) {
+	clock, api := newFakeClock(epoch0), newFakeAPI()
+	a, b := newInstance(t, api, clock, "controller-0"), newInstance(t, api, clock, "controller-1")
+	a.tick()
+	b.tick() // B observes A at t=0
+	clock.Advance(100 * time.Millisecond)
+	a.tick() // A's last renewal, at t=0.1s
+	lastRenewal := clock.Now()
+	clock.Advance(1900 * time.Millisecond)
+	delay := b.e.Tick(context.Background()) // B observes that renewal at t=2s
+	for steps := 0; !b.leads(); steps++ {
+		if steps > 100 {
+			t.Fatal("the standby never took over")
+		}
+		clock.Advance(delay)
+		delay = b.e.Tick(context.Background())
+	}
+	if took := clock.Now().Sub(lastRenewal); took > DefaultLeaseDuration+DefaultRetryPeriod {
+		t.Fatalf("takeover %s after the last renewal, want within %s", took, DefaultLeaseDuration+DefaultRetryPeriod)
+	}
+}
+
 func TestLeaseLivesOnlyInTheReleaseNamespace(t *testing.T) {
 	clock, api := newFakeClock(epoch0), newFakeAPI()
 	a, b := newInstance(t, api, clock, "controller-0"), newInstance(t, api, clock, "controller-1")
