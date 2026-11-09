@@ -438,6 +438,7 @@ fn parse_fixture(path: &str, bytes: &[u8]) -> Result<Value, String> {
     check_synthetic(&fixture).map_err(|reason| format!("{path}: {reason}"))?;
     check_sensitive_fields(&fixture, false)
         .map_err(|reason| format!("{path}: secret scan: {reason}"))?;
+    scan_decoded_strings(&fixture).map_err(|reason| format!("{path}: secret scan: {reason}"))?;
     Ok(fixture)
 }
 
@@ -775,6 +776,19 @@ fn check_sensitive_fields(value: &Value, sensitive: bool) -> Result<(), String> 
         Value::Number(_) | Value::Bool(_) if sensitive => {
             Err("sensitive value not marked synthetic".into())
         }
+        _ => Ok(()),
+    }
+}
+
+/// Decoded half of the secret scan: JSON escapes (`\/`, `\u003a`) hide a
+/// credential from the raw text, so every decoded key and string is scanned too.
+fn scan_decoded_strings(value: &Value) -> Result<(), String> {
+    match value {
+        Value::Object(map) => map.iter().try_for_each(|(key, child)| {
+            secret_scan(key).and_then(|()| scan_decoded_strings(child))
+        }),
+        Value::Array(items) => items.iter().try_for_each(scan_decoded_strings),
+        Value::String(text) => secret_scan(text),
         _ => Ok(()),
     }
 }
@@ -1409,6 +1423,21 @@ fn secrets_in_a_fixture_are_rejected() {
     ] {
         let mut docs = Documents::load();
         docs.mutate_fixture(name, old, new);
+        rejects_because(&docs, "secret scan");
+    }
+}
+
+#[test]
+fn escaped_secrets_in_a_fixture_are_rejected_once_decoded() {
+    for new in [
+        "\"description\": \"postgres:\\/\\/svc:example@db.internal/app No",
+        "\"description\": \"postgres\\u003a//svc:example@db.internal/app No",
+        "\"description\": \"\\u002d\\u002d\\u002d\\u002d\\u002dBEGIN PRIVATE KEY\\u002d\\u002d\\u002d\\u002d\\u002d No",
+        "\"description\": \"AKIA\\u0041BCDEFGHIJKLMNOP No",
+        "\"description\": \"password\\u003dhunter2 No",
+    ] {
+        let mut docs = Documents::load();
+        docs.mutate_fixture("valid/401.json", "\"description\": \"No", new);
         rejects_because(&docs, "secret scan");
     }
 }
