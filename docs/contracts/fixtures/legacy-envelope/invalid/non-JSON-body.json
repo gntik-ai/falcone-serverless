@@ -7,7 +7,7 @@
       "Idempotency-Key": "idem-legacy-0001"
     },
     "identity": {
-      "invocation-key": "inv-synthetic-0011",
+      "invocation-key": "inv-synthetic-0100",
       "attempt-id": "attempt-synthetic-0001",
       "idempotency-key": "idem-legacy-0001"
     }

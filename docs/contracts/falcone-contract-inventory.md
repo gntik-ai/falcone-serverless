@@ -153,7 +153,7 @@ before invocation.
 | docs/contracts/fixtures/legacy-envelope/valid/200-yaml.json | e5afd3a7fd5f6dd1b4c90f58fb3ba40e6abbb2208f1edbafa30031438e5ed7db | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
 | docs/contracts/fixtures/legacy-envelope/invalid/missing-path.json | b61cf55fe179fb4174c58d40c3808d4b461039051d5b99bbdbaa4ebc15e2037a | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
 | docs/contracts/fixtures/legacy-envelope/invalid/oversized-body.json | c98ab3c441140257401123d5e32c3b121a4825eb5b1392552a05d7c9be4879c4 | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
-| docs/contracts/fixtures/legacy-envelope/invalid/non-JSON-body.json | c3117c704d890e185cb3eb4ea2da1c77644009cfb70984094da28188d8d38527 | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+| docs/contracts/fixtures/legacy-envelope/invalid/non-JSON-body.json | bb28023f7e5605b798847b5aedf913598fc0b2edace94997dfdd8eec1d9227da | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
 
 The valid fixtures cover exactly these paths: 401, 400, 429, 404, 403, 304, 200-json and 200-yaml.
 Valid 400 has a present `__ow_path` that does not match the workspace route; invalid missing-path omits `__ow_path` entirely. They are distinct cases.
