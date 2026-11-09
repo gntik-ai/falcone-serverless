@@ -193,7 +193,7 @@ func schemaError(root, s map[string]any, v any) error {
 }
 
 func TestSchemaConformance(t *testing.T) {
-	for _, version := range []string{"v1", "v1.1"} {
+	for _, version := range []string{"v1", "v1.1", "v1.2"} {
 		schema := readJSON(t, version+"/pool-status.schema.json")
 		fixtures := readJSON(t, version+"/conformance.json")
 		for _, group := range []string{"valid", "invalid"} {
@@ -212,7 +212,7 @@ func TestSchemaConformance(t *testing.T) {
 
 func TestCompatibilityCheck(t *testing.T) {
 	baseline := readJSON(t, "v1/pool-status.schema.json")
-	extended := readJSON(t, "v1.1/pool-status.schema.json")
+	extended := readJSON(t, "v1.2/pool-status.schema.json")
 	if err := compatibleSchemas(t, baseline, extended); err != nil {
 		t.Fatal(err)
 	}
@@ -255,6 +255,29 @@ func TestCompatibilityCheck(t *testing.T) {
 		}
 		if err := compatibleSchemas(t, baseline, schema); err == nil {
 			t.Errorf("%s field accepted", edit)
+		}
+	}
+}
+
+// Revision 1.2 is additive: its schema keeps the revision 1.1 rules byte for byte as
+// a branch and the v1 branch unchanged, and only the current branch adds the lineage.
+func TestRevision12KeepsRevision11Rules(t *testing.T) {
+	v11 := readJSON(t, "v1.1/pool-status.schema.json")["$defs"].(map[string]any)
+	v12 := readJSON(t, "v1.2/pool-status.schema.json")["$defs"].(map[string]any)
+	if !reflect.DeepEqual(v12["legacy"], v11["legacy"]) {
+		t.Fatal("v1 branch changed in revision 1.2")
+	}
+	if !reflect.DeepEqual(v12["revision1_1"], v11["current"]) {
+		t.Fatal("revision 1.1 rules changed in revision 1.2")
+	}
+	if err := compatible(v11["current"].(map[string]any), v12["current"].(map[string]any)); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range readJSON(t, "v1.1/conformance.json")["valid"].([]any) {
+		report := raw.(map[string]any)["report"].(map[string]any)
+		schema := readJSON(t, "v1.2/pool-status.schema.json")
+		if err := schemaError(schema, schema, report); err != nil {
+			t.Fatalf("revision 1.1 report %v rejected by the 1.2 schema: %v", raw.(map[string]any)["name"], err)
 		}
 	}
 }

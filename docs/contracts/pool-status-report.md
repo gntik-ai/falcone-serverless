@@ -2,7 +2,7 @@
 
 Contract: ctr-pool-status-report
 contractVersion: 1
-contractRevision: 1.1
+contractRevision: 1.2
 
 This is the report a namespaced pool controller sends to Falcone for DEP-03,
 implementing FR-DEP-05 (a restarted controller converges on one pool
@@ -23,11 +23,16 @@ changes take a minor `contractRevision`; breaking changes bump the integer
 (`controller/pool_status_report_contract_test.go`). This follows the additive
 versioning policy in [the inventory](falcone-contract-inventory.md).
 
+Revision 1.2 adds the reporter lineage (`reporterLineage`) to the fence; see
+[Generation semantics](#generation-semantics) and [Ordering cases](#ordering-cases).
 The [v1 baseline schema](pool-status/v1/pool-status.schema.json) fixes the original
 contractVersion 1 field table and allows unknown fields for old consumers. The
 [v1.1 schema](pool-status/v1.1/pool-status.schema.json) accepts v1 reports without
-`contractRevision`, and strictly checks revision `"1.1"` reports. Each directory
-contains versioned `conformance.json` examples; Go tests validate both schemas,
+`contractRevision`, and strictly checks revision `"1.1"` reports. The
+[v1.2 schema](pool-status/v1.2/pool-status.schema.json) accepts both of those
+unchanged and strictly checks revision `"1.2"` reports, which differ from 1.1 only
+by the required `reporterLineage`. Each directory
+contains versioned `conformance.json` examples; Go tests validate all three schemas,
 all examples and the encoder, and reject removed or retyped v1 fields.
 No v1 field or condition is removed or renamed. A bare v1 `absenceVerified=true`
 remains valid for compatibility; cleanup consumers must require revision 1.1,
@@ -49,6 +54,7 @@ status and tenant reason from the [Status mapping](#status-mapping) tables.
 | `poolRef.name` | string | yes | operator |
 | `observedGeneration` | integer | yes | operator |
 | `reporterEpoch` | integer | yes | operator |
+| `reporterLineage` | string | 1.2 | operator |
 | `observationSeq` | integer | yes | operator |
 | `desiredReplicas` | integer | yes | operator |
 | `readyReplicas` | integer | yes | operator |
@@ -94,8 +100,9 @@ Notes:
   `runtimeMode` is `oci` and absent otherwise. `no` means optional. `entry`
   means required whenever its containing entry or object is present.
   `TerminationPending` requires remainingDescendants only for that condition.
-  The extension rows apply to contractRevision 1.1; v1 has only the original
-  rows through materialized. All new fields have operator visibility.
+  The extension rows apply to contractRevision 1.1 and later; v1 has only the
+  original rows through materialized. `1.2` means required in revision 1.2 and
+  forbidden in 1.1 and v1. All new fields have operator visibility.
 - `revision` is the Falcone revision ID of the single revision an OCI pool
   serves. For `oci`, `revisions` holds exactly the entry named by `revision`.
   `materialized` is true while the pool's Deployment and Service exist and false
@@ -108,7 +115,7 @@ Notes:
 
 ### Object identity and cleanup evidence
 
-`contractRevision` is the string `"1.1"`. `ownedObjects` records only verified
+`contractRevision` is the string `"1.1"` or `"1.2"`; a controller emits `"1.2"`. `ownedObjects` records only verified
 pool-scoped Deployments, Services and Leases in the authoritative pool binding.
 Each identity contains the UID and resourceVersion observed after the last
 controller or scaler write. These are report values only: they never replace the
@@ -224,7 +231,16 @@ rules and never changes stored state.
 - `reporterEpoch` is the fencing token of the controller's namespaced Lease
   (FR-STO-06). It must be monotonic across leader changes. If the controller
   cannot read a monotonic fencing token from its Lease, `contractVersion` must be
-  bumped before it reports.
+  bumped before it reports. The controller reads the epoch recorded on the Lease,
+  writes the epoch plus one with optimistic concurrency (resourceVersion) for a new
+  term, and never derives it from a wall clock.
+- `reporterLineage` (revision 1.2) is the `metadata.uid` of that Lease, a
+  non-empty string without whitespace. An epoch is monotonic only within one
+  Lease, so deleting and recreating the Lease starts a new lineage whose epochs
+  restart and can equal numbers the receiver already accepted. The lineage is
+  what tells the two apart. Every fenced write and report carries it with the
+  epoch and sequence. The controller never infers, learns or persists a
+  lineage or epoch from a receiver refusal.
 - A changed `readAt` or `resourceVersion` is a different payload and requires
   a new `observationSeq`. Reusing an equal key for that payload is refused as
   a conflict. Encoding the same observation must be deterministic.
@@ -240,10 +256,18 @@ rules and never changes stored state.
 
 Falcone compares a report's key `(observedGeneration, reporterEpoch,
 observationSeq)` with the stored key lexicographically: generation first, then
-epoch, then sequence. A report with `observedGeneration` above Falcone's current
+epoch, then sequence, within one lineage. A report with `observedGeneration` above Falcone's current
 desired generation is refused before any key comparison. A report whose
 `reporterEpoch` is below the stored epoch comes from a fenced reporter: it is
-refused, state unchanged, whatever its generation or sequence. Otherwise:
+refused, state unchanged, whatever its generation or sequence. The receiver
+records the lineage with the epoch and sequence it stores, and refuses any
+revision 1.2 report whose `reporterLineage` differs from the recorded one,
+whatever its epoch, generation or sequence, with the state unchanged. This check
+runs before the epoch guard and the key comparison, so a recreated Lease cannot
+publish at an equal, lower or higher epoch until an operator resets the receiver's
+recorded lineage and epoch for this singleton, after which the receiver adopts the
+lineage of the next accepted report. Ordering within one lineage is
+unchanged. Otherwise:
 
 - Lower key: refused, state unchanged.
 - Equal key and identical payload: a replay, accepted as a no-op.
@@ -269,6 +293,20 @@ Outcomes are `applied`, `replay_noop`, `refused` and `conflict_refused`. Keys ar
 | G7 | (5,2,10) | (5,3,1) | different | 5 | applied | higher epoch, lower seq |
 | G8 | (5,2,10) | (7,2,1) | different | 6 | refused | generation above desired |
 | G9 | (5,2,10) | (6,1,1) | different | 6 | refused | lower epoch, higher generation |
+
+Lineage cases extend the table above across a Lease deletion. Keys are
+`(generation,epoch,seq)` and both lineages are literals. A report with a recorded
+lineage and key is judged first by lineage, then by the rows above.
+
+| Lineage case | Stored lineage | Report lineage | Stored key | Report key | Outcome | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| L1 | A | A | (5,2,10) | (5,2,11) | applied | same lineage, ordering unchanged |
+| L2 | A | B | (5,2,10) | (5,2,11) | refused | different lineage, higher seq |
+| L3 | A | B | (5,2,10) | (5,2,10) | refused | different lineage, equal key, never a replay or conflict |
+| L4 | A | B | (5,2,10) | (5,3,1) | refused | different lineage, higher epoch |
+| L5 | A | B | (5,2,10) | (5,1,1) | refused | different lineage, lower epoch |
+| L6 | A | B | (5,2,10) | (6,9,1) | refused | different lineage, higher generation and epoch |
+| L7 | A | A | (5,2,10) | (5,1,99) | refused | same lineage, fenced epoch |
 
 ## Repair conditions
 
@@ -297,7 +335,7 @@ is not a routing input: traffic gating uses readiness only.
 | `unavailable` | The pool has no ready capacity it should have, or a failure condition below is present |
 | `deploying` | observedGeneration is below Falcone's desired generation, or readyReplicas is below desiredReplicas with no failure condition |
 | `active` | observedGeneration equals the desired generation and readyReplicas equals desiredReplicas, including a pool scaled to zero |
-| `deletion_pending` | Falcone has recorded deletion; stays pending until contractRevision is 1.1, absenceVerified=true and nonempty verifiedAbsence evidence are present together |
+| `deletion_pending` | Falcone has recorded deletion; stays pending until contractRevision is 1.1 or later, absenceVerified=true and nonempty verifiedAbsence evidence are present together |
 
 ### OCI conditions
 

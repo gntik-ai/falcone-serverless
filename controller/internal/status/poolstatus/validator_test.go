@@ -1,6 +1,7 @@
 package poolstatus_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -10,7 +11,7 @@ import (
 
 func fixtureReport(t *testing.T, name string) map[string]any {
 	t.Helper()
-	for _, raw := range readJSON(t, "v1.1/conformance.json")["valid"].([]any) {
+	for _, raw := range readJSON(t, "v1.2/conformance.json")["valid"].([]any) {
 		f := raw.(map[string]any)
 		if f["name"] == name {
 			return f["report"].(map[string]any)
@@ -55,7 +56,7 @@ func TestOCIMaterializationFixtures(t *testing.T) {
 }
 
 func TestAbsenceRejectsContradictoryState(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	for _, flag := range []bool{false, true} {
 		for _, state := range []string{"owned-object", "materialized", "ready-replicas", "ready-capacity", "ready-revision", "UIDMismatch", "ResourceVersionMismatch", "OwnershipMismatch", "MissingPreconditions", "TerminationPending"} {
 			t.Run(fmt.Sprintf("%v/%s", flag, state), func(t *testing.T) {
@@ -120,7 +121,7 @@ func TestWireIdentitiesStayWithinPool(t *testing.T) {
 				r["poolRef"].(map[string]any)["name"] = edit
 				o["kind"], o["name"] = "Lease", edit
 				r["conditions"] = []any{}
-				schema := readJSON(t, "v1.1/pool-status.schema.json")
+				schema := readJSON(t, "v1.2/pool-status.schema.json")
 				if err := schemaError(schema, schema, r); err == nil {
 					t.Error("schema accepted singleton Lease")
 				}
@@ -133,7 +134,7 @@ func TestWireIdentitiesStayWithinPool(t *testing.T) {
 }
 
 func TestValidatorConformance(t *testing.T) {
-	for _, version := range []string{"v1", "v1.1"} {
+	for _, version := range []string{"v1", "v1.1", "v1.2"} {
 		fixtures := readJSON(t, version+"/conformance.json")
 		for _, group := range []string{"valid", "invalid"} {
 			for _, raw := range fixtures[group].([]any) {
@@ -150,7 +151,7 @@ func TestValidatorConformance(t *testing.T) {
 }
 
 func TestSchemaAndValidatorRejectInvalidIdentitiesAndShapes(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	for _, edit := range []string{"owned-kind", "owned-empty-uid", "owned-empty-resourceVersion", "objectRef-kind", "objectRef-singleton-leader", "objectRef-singleton-scaler", "descendants-on-repair", "negative-generation"} {
 		t.Run(edit, func(t *testing.T) {
 			r := fixtureReport(t, "ImagePullFailed")
@@ -210,14 +211,14 @@ func TestValidatorRejectsUnknownRevisionAlone(t *testing.T) {
 	if err := poolstatus.ValidateJSON(encoded(t, r)); err != nil {
 		t.Fatal("control report must be valid", err)
 	}
-	r["contractRevision"] = "1.2"
+	r["contractRevision"] = "1.3"
 	if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
 		t.Fatal("unknown revision accepted on an otherwise valid report")
 	}
 }
 
 func TestValidatorAcceptsJSONSchemaIntegerForms(t *testing.T) {
-	for _, version := range []string{"v1", "v1.1"} {
+	for _, version := range []string{"v1", "v1.1", "v1.2"} {
 		schema := readJSON(t, version+"/pool-status.schema.json")
 		for _, number := range []string{"1.0", "1e2", "100e-2", "9.223372036854775807e18", "-9.223372036854775808e18", "0e-1000000"} {
 			t.Run(version+"/"+number, func(t *testing.T) {
@@ -291,7 +292,7 @@ func TestLegacyIgnoresCaseVariantsOfKnownFields(t *testing.T) {
 }
 
 func TestSchemaAndValidatorRejectMalformedEvidence(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	for _, edit := range []string{"empty-proof", "null-generation", "null-absent", "null-count", "unknown-absent", "wrong-reason", "empty-wasm-revision", "empty-wasm-evidence-revision"} {
 		t.Run(edit, func(t *testing.T) {
 			r := fixtureReport(t, "verified-absence-wasm")
@@ -326,5 +327,76 @@ func TestSchemaAndValidatorRejectMalformedEvidence(t *testing.T) {
 				t.Fatal("Go validator accepted malformed evidence")
 			}
 		})
+	}
+}
+
+func TestRevision12RequiresALineageAndRevision11ForbidsIt(t *testing.T) {
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
+	r := fixtureReport(t, "UIDMismatch")
+	if r["contractRevision"] != "1.2" || r["reporterLineage"] == "" {
+		t.Fatalf("fixture must be a revision 1.2 report with a lineage: %v", r)
+	}
+	for _, edit := range []string{"missing", "empty", "blank", "inner-space", "number", "null", "on-1.1"} {
+		t.Run(edit, func(t *testing.T) {
+			r := clone(t, r)
+			switch edit {
+			case "missing":
+				delete(r, "reporterLineage")
+			case "empty":
+				r["reporterLineage"] = ""
+			case "blank":
+				r["reporterLineage"] = " "
+			case "inner-space":
+				r["reporterLineage"] = "a b"
+			case "number":
+				r["reporterLineage"] = 7
+			case "null":
+				r["reporterLineage"] = nil
+			case "on-1.1":
+				r["contractRevision"] = "1.1"
+			}
+			if err := schemaError(schema, schema, r); err == nil {
+				t.Error("schema accepted the report")
+			}
+			if err := poolstatus.ValidateJSON(encoded(t, r)); err == nil {
+				t.Error("validator accepted the report")
+			}
+		})
+	}
+	t.Run("revision 1.1 without lineage stays valid", func(t *testing.T) {
+		r := clone(t, r)
+		delete(r, "reporterLineage")
+		r["contractRevision"] = "1.1"
+		if err := poolstatus.ValidateJSON(encoded(t, r)); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestEncoderCarriesTheLineageAndTheKillSwitchEmitsV1(t *testing.T) {
+	report := decodeFixtureReport(t, "UIDMismatch")
+	scope := poolstatus.Scope{PoolRef: report.PoolRef, OwnerAnnotation: `["own-tenant","own-profile"]`}
+	data, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got poolstatus.Report
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ContractRevision != "1.2" || got.ReporterLineage != "3f6d1c52-8a47-4e0b-9b1e-5c2a7d9e4f10" {
+		t.Fatalf("revision %q, lineage %q", got.ContractRevision, got.ReporterLineage)
+	}
+	report.ReporterLineage = ""
+	if data, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{}); err == nil || len(data) != 0 {
+		t.Fatal("encoder emitted a revision 1.2 report without a lineage")
+	}
+	report.ReporterLineage = "uid-1"
+	legacy, err := poolstatus.Encode(report, scope, nil, poolstatus.Options{DisableExtensions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(legacy, []byte("reporterLineage")) || bytes.Contains(legacy, []byte("contractRevision")) {
+		t.Fatalf("kill switch must emit plain v1: %s", legacy)
 	}
 }

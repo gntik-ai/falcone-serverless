@@ -16,7 +16,12 @@ import (
 	"time"
 )
 
-const ContractRevision = "1.1"
+// ContractRevision is the revision the encoder emits. Revision 1.1 stays valid on
+// the wire, and revision 1.2 adds the reporter lineage (the singleton Lease UID).
+const (
+	ContractRevision = "1.2"
+	revision11       = "1.1"
+)
 
 // Match the published schema's syntax as well as parsing the calendar date:
 // time.Parse alone accepts a single-digit hour, comma fractions and +24:00.
@@ -38,6 +43,7 @@ var ConditionReasons = map[string]string{
 	"Dematerialized": "dematerialized",
 }
 var ObjectKinds = []string{"Deployment", "Service", "Lease"}
+var RequiredLineageFields = []string{"reporterLineage"}
 var RequiredReportFields = []string{"poolRef", "observedGeneration", "reporterEpoch", "observationSeq", "desiredReplicas", "readyReplicas", "revisions", "readyCapacity", "draining", "conditions", "absenceVerified", "runtimeMode"}
 var RequiredPoolRefFields = []string{"namespace", "name"}
 var RequiredRevisionFields = []string{"revision", "ready"}
@@ -95,6 +101,7 @@ type Report struct {
 	PoolRef            PoolRef           `json:"poolRef"`
 	ObservedGeneration int64             `json:"observedGeneration"`
 	ReporterEpoch      int64             `json:"reporterEpoch"`
+	ReporterLineage    string            `json:"reporterLineage,omitempty"`
 	ObservationSeq     int64             `json:"observationSeq"`
 	DesiredReplicas    int64             `json:"desiredReplicas"`
 	ReadyReplicas      int64             `json:"readyReplicas"`
@@ -129,7 +136,7 @@ var text = field{kind: "string"}
 var integer = field{kind: "integer"}
 var boolean = field{kind: "boolean"}
 
-func wireShape(extended bool) field {
+func wireShape(extended, lineage bool) field {
 	condition := object(map[string]field{"type": text, "reason": text}, RequiredConditionFields...)
 	props := map[string]field{
 		"poolRef":            object(map[string]field{"namespace": text, "name": text}, RequiredPoolRefFields...),
@@ -150,7 +157,12 @@ func wireShape(extended bool) field {
 		props["verifiedAbsence"] = array(object(map[string]field{"revision": text, "generation": integer, "readAt": text, "absent": object(absent, RequiredAbsentFields...)}, RequiredAbsenceFields...))
 	}
 	props["conditions"] = array(condition)
-	return object(props, RequiredReportFields...)
+	required := RequiredReportFields
+	if lineage {
+		props["reporterLineage"] = text
+		required = append(slices.Clone(required), RequiredLineageFields...)
+	}
+	return object(props, required...)
 }
 func (f field) check(v any, strict bool) error {
 	switch f.kind {
@@ -265,10 +277,11 @@ func ValidateJSON(data []byte) error {
 		return errors.New("trailing JSON data")
 	}
 	rev, extended := doc["contractRevision"]
-	if extended && rev != ContractRevision {
+	if extended && rev != revision11 && rev != ContractRevision {
 		return errors.New("unsupported contractRevision")
 	}
-	shape := wireShape(extended)
+	// Revision 1.1 keeps its strict field set, so a lineage there is an unknown field.
+	shape := wireShape(extended, rev == ContractRevision)
 	if err := shape.check(doc, extended); err != nil {
 		return err
 	}
@@ -329,6 +342,9 @@ func validate(r Report, extended bool) error {
 	}
 	if !extended {
 		return nil
+	}
+	if r.ContractRevision == ContractRevision && (r.ReporterLineage == "" || strings.ContainsAny(r.ReporterLineage, " \t\r\n")) {
+		return errors.New("revision 1.2 requires a reporterLineage without whitespace")
 	}
 	absenceClaim := r.AbsenceVerified || len(r.VerifiedAbsence) != 0
 	if absenceClaim {
