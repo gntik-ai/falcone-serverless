@@ -3,7 +3,7 @@
 use super::{Host, runtime};
 use crate::artifact::validate::{HANDLER_EXPORT, validate};
 use wasmtime::component::{Component, ComponentType, Lift, TypedFunc};
-use wasmtime::{Engine, Store};
+use wasmtime::{CallHook, Engine, Store};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecutionError {
@@ -32,6 +32,7 @@ type Handle = TypedFunc<(Vec<u8>,), (Result<Vec<u8>, HandlerError>,)>;
 pub struct Prepared {
     store: Store<Host>,
     handle: Handle,
+    import_fuel: usize,
 }
 impl Prepared {
     /// Validates before Component::new, linking or any guest start function.
@@ -58,7 +59,25 @@ impl Prepared {
         let handle = instance
             .get_typed_func::<(Vec<u8>,), (Result<Vec<u8>, HandlerError>,)>(&mut store, index)
             .map_err(|_| ExecutionError::new("invalid_handler_signature"))?;
-        Ok(Self { store, handle })
+        let import_fuel = store.hostcall_fuel();
+        store.call_hook(move |mut store, transition| {
+            // A core export has returned, but Wasmtime has not yet lifted its
+            // result. Bound that lift before Vec/String allocation. UTF-8 is
+            // validated up front, so encoded bytes equal host allocation bytes.
+            // On entry to guest code (including realloc/post-return) and host
+            // imports, preserve the existing import allowance and WIT errors.
+            let fuel = match transition {
+                CallHook::ReturningFromWasm => store.data().input_limit(),
+                _ => import_fuel,
+            };
+            store.set_hostcall_fuel(fuel);
+            Ok(())
+        });
+        Ok(Self {
+            store,
+            handle,
+            import_fuel,
+        })
     }
 
     fn completion(&self) -> Result<(), ExecutionError> {
@@ -73,11 +92,9 @@ impl Prepared {
         if params.len() > self.store.data().output_limit() {
             return Err(ExecutionError::new("buffer_limit_exceeded"));
         }
-        // Wasmtime 49 charges list/string bytes before allocating a lifted
-        // Vec/String. Validation guarantees UTF-8, so encoded == decoded bytes.
-        // This must be the configured guest-to-host limit, including for errors.
-        self.store
-            .set_hostcall_fuel(self.store.data().input_limit());
+        // Restore import accounting before argument lowering, including on a
+        // repeated call. The hook applies the configured limit only on return.
+        self.store.set_hostcall_fuel(self.import_fuel);
         let result = self.handle.call(&mut self.store, (params.to_vec(),));
         // Both success and error paths, including traps/post-return, must pass
         // the same completion gate. Never publish output before this point.

@@ -9,6 +9,10 @@ pub fn main() -> std::process::ExitCode {
         ),
         ("host_capability", version_two_host_capability_is_callable),
         (
+            "host_import_limits",
+            handler_logging_preserves_host_import_limits,
+        ),
+        (
             "signature_before_host_call",
             handler_rejections_precede_guest_start_and_host_calls,
         ),
@@ -42,6 +46,10 @@ pub fn main() -> std::process::ExitCode {
         ),
         ("cancelled_success", cancellation_precedes_success),
         ("cancelled_error", cancellation_precedes_handler_error),
+        (
+            "cancelled_expired_before_guest_call",
+            cancellation_precedes_expired_invocation_before_guest_call,
+        ),
         ("expired_success", deadline_precedes_success),
         ("expired_error", deadline_precedes_handler_error),
     ];

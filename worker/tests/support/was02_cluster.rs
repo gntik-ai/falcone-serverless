@@ -374,11 +374,7 @@ impl Cluster for RealCluster {
                     .runtime
                     .block_on(pods.logs(name, &LogParams::default()))
                     .map_err(api_error)?;
-                return if logs.lines().any(|line| {
-                    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|record| {
-                        record == serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})
-                    })
-                }) {
+                return if qualification_logs_passed(&logs) {
                     Ok(())
                 } else {
                     Err("WAS-02 qualification success record missing".into())
@@ -390,6 +386,38 @@ impl Cluster for RealCluster {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
+}
+
+/// The qualification pod's JSON-lines output is the harness's evidence boundary.
+pub fn qualification_logs_passed(logs: &str) -> bool {
+    let records: Vec<serde_json::Value> = logs.lines()
+        .filter_map(|line| serde_json::from_str(line).ok()).collect();
+    if !records.contains(&serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})) {
+        return false;
+    }
+    if QUALIFICATION_CHECK != "handler_execution" {
+        return true;
+    }
+    // Independent of the runner's dispatch table: deleting a security case
+    // there must make the live qualification fail, even with a passed aggregate.
+    [
+        "successful_handler_call",
+        "host_capability",
+        "host_import_limits",
+        "signature_before_host_call",
+        "utf16_before_host_call",
+        "latin1_before_host_call",
+        "host_to_guest_limits",
+        "guest_to_host_limits",
+        "guest_to_host_allocations",
+        "timeout_isolation",
+        "blocked_host_call_deadline",
+        "cancelled_success",
+        "cancelled_error",
+        "cancelled_expired_before_guest_call",
+        "expired_success",
+        "expired_error",
+    ].iter().all(|case| records.contains(&serde_json::json!({"case":case,"status":"passed"})))
 }
 
 #[test]

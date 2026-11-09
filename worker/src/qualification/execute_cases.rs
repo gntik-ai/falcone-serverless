@@ -83,6 +83,45 @@ pub fn version_two_host_capability_is_callable() {
     assert_eq!(bindings.0.load(Ordering::SeqCst), 1);
 }
 
+/// Observe import results through handle, including the WIT limit-exceeded
+/// response. Return-payload limits must not change host import semantics.
+#[cfg_attr(test, test)]
+pub fn handler_logging_preserves_host_import_limits() {
+    let _case = crate::capability_support::serial_case();
+    struct Logs(AtomicUsize);
+    impl Bindings for Logs {
+        fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+            let Operation::Log {
+                message, fields, ..
+            } = operation
+            else {
+                panic!("expected logging operation")
+            };
+            assert!(message == "a".repeat(60) || message == "a".repeat(100));
+            assert_eq!(fields.len(), 1);
+            assert_eq!(fields[0].name, "k");
+            assert_eq!(fields[0].value, "v");
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Reply::Empty)
+        }
+    }
+    let engine = engine();
+    let bindings = Arc::new(Logs(AtomicUsize::new(0)));
+    let host = Host::with_limits(Context::default(), bindings.clone(), limits(128, 30000));
+    let mut prepared = host::Prepared::new(
+        &engine,
+        include_bytes!("execute_fixtures/logging.wasm"),
+        host,
+    )
+    .unwrap();
+    for len in [60_u32, 100, 200] {
+        let result = prepared.call(&len.to_le_bytes()).unwrap();
+        // Canonical result<(), host-error>: ok or err(limit-exceeded).
+        assert_eq!(result, if len == 200 { [1, 1] } else { [0, 0] });
+    }
+    assert_eq!(bindings.0.load(Ordering::SeqCst), 2);
+}
+
 #[cfg_attr(test, test)]
 pub fn utf8_result_and_error_payloads_obey_configured_limits() {
     let _case = crate::capability_support::serial_case();
@@ -168,9 +207,11 @@ use std::time::{Duration, Instant};
 struct Completion {
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
     delay: Duration,
+    calls: AtomicUsize,
 }
 impl Bindings for Completion {
     fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         std::thread::sleep(self.delay);
         if let Some(cancel) = self.cancellation.lock().unwrap().as_ref() {
             cancel.store(true, Ordering::Release);
@@ -182,6 +223,7 @@ fn completion(kind: u8, cancel: bool, expire: bool) {
     let engine = engine();
     let bindings = Arc::new(Completion {
         cancellation: Mutex::new(None),
+        calls: AtomicUsize::new(0),
         delay: if expire {
             Duration::from_millis(100)
         } else {
@@ -193,17 +235,6 @@ fn completion(kind: u8, cancel: bool, expire: bool) {
         bindings.clone(),
         limits(128, if expire { 50 } else { 30000 }),
     );
-    if cancel && expire {
-        let flag = host.cancellation();
-        let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();
-        std::thread::sleep(Duration::from_millis(70));
-        flag.store(true, Ordering::Release);
-        assert_eq!(
-            prepared.call(&command(3, kind, 1)).unwrap_err().code,
-            "cancelled"
-        );
-        return;
-    }
     if cancel {
         *bindings.cancellation.lock().unwrap() = Some(host.cancellation());
     }
@@ -212,18 +243,40 @@ fn completion(kind: u8, cancel: bool, expire: bool) {
         result.unwrap_err().code,
         if cancel { "cancelled" } else { "guest_timeout" }
     );
+    assert_eq!(
+        bindings.calls.load(Ordering::SeqCst),
+        1,
+        "must pass the pre-call gate"
+    );
 }
 #[cfg_attr(test, test)]
 pub fn cancellation_precedes_success() {
     let _case = crate::capability_support::serial_case();
     completion(0, true, false);
-    completion(0, true, true);
 }
 #[cfg_attr(test, test)]
 pub fn cancellation_precedes_handler_error() {
     let _case = crate::capability_support::serial_case();
     completion(2, true, false);
-    completion(2, true, true);
+}
+
+#[cfg_attr(test, test)]
+pub fn cancellation_precedes_expired_invocation_before_guest_call() {
+    let _case = crate::capability_support::serial_case();
+    let engine = engine();
+    for kind in [0, 2] {
+        let bindings = Arc::new(Count::default());
+        let host = Host::with_limits(Context::default(), bindings.clone(), limits(128, 50));
+        let flag = host.cancellation();
+        let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();
+        std::thread::sleep(Duration::from_millis(70));
+        flag.store(true, Ordering::Release);
+        assert_eq!(
+            prepared.call(&command(3, kind, 1)).unwrap_err().code,
+            "cancelled"
+        );
+        assert_eq!(bindings.0.load(Ordering::SeqCst), 0);
+    }
 }
 #[cfg_attr(test, test)]
 pub fn deadline_precedes_success() {
@@ -325,6 +378,7 @@ pub fn guest_deadline_also_bounds_a_blocked_host_call() {
     let binding = Arc::new(Completion {
         cancellation: Mutex::new(None),
         delay: Duration::from_millis(400),
+        calls: AtomicUsize::new(0),
     });
     let host = Host::with_limits(Context::default(), binding, limits(128, 50));
     let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();

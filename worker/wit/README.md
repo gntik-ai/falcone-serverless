@@ -69,6 +69,10 @@ legacy JSON envelope and returns the JSON result envelope. `handler-error` has
 `invalid-input(string)` and `failed(string)` cases. Params use the configured
 host-to-guest ceiling; result and error payloads use the configured guest-to-host
 ceiling, counting UTF-8 bytes without ABI metadata. No partial result is returned.
+Wasmtime's call hook applies the return-lifting budget after the guest returns,
+before allocating the result or error. Capability imports retain their existing
+aggregate accounting and return WIT `limit-exceeded` errors for oversized inputs.
+The hook also preserves eager lifting before guest post-return cleanup runs.
 Only UTF-8 canonical string encoding is accepted, including on host imports.
 Validation rejects missing exports, incorrect signatures and unsupported encodings
 before compilation or instantiation. Cancellation takes precedence over deadline

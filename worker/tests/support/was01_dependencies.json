@@ -305,7 +305,8 @@
           "runtime",
           "std",
           "wat",
-          "component-model"
+          "component-model",
+          "call-hook"
         ],
         "version": "=49.0.5"
       }

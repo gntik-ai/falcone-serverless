@@ -32,7 +32,14 @@ fn pinned_versions_and_inventory() {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["cranelift", "runtime", "std", "wat", "component-model"]
+        [
+            "cranelift",
+            "runtime",
+            "std",
+            "wat",
+            "component-model",
+            "call-hook"
+        ]
     );
     assert_eq!(
         document("worker/Cargo.toml")["dependencies"]["wasmtime"]["workspace"].as_bool(),
@@ -162,9 +169,19 @@ fn source_valid(path: &Path, source: &str) -> bool {
     ]
     .iter()
     .any(|allowed| path == Path::new(allowed));
+    // WAS-01 handler execution needs typed component calls, a qualification CLI
+    // engine, and shared restricted-pod cases. Keep these exact exceptions;
+    // neighbouring modules still cannot construct engines or load components.
+    let execution = [
+        "host/execute.rs",
+        "main.rs",
+        "qualification/execute_cases.rs",
+    ]
+    .iter()
+    .any(|allowed| path == Path::new(allowed));
     (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
         && !source.contains("tests/")
-        && (!source.contains("wasmtime::") || engine || bin || capability)
+        && (!source.contains("wasmtime::") || engine || bin || capability || execution)
         && (!source.contains("Status::Passed") || outcome)
         && (!(runner || bin) || (!source.contains("env::args") && !source.contains("Engine::new")))
 }
@@ -175,10 +192,18 @@ fn scan_sources(dir: &Path, prefix: &Path) {
         if path.is_dir() {
             scan_sources(&path, prefix);
         } else {
+            // Embedded component binaries have independent WAT oracles in
+            // execute_fixtures; they are not UTF-8 source to scan for APIs.
+            // Check the magic, not the suffix: text cannot evade the scan by
+            // being renamed to .wasm.
+            let bytes = fs::read(&path).unwrap();
+            if bytes.starts_with(b"\0asm") {
+                continue;
+            }
             assert!(
                 source_valid(
                     path.strip_prefix(prefix).unwrap(),
-                    &fs::read_to_string(&path).unwrap()
+                    std::str::from_utf8(&bytes).unwrap()
                 ),
                 "{}",
                 path.display()

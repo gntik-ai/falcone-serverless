@@ -6,6 +6,7 @@ fn embedded_execute_components_match_the_wat_sources() {
     for name in [
         "echo",
         "actions",
+        "logging",
         "start-empty",
         "start-signature",
         "utf16",
