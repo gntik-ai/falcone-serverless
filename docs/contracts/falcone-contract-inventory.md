@@ -1,6 +1,6 @@
 # Frozen Falcone contract inventory
 
-Contract version: v1
+Contract version: v1.1
 
 This freezes the v1 compatibility surfaces and evidence levels for MIG-01, not
 deployed acceptance or an enumeration of every live endpoint. No live deployment
@@ -92,6 +92,100 @@ The only outcomes are blocker and candidate. Under ADR 0010, oci-not-authorized
 applies when the target is oci and the workspace lacks OCI authorization at
 cutover; a candidate OCI verdict cannot waive it. Unknown, incomplete or
 non-candidate classifications cannot authorize migration or select another mode.
+
+## Legacy request envelope
+
+Revision v1.1 adds the legacy envelope fixtures that #124 and #126 bind to
+byte for byte (MIG-01.t3). The v1 sections above are unchanged. Legacy handlers
+are called as `main(params)` (row main-params-envelope). The OpenWhisk-style
+request envelope is the flat `params` object:
+
+| Parameter | Meaning |
+| --- | --- |
+| `__ow_method` | Lowercase HTTP method, for example `get` or `post`. |
+| `__ow_headers` | Object of request headers; the reference function reads lowercase names. |
+| `__ow_path` | Request path; required. The reference function extracts the workspace ID from `/v1/workspaces/{id}/openapi`. |
+| `__ow_query` | Object of query parameters; the reference function reads `format`. |
+| `__ow_body` | Request body as text; present only when the request carries a body. |
+
+Action parameters sit beside the `__ow_*` parameters in the same object.
+
+## Legacy result envelope
+
+The handler returns `{statusCode, headers?, body?}`: `statusCode` is an
+integer HTTP status, `headers` an optional object of response headers and `body`
+an optional JSON value or text. A 304 result has no `body`.
+
+The reference function evaluates the request in this order and the first match
+decides the result: auth (tenant and requester headers) 401, path 400, rate
+limit 429, spec lookup 404, tenant 403, ETag 304, format 200 json or yaml. The
+ETag is `"sha256:<hex>"` with the quotes (spec-cache.mjs). Format is yaml when
+`__ow_query.format` is `yaml` or the `accept` header is `application/x-yaml`.
+
+## Invocation identity
+
+The invocation identity maps to the `falcone:host/invocation-context` functions
+`invocation-key`, `attempt-id` and `idempotency-key` (worker/wit/host.wit).
+`idempotency-key` is the `Idempotency-Key` header of the invoke request
+(invokeFunctionAction.json); `invocation-key` and `attempt-id` are synthetic in
+the fixtures because the pinned sources do not define them. The `X-Correlation-Id`
+header travels with the invoke request. None of these identifiers is a credential.
+
+## Legacy envelope fixtures
+
+Fixtures are exact bytes with LF line endings and one final newline; each sha256
+is the lowercase hash of those bytes. Each valid fixture records the request
+`params`, the synthetic `dependencyState` needed to reach its path (rateLimit
+limit, now and prior bucket count; the getCurrentSpec result), the invoke
+headers with the invocation identity, and the `expected` result envelope that
+the reference code produces. Each invalid fixture is expected to be rejected
+before invocation.
+
+| Fixture | sha256 | Falcone source | Revision |
+| --- | --- | --- | --- |
+| docs/contracts/fixtures/legacy-envelope/valid/401.json | 3ed82379573d4d0edf7a1b9a9d4b3cce47640a29bed85df3397ff8ba4e4854ff | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/400.json | 0f09bdb42b0ce1ba49ab3e950ea07136491dfaaaac7a65065b25659a7c16b949 | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/429.json | 27ed6860e27beb0dafb7a144948644c5b6c227f1c7c1f74220fd992b80d0d6c5 | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/404.json | 33bdfb0ccf1d60571f69a9a8e58a6f0abf96629c1f1c5e419cf14b399a80f63a | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/403.json | fdcb8c79b726564c3e5433ab1eb851700dcd234cd32db908840fa795605e5ff8 | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/304.json | 132ae45adf2c663d4ce7ea9bb75ee5e5e56ea5ca76e39a54363419fdf43d9d1b | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/200-json.json | 0fd272cd853f40cad7b3e1886b1c39c0e0004f4ae146456a95b8ee6244160127 | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/valid/200-yaml.json | e5afd3a7fd5f6dd1b4c90f58fb3ba40e6abbb2208f1edbafa30031438e5ed7db | packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f |
+| docs/contracts/fixtures/legacy-envelope/invalid/missing-path.json | b61cf55fe179fb4174c58d40c3808d4b461039051d5b99bbdbaa4ebc15e2037a | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+| docs/contracts/fixtures/legacy-envelope/invalid/oversized-body.json | c98ab3c441140257401123d5e32c3b121a4825eb5b1392552a05d7c9be4879c4 | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+| docs/contracts/fixtures/legacy-envelope/invalid/non-JSON-body.json | c3117c704d890e185cb3eb4ea2da1c77644009cfb70984094da28188d8d38527 | tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+
+The valid fixtures cover exactly these paths: 401, 400, 429, 404, 403, 304, 200-json and 200-yaml.
+Valid 400 has a present `__ow_path` that does not match the workspace route; invalid missing-path omits `__ow_path` entirely. They are distinct cases.
+The invalid fixtures are missing-path, oversized-body and non-JSON-body.
+Size limit source: `max-host-to-guest-bytes` in `worker/wit/host.wit`.
+oversized-body is valid JSON of exactly that limit plus one byte, committed literally.
+All identifiers in the fixtures are synthetic; the fixtures hold no credentials.
+The rejection values are fixture labels, not wire error codes; #124 maps them.
+
+## Legacy envelope source provenance
+
+All sources are in gntik-ai/falcone. Each sha256 is of the file at that revision.
+
+| Source | Revision | sha256 | Role |
+| --- | --- | --- | --- |
+| packages/openapi-sdk-service/actions/openapi-spec-serve.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f | 3827f5e2c7c14cc3cf5abb4eb8272d8cb67938dc4d195723efcf695bf8924ce1 | reference function; defines every valid fixture |
+| packages/openapi-sdk-service/src/config.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f | 749d3fefde37945e57607ae462a6a55ee193181c898ae4bbbd641f1dae0a30e5 | imported helper; default specRateLimitPerMinute 60 |
+| packages/openapi-sdk-service/src/spec-version-repo.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f | 5b13e9bd885954900ddf1d4e2d7b780d5e46d73e09074b31bdf5aa013f5de437 | imported helper; getCurrentSpec result shape |
+| packages/openapi-sdk-service/src/spec-cache.mjs | 10a3c6e7a23c9a29b934c35f0682bbdef232099f | 74883a947b993384a4fe3fd697e7cf4f73bdb2f36ac688ec4303bea43d17e2dc | imported helper; ETag and contentHash format |
+| tests/contracts/functions-api/fixtures/legacy/invokeFunctionAction.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | 46d7d7e19f10b8dac1fc561317a9b0d2e012b184647534c58246605a92505664 | invocation headers; defines every invalid fixture |
+
+The directory tests/contracts/functions-api/fixtures/legacy/ at a19f40ab9e160cd522c110efd50c30b2f5e0d708 holds 23
+control-plane request fixtures; only invokeFunctionAction.json is used here. The
+reference function also imports network.mjs and spec-audit.mjs, which are not
+pinned here: the fire-and-forget spec-accessed audit emission on 200 paths is not
+part of the result envelope and is not recorded.
+
+## Legacy compatibility notes
+
+- The reference function keeps its rate-limit buckets in a module-level Map that persists across warm invocations. Per-invocation isolation (ADR 0004) changes this. #126 must resolve it; this revision only records it.
+- If `__ow_path` is absent the reference function itself answers 400 INVALID_PATH, because `extractWorkspaceId` defaults it to an empty string. The invalid missing-path fixture is a stricter envelope-shape rejection before invocation; it is not a 400 path.
+- The pinned sources do not type the format_json column; the fixtures model formatJson as the text that computeContentHash hashes.
 
 ## Versioning and evidence
 

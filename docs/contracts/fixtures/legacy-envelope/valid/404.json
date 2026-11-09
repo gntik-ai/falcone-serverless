@@ -1,0 +1,40 @@
+{
+  "path": "404",
+  "decidedBy": "spec-lookup",
+  "description": "getCurrentSpec returns no row for the workspace.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0004",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0004/openapi",
+    "__ow_query": {}
+  },
+  "dependencyState": {
+    "rateLimit": {
+      "limit": 60,
+      "now": 1767225600000,
+      "priorBucket": null
+    },
+    "currentSpec": null
+  },
+  "expected": {
+    "statusCode": 404,
+    "body": {
+      "code": "SPEC_NOT_FOUND",
+      "message": "No OpenAPI spec available for workspace"
+    }
+  }
+}

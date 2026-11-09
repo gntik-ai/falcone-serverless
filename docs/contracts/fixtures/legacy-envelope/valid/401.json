@@ -1,0 +1,32 @@
+{
+  "path": "401",
+  "decidedBy": "auth",
+  "description": "No tenant header: authentication is checked before the path.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0001",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+    "__ow_query": {}
+  },
+  "dependencyState": {},
+  "expected": {
+    "statusCode": 401,
+    "body": {
+      "code": "UNAUTHORIZED",
+      "message": "Authentication required"
+    }
+  }
+}
