@@ -78,16 +78,24 @@ pub fn validate(bytes: &[u8], input_bytes: usize) -> Result<Validated<'_>, Error
             // Inspect nested components too: their start code can lower a host string.
             Payload::ComponentCanonicalSection(section) => {
                 for function in section {
-                    if let CanonicalFunction::Lift { options, .. }
-                    | CanonicalFunction::Lower { options, .. } =
-                        function.map_err(|_| invalid())?
-                        && options.iter().any(|option| {
-                            matches!(
-                                option,
-                                CanonicalOption::UTF16 | CanonicalOption::CompactUTF16
-                            )
-                        })
-                    {
+                    let options = match function.map_err(|_| invalid())? {
+                        CanonicalFunction::Lift { options, .. }
+                        | CanonicalFunction::Lower { options, .. }
+                        | CanonicalFunction::TaskReturn { options, .. }
+                        | CanonicalFunction::StreamRead { options, .. }
+                        | CanonicalFunction::StreamWrite { options, .. }
+                        | CanonicalFunction::FutureRead { options, .. }
+                        | CanonicalFunction::FutureWrite { options, .. }
+                        | CanonicalFunction::ErrorContextNew { options }
+                        | CanonicalFunction::ErrorContextDebugMessage { options } => options,
+                        _ => continue,
+                    };
+                    if options.iter().any(|option| {
+                        matches!(
+                            option,
+                            CanonicalOption::UTF16 | CanonicalOption::CompactUTF16
+                        )
+                    }) {
                         return Err(Error::new("unsupported_string_encoding"));
                     }
                 }

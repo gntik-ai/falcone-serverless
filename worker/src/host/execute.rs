@@ -7,7 +7,7 @@ use super::{
 use crate::artifact::validate::{HANDLER_EXPORT, validate};
 use std::time::Instant;
 use wasmtime::component::{Component, ComponentType, Lift, TypedFunc};
-use wasmtime::{Engine, Store};
+use wasmtime::{CallHook, Engine, Store};
 
 #[derive(ComponentType, Lift)]
 #[component(variant)]
@@ -66,11 +66,21 @@ impl Prepared {
         })();
         match result {
             Ok(handler) => {
-                // Wasmtime charges UTF-8/list bytes before allocating them. Its
-                // standard lifting also copies before automatic post-return.
-                // No fixed allowance or metadata deduction: exactly-limit
-                // payloads must fit, including the handler error string.
-                store.set_hostcall_fuel(store.data().input_limit());
+                let import_fuel = store.hostcall_fuel();
+                store.call_hook(move |mut store, hook| {
+                    // In 49.0.5 ReturningFromWasm runs before the component
+                    // result's LiftContext is created. Bound that eager copy,
+                    // including errors, before automatic post-return cleanup.
+                    // Restore the runtime's lazy-cursor allowance whenever
+                    // entering guest code (including realloc and post-return)
+                    // or a host import, preserving the imports' WIT errors.
+                    let fuel = match hook {
+                        CallHook::ReturningFromWasm => store.data().input_limit(),
+                        _ => import_fuel,
+                    };
+                    store.set_hostcall_fuel(fuel);
+                    Ok(())
+                });
                 Ok(Self {
                     store,
                     handler,

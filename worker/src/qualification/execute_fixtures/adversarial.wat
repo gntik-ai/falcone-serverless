@@ -44,10 +44,28 @@
       ;; Modes 5..8 perform a mutation, 9..10 perform a non-mutating log.
       (if (i32.and (i32.ge_u (local.get $mode) (i32.const 5)) (i32.le_u (local.get $mode) (i32.const 8))) (then
         (call $publish (i32.const 32) (i32.const 6) (i32.const 128) (i32.const 0) (i32.const 16))))
-      (if (i32.ge_u (local.get $mode) (i32.const 9)) (then
+      (if (i32.and (i32.ge_u (local.get $mode) (i32.const 9)) (i32.le_u (local.get $mode) (i32.const 11))) (then
         (call $log (i32.const 0) (i32.const 128) (i32.const 0) (i32.const 128) (i32.const 0) (i32.const 16))))
       (if (i32.or (i32.eq (local.get $mode) (i32.const 8)) (i32.or (i32.eq (local.get $mode) (i32.const 3)) (i32.eq (local.get $mode) (i32.const 11)))) (then (loop br 0)))
       (if (i32.or (i32.eq (local.get $mode) (i32.const 4)) (i32.eq (local.get $mode) (i32.const 7))) (then unreachable))
+      ;; Mode 12: an in-limit log with two short fields. The canonical list
+      ;; cursor costs more than the 128-byte payload budget inside Wasmtime.
+      (if (i32.eq (local.get $mode) (i32.const 12)) (then
+        (i32.store (i32.const 256) (i32.const 32))
+        (i32.store (i32.const 260) (i32.const 1))
+        (i32.store (i32.const 264) (i32.const 32))
+        (i32.store (i32.const 268) (i32.const 1))
+        (memory.copy (i32.const 272) (i32.const 256) (i32.const 16))
+        (call $log (i32.const 0) (i32.const 32) (i32.const 1) (i32.const 256) (i32.const 2) (i32.const 16))
+        (if (i32.load8_u (i32.const 16)) (then unreachable))))
+      ;; Mode 13: the guest must receive WIT err(limit-exceeded), then remain
+      ;; able to call another capability. A trap cannot reach this log.
+      (if (i32.eq (local.get $mode) (i32.const 13)) (then
+        (call $publish (i32.const 32) (i32.const 6) (i32.const 1024) (local.get $size) (i32.const 16))
+        (if (i32.ne (i32.load8_u (i32.const 16)) (i32.const 1)) (then unreachable))
+        (if (i32.ne (i32.load8_u (i32.const 17)) (i32.const 1)) (then unreachable))
+        (call $log (i32.const 0) (i32.const 32) (i32.const 6) (i32.const 256) (i32.const 0) (i32.const 16))
+        (local.set $size (i32.const 0))))
       ;; Fill guest output independently of the small parameter envelope.
       (memory.fill (i32.const 128) (i32.const 120) (local.get $size))
       (i32.store (i32.const 0) (i32.const 0))

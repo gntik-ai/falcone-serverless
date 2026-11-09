@@ -6,6 +6,16 @@ use std::sync::Arc;
 type Case = (&'static str, fn());
 pub const CASES: &[Case] = &[
     ("echo", cases::echo),
+    (
+        "import-fields",
+        cases::in_limit_import_fields_keep_their_existing_budget,
+    ),
+    (
+        "import-limit",
+        cases::oversized_import_returns_wit_error_and_guest_continues,
+    ),
+    ("async-utf16", cases::async_utf16_before_host_call),
+    ("async-latin1", cases::async_latin1_before_host_call),
     ("post-return", cases::output_survives_post_return_cleanup),
     (
         "cancel-before-deadline-success",
@@ -90,8 +100,8 @@ pub fn allocation_main() -> ExitCode {
     let limit: usize = args[2].parse().unwrap();
     assert!([128, host::BUFFER_BYTES].contains(&limit));
     let mode = match args[3].as_str() {
-        "result" => 0,
-        "error" => 2,
+        "result" => cases::Mode::Result,
+        "error" => cases::Mode::Failed,
         _ => panic!("unknown allocation case"),
     };
     let engine = cases::engine();

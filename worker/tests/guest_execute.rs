@@ -106,3 +106,32 @@ fn qualification_command_runs_the_selected_case() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"case\":\"post-return\""));
 }
+
+#[test]
+fn async_canonical_options_reject_non_utf8() {
+    let base = include_str!("../src/qualification/execute_fixtures/handler.wat");
+    let with_options = [
+        "(core func (canon task.return (result string) (memory $guest \"memory\") ENCODING))",
+        "(type $s (stream string)) (core func (canon stream.read $s (memory $guest \"memory\") (realloc (func $guest \"realloc\")) async ENCODING))",
+        "(type $s (stream string)) (core func (canon stream.write $s (memory $guest \"memory\") async ENCODING))",
+        "(type $f (future string)) (core func (canon future.read $f (memory $guest \"memory\") (realloc (func $guest \"realloc\")) async ENCODING))",
+        "(type $f (future string)) (core func (canon future.write $f (memory $guest \"memory\") async ENCODING))",
+    ];
+    for canonical in with_options {
+        for encoding in ["string-encoding=utf16", "string-encoding=latin1+utf16"] {
+            let source = base.replacen(
+                "(func $handle",
+                &format!("{} (func $handle", canonical.replace("ENCODING", encoding)),
+                1,
+            );
+            let bytes = wat::parse_str(source).unwrap();
+            let Err(error) = artifact::validate::validate(&bytes, bytes.len()) else {
+                panic!("non-UTF8 canonical accepted");
+            };
+            assert_eq!(
+                error.code, "unsupported_string_encoding",
+                "{canonical} {encoding}"
+            );
+        }
+    }
+}

@@ -69,8 +69,8 @@ legacy JSON input and result envelopes. `handler-error` has exactly
 Only UTF-8 canonical string encoding is accepted. The artifact gate checks the
 single handler instance export, its complete function signature, imports and
 canonical encoding options before `Component::new`, instantiation or start code.
-Non-UTF-8 lift/lower options, including nested components, are rejected with
-`unsupported_string_encoding`; invalid handler types use
+Non-UTF-8 canonical options, including async intrinsics and nested components,
+are rejected with `unsupported_string_encoding`; invalid handler types use
 `invalid_handler_signature`, and missing or different exports use
 `missing_handler_export`.
 
@@ -78,11 +78,16 @@ Non-UTF-8 lift/lower options, including nested components, are rejected with
 passed `outcome::classify`. Uncertainty keeps its existing highest precedence.
 Completion checks cancellation first, then the absolute guest deadline, on both
 success and error paths. No rejected invocation returns partial output.
-Params use the configured host-to-guest byte ceiling. Wasmtime's lifting fuel
-uses the configured guest-to-host ceiling and charges list/UTF-8 string bytes
+Params use the configured host-to-guest byte ceiling. Wasmtime's return-lifting
+fuel uses the configured guest-to-host ceiling and charges list/UTF-8 string bytes
 before allocating result or error payloads. Standard lifting owns the result
 before guest post-return cleanup runs. The ceiling counts payload bytes, so
 exactly-limit payloads are accepted without a fixed metadata deduction.
+Call hooks select that budget only after guest code returns. Guest code,
+including realloc and post-return cleanup, and host imports retain the runtime's
+existing memory-based fuel allowance for lazy cursors. Import payload preflight
+still returns the WIT `limit-exceeded` error instead of trapping on cursor
+metadata, and in-limit logging fields and HTTP headers keep their existing budget.
 Wasmtime 49.0.5 keeps its fuel-exhaustion error type private; the execution path
 maps that exact pinned engine diagnostic to `buffer_limit_exceeded`.
 

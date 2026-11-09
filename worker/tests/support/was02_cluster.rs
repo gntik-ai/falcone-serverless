@@ -496,10 +496,19 @@ fn gate_set_with_invalid_inputs_fails_the_default_run() {
 }
 
 #[test]
-fn requesting_the_live_qualification_without_the_gate_fails() {
-    let (passed, output) = run_self(&["--exact", CLUSTER_TEST, "--ignored"], &[]);
-    assert!(!passed, "an unset gate must not read as a pass: {output}");
-    assert!(output.contains("FS_TEST_CLUSTER is unset"), "{output}");
+fn explicit_live_request_without_gate_reports_the_suite_contract() {
+    let (passed, output) = run_self(&["--exact", CLUSTER_TEST, "--ignored", "--nocapture"], &[]);
+    if CLUSTER_TEST == "cluster_guest_execute" {
+        // WAS-01 requires an explicit skip even when requested with --ignored.
+        assert!(passed, "an unset guest-execute gate must skip: {output}");
+        assert!(
+            output.contains("UNVERIFIED: FS_TEST_CLUSTER unset; no client call"),
+            "{output}"
+        );
+    } else {
+        assert!(!passed, "an unset gate must not read as a pass: {output}");
+        assert!(output.contains("FS_TEST_CLUSTER is unset"), "{output}");
+    }
 }
 
 #[test]

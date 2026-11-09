@@ -51,9 +51,28 @@ pub(super) fn context() -> Context {
         ..Default::default()
     }
 }
-pub(super) fn params(mode: u8, size: usize) -> [u8; 8] {
+/// Modes of the adversarial WAT fixture's parameter envelope. Values are ABI
+/// literals shared with its independently checked binary, not capability IDs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum Mode {
+    Result = 0,
+    InvalidInput = 1,
+    Failed = 2,
+    Trap = 4,
+    MutationSuccess = 5,
+    MutationError = 6,
+    MutationTrap = 7,
+    MutationLoop = 8,
+    LogSuccess = 9,
+    LogError = 10,
+    LogLoop = 11,
+    LogFields = 12,
+    OversizedPublish = 13,
+}
+pub(super) fn params(mode: Mode, size: usize) -> [u8; 8] {
     let mut params = [0; 8];
-    params[0] = mode;
+    params[0] = mode as u8;
     params[4..].copy_from_slice(&(size as u32).to_le_bytes());
     params
 }
@@ -64,17 +83,17 @@ pub(super) fn adversarial() -> &'static [u8] {
 #[cfg_attr(test, test)]
 pub fn configured_output_limit() {
     let engine = engine();
-    for mode in [0, 1, 2] {
+    for mode in [Mode::Result, Mode::InvalidInput, Mode::Failed] {
         for limit in [128, host::BUFFER_BYTES] {
             let host = || Host::with_limits(context(), Arc::new(Empty), limits(limit, 30000));
             let at = host::execute(&engine, adversarial(), host(), &params(mode, limit));
-            if mode == 0 {
+            if mode == Mode::Result {
                 assert_eq!(at.result.unwrap(), vec![b'x'; limit]);
             } else {
                 let error = at.result.unwrap_err();
                 assert_eq!(
                     error.code,
-                    if mode == 1 {
+                    if mode == Mode::InvalidInput {
                         "invalid_input"
                     } else {
                         "handler_failed"
@@ -97,7 +116,7 @@ pub fn oversized_params_never_call_guest() {
         &engine(),
         adversarial(),
         Host::with_limits(context(), Arc::new(Empty), limits(128, 30000)),
-        &[4; 129],
+        &[Mode::Trap as u8; 129],
     );
     assert_eq!(execution.result.unwrap_err().code, "buffer_limit_exceeded");
     let at = host::execute(
@@ -121,7 +140,7 @@ impl Bindings for Cancel {
         Ok(Reply::Empty)
     }
 }
-fn cancelled_completion(mode: u8) {
+fn cancelled_completion(mode: Mode) {
     let binding = Arc::new(Cancel(std::sync::Mutex::new(None)));
     let host = Host::new(context(), binding.clone());
     *binding.0.lock().unwrap() = Some(host.cancellation());
@@ -131,11 +150,11 @@ fn cancelled_completion(mode: u8) {
 }
 #[cfg_attr(test, test)]
 pub fn cancellation_on_success() {
-    cancelled_completion(9);
+    cancelled_completion(Mode::LogSuccess);
 }
 #[cfg_attr(test, test)]
 pub fn cancellation_on_error() {
-    cancelled_completion(10);
+    cancelled_completion(Mode::LogError);
 }
 
 struct Delay;
@@ -145,7 +164,7 @@ impl Bindings for Delay {
         Ok(Reply::Empty)
     }
 }
-fn deadline_completion(mode: u8) {
+fn deadline_completion(mode: Mode) {
     let execution = host::execute(
         &engine(),
         adversarial(),
@@ -156,11 +175,11 @@ fn deadline_completion(mode: u8) {
 }
 #[cfg_attr(test, test)]
 pub fn deadline_on_success() {
-    deadline_completion(9);
+    deadline_completion(Mode::LogSuccess);
 }
 #[cfg_attr(test, test)]
 pub fn deadline_on_error() {
-    deadline_completion(10);
+    deadline_completion(Mode::LogError);
 }
 
 #[cfg_attr(test, test)]
@@ -191,7 +210,7 @@ fn rejected_before_start(bytes: &[u8], code: &str) {
         &engine(),
         bytes,
         Host::new(context(), binding.clone()),
-        &params(0, 0),
+        &params(Mode::Result, 0),
     );
     assert_eq!(result.result.unwrap_err().code, code);
     assert_eq!(binding.0.load(std::sync::atomic::Ordering::SeqCst), 0);
@@ -261,11 +280,18 @@ impl Bindings for Timeout {
         Err(HostError::Timeout)
     }
 }
-fn uncertain(mode: u8, cancel: bool, size: usize) {
+fn uncertain(mode: Mode, cancel: bool, size: usize) {
     let mut host = Host::with_limits(
         context(),
         Arc::new(Empty),
-        limits(128, if mode == 8 { 200 } else { 30000 }),
+        limits(
+            128,
+            if mode == Mode::MutationLoop {
+                200
+            } else {
+                30000
+            },
+        ),
     );
     let flag = host.cancellation();
     host.bindings = Arc::new(Timeout {
@@ -277,23 +303,23 @@ fn uncertain(mode: u8, cancel: bool, size: usize) {
 }
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_success() {
-    uncertain(5, false, 0);
+    uncertain(Mode::MutationSuccess, false, 0);
 }
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_error() {
-    uncertain(6, false, 0);
+    uncertain(Mode::MutationError, false, 0);
 }
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_trap() {
-    uncertain(7, false, 0);
+    uncertain(Mode::MutationTrap, false, 0);
 }
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_cancellation() {
-    uncertain(8, true, 0);
+    uncertain(Mode::MutationLoop, true, 0);
 }
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_size_limit() {
-    uncertain(5, false, 129);
+    uncertain(Mode::MutationSuccess, false, 129);
 }
 #[cfg_attr(test, test)]
 pub fn non_mutating_timeout() {
@@ -301,7 +327,7 @@ pub fn non_mutating_timeout() {
         &engine(),
         adversarial(),
         Host::new(context(), Arc::new(Timeout { cancel: None })),
-        &params(9, 0),
+        &params(Mode::LogSuccess, 0),
     );
     assert_eq!(result.outcome, host::outcome::InvocationOutcome::Cancelled);
     assert_eq!(result.result.unwrap_err().code, "cancelled");
@@ -332,7 +358,7 @@ pub fn timeout_isolation() {
     .unwrap();
     let start = std::time::Instant::now();
     std::thread::scope(|scope| {
-        let running = scope.spawn(|| blocked.call(&params(11, 0)));
+        let running = scope.spawn(|| blocked.call(&params(Mode::LogLoop, 0)));
         receive
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
@@ -353,7 +379,7 @@ impl Bindings for CancelDeadline {
         Ok(Reply::Empty)
     }
 }
-fn cancellation_before_deadline(mode: u8) {
+fn cancellation_before_deadline(mode: Mode) {
     let mut host = Host::with_limits(context(), Arc::new(Empty), limits(128, 200));
     host.bindings = Arc::new(CancelDeadline(host.cancellation()));
     let prepared = host::Prepared::new(&engine(), adversarial(), host).unwrap();
@@ -362,16 +388,16 @@ fn cancellation_before_deadline(mode: u8) {
 }
 #[cfg_attr(test, test)]
 pub fn cancel_before_deadline_success() {
-    cancellation_before_deadline(9);
+    cancellation_before_deadline(Mode::LogSuccess);
 }
 #[cfg_attr(test, test)]
 pub fn cancel_before_deadline_error() {
-    cancellation_before_deadline(10);
+    cancellation_before_deadline(Mode::LogError);
 }
 
 #[cfg_attr(test, test)]
 pub fn uncertainty_on_deadline() {
-    uncertain(8, false, 0);
+    uncertain(Mode::MutationLoop, false, 0);
 }
 
 #[cfg_attr(test, test)]
@@ -387,9 +413,67 @@ pub fn output_survives_post_return_cleanup() {
         &engine(),
         include_bytes!("execute_fixtures/error-post-return.wasm"),
         Host::new(context(), Arc::new(Empty)),
-        &params(2, 16),
+        &params(Mode::Failed, 16),
     );
     let error = result.result.unwrap_err();
     assert_eq!(error.code, "handler_failed");
     assert_eq!(error.message.as_deref(), Some("xxxxxxxxxxxxxxxx"));
+}
+
+struct ImportLog(std::sync::Mutex<Vec<(String, usize)>>);
+impl Bindings for ImportLog {
+    fn call(&self, _: &Context, op: Operation) -> Result<Reply, HostError> {
+        match op {
+            Operation::Log {
+                message, fields, ..
+            } => {
+                self.0.lock().unwrap().push((message, fields.len()));
+                Ok(Reply::Empty)
+            }
+            _ => panic!("oversized import must not reach the binding"),
+        }
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn in_limit_import_fields_keep_their_existing_budget() {
+    let binding = std::sync::Arc::new(ImportLog(std::sync::Mutex::new(Vec::new())));
+    let result = host::execute(
+        &engine(),
+        adversarial(),
+        host::Host::with_limits(context(), binding.clone(), limits(128, 30000)),
+        &params(Mode::LogFields, 1),
+    );
+    assert_eq!(result.result.unwrap(), b"x");
+    assert_eq!(*binding.0.lock().unwrap(), vec![("o".into(), 2)]);
+}
+
+#[cfg_attr(test, test)]
+pub fn oversized_import_returns_wit_error_and_guest_continues() {
+    for limit in [128, host::BUFFER_BYTES] {
+        let binding = std::sync::Arc::new(ImportLog(std::sync::Mutex::new(Vec::new())));
+        let result = host::execute(
+            &engine(),
+            adversarial(),
+            host::Host::with_limits(context(), binding.clone(), limits(limit, 30000)),
+            &params(Mode::OversizedPublish, limit + 1),
+        );
+        assert_eq!(result.result.unwrap_err().code, "buffer_limit_exceeded");
+        assert_eq!(*binding.0.lock().unwrap(), vec![("orders".into(), 0)]);
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn async_utf16_before_host_call() {
+    rejected_before_start(
+        include_bytes!("execute_fixtures/async-utf16.wasm"),
+        "unsupported_string_encoding",
+    );
+}
+#[cfg_attr(test, test)]
+pub fn async_latin1_before_host_call() {
+    rejected_before_start(
+        include_bytes!("execute_fixtures/async-latin1.wasm"),
+        "unsupported_string_encoding",
+    );
 }
