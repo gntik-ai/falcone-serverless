@@ -1,0 +1,1 @@
+(component (core module $m (func (export "handle") (result i32) i32.const 42)) (core instance $m (instantiate $m)) (func $f (result u32) (canon lift (core func $m "handle"))) (instance $h (export "handle" (func $f))) (export "falcone:host/handler@0.2.0" (instance $h)))

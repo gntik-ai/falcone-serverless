@@ -1,10 +1,10 @@
 (component
-  (import "falcone:host/cancellation@0.1.0" (instance $cancel (export "is-cancelled" (func (result bool)))))
-  (import "falcone:host/progress@0.1.0" (instance $progress
+  (import "falcone:host/cancellation@0.2.0" (instance $cancel (export "is-cancelled" (func (result bool)))))
+  (import "falcone:host/progress@0.2.0" (instance $progress
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "report" (func (param "completed" u64) (param "total" u64) (param "message" string) (result (result (error $error)))))))
-  (import "falcone:host/invocation-context@0.1.0" (instance $context (export "invocation-key" (func (result string)))))
+  (import "falcone:host/invocation-context@0.2.0" (instance $context (export "invocation-key" (func (result string)))))
   (core module $memory
     (memory (export "memory") 1 1)
     (func (export "realloc") (param i32 i32 i32 i32) (result i32) (i32.const 1024)))

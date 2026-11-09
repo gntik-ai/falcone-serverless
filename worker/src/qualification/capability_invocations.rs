@@ -471,7 +471,7 @@ pub fn allocation_probe() {
         let mut linker = Linker::<()>::new(&engine);
         if record {
             linker
-                .instance("falcone:host/logging@0.1.0")
+                .instance("falcone:host/logging@0.2.0")
                 .unwrap()
                 .func_wrap(
                     "log",
@@ -491,7 +491,7 @@ pub fn allocation_probe() {
                 .unwrap();
         } else {
             linker
-                .instance("falcone:host/events@0.1.0")
+                .instance("falcone:host/events@0.2.0")
                 .unwrap()
                 .func_wrap("publish", |_, (destination, payload): (String, Vec<u8>)| {
                     std::hint::black_box((&destination, &payload));
@@ -842,10 +842,10 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
         "wasi:filesystem/preopens@0.2.0",
         "wasi:sockets/tcp@0.2.0",
         "wasi:cli/environment@0.2.0",
-        "falcone:host/storage@0.1.0",
-        "falcone:host/http@0.1.0",
-        "falcone:host/events@0.1.0",
-        "falcone:host/workflows@0.1.0",
+        "falcone:host/storage@0.2.0",
+        "falcone:host/http@0.2.0",
+        "falcone:host/events@0.2.0",
+        "falcone:host/workflows@0.2.0",
     ] {
         let binding = Arc::new(Recording::default());
         let source = include_str!("fixtures/capability-import.wat").replace("IMPORT", import);
@@ -863,7 +863,7 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
     }
     let binding = Arc::new(Recording::default());
     let source = include_str!("fixtures/capability-import.wat")
-        .replace("IMPORT", "falcone:host/cancellation@0.1.0");
+        .replace("IMPORT", "falcone:host/cancellation@0.2.0");
     host::instantiate(
         &engine,
         &source,

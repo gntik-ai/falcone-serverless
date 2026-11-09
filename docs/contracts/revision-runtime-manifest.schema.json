@@ -58,7 +58,7 @@
       "minLength": 1
     },
     "interfaceVersion": {
-      "const": "0.1.0"
+      "const": "0.2.0"
     },
     "imports": {
       "type": "array",
@@ -336,7 +336,7 @@
             "properties": {
               "interface": {
                 "enum": [
-                  "falcone:host/storage@0.1.0"
+                  "falcone:host/storage@0.2.0"
                 ]
               },
               "scope": {
@@ -357,7 +357,7 @@
             "properties": {
               "interface": {
                 "enum": [
-                  "falcone:host/http@0.1.0"
+                  "falcone:host/http@0.2.0"
                 ]
               },
               "scope": {
@@ -378,7 +378,7 @@
             "properties": {
               "interface": {
                 "enum": [
-                  "falcone:host/events@0.1.0"
+                  "falcone:host/events@0.2.0"
                 ]
               },
               "scope": {
@@ -399,7 +399,7 @@
             "properties": {
               "interface": {
                 "enum": [
-                  "falcone:host/workflows@0.1.0"
+                  "falcone:host/workflows@0.2.0"
                 ]
               },
               "scope": {

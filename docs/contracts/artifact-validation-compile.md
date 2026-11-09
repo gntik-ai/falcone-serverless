@@ -5,8 +5,9 @@ Version: 3
 
 This versioned contract separates raw Wasm validation, bounded trusted compilation
 and verified native cache loading. Version 3 adds bounded output capture and the
-unwired WAS-02.t6 process-owned, pod-local native cache. It implements no guest
-execution and wires no runtime consumer. Version 2's compile-only API remains compatible.
+WAS-02.t6 process-owned, pod-local native cache. The WAS-01 local worker execute
+command consumes verified entries through this cache; no platform runtime adapter
+is wired. Version 2's compile-only API remains compatible.
 
 ## Input fields
 
@@ -80,10 +81,11 @@ fixture. Production budgets remain owned by WAS-01/profile policy.
 
 Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
 precompiled input), full component-model validation, component-only check, then
-exact top-level interface-instance imports from `falcone:host@0.1.0` world
+exact top-level interface-instance imports from `falcone:host@0.2.0` world
 `function`. Nested core modules are validated too. AVC-R5/profile declared-memory
 checks and guest memory/epoch enforcement remain RUN-01 work; this module does
-not claim to implement them. No runtime consumer is wired into the worker.
+not claim to implement them. The local execute command consumes the verified cache
+before starting its guest deadline; no platform runtime adapter is wired.
 
 
 ## Cancellation boundaries
@@ -201,4 +203,4 @@ add compiler confinement or certify production budgets.
 
 Source builds belong to `ctr-source-build-api` ([source-build.md](source-build.md)); revision metadata belongs to `ctr-revision-runtime-manifest` (WAS-02.t2). Compiler image/runtime configuration and build authorization belong to DEP-01. This contract defines none of those interfaces. No credentials, keys, secret paths or Secret values are specified here.
 
-The contract test remains a documentation gate; WAS-02.t5 adds Linux executable validation and compile-containment fixtures. These do not claim WAS-01 runtime qualification. Rollout is merge-only with no runtime consumer; revert Version 2 and its implementation before a consumer pins it. Future runtime implementation and semantic review must preserve every boundary above.
+The contract test remains a documentation gate; WAS-02.t5 adds Linux executable validation and compile-containment fixtures. These do not claim WAS-01 runtime qualification. Rollout is merge-only with no platform runtime adapter. The WAS-01 local execute command preserves this contract's validation, supervised compilation and verified-load boundaries. Future runtime implementation and semantic review must preserve every boundary above.

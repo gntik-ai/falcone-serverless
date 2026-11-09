@@ -1,5 +1,5 @@
 (component
-  (import "falcone:host/events@0.1.0" (instance $events
+  (import "falcone:host/events@0.2.0" (instance $events
     (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
     (export "host-error" (type $error (eq $error-type)))
     (export "publish" (func (param "destination" string) (param "payload" (list u8)) (result (result (error $error)))))))

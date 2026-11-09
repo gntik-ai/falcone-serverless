@@ -101,7 +101,14 @@ must inspect and manually clean up orphaned namespaces; later runs never delete 
 ## Dependency guard
 
 The model is std-only. The guard pins dependency tables in the workspace and worker
-manifests and Cargo.lock package names to base `b5e7330`. Existing dependency tables
-are intentional. Any changed entry or added lock package requires an explicit review
-and guard update; the evidence report adds no dependencies. Fixture tests check that
+manifests and Cargo.lock package names to base `b5e7330`, plus the WAS-01 #277
+worker-only Wasmtime `call-hook` feature. The feature selects the configured
+guest-to-host byte budget at `ReturningFromWasm`, before standard component
+lifting allocates a result or error message. Hooks restore the existing import
+budget when entering guest code or a host import. This changes the compiled
+Wasmtime surface and is part of the R3 second review and operator approval;
+it adds no packages, changes no versions and leaves Cargo.lock unchanged.
+Existing dependency tables are intentional. Any other changed entry or added lock
+package requires an explicit review and guard update; the evidence report adds no
+dependencies. Fixture tests check that
 an added dependency or [[package]] is rejected.

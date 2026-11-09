@@ -38,7 +38,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
                 panic!("interface import")
             };
             format!(
-                "falcone:host/{}@0.1.0",
+                "falcone:host/{}@0.2.0",
                 resolve.interfaces[*id].name.as_ref().unwrap()
             )
         })
@@ -98,7 +98,7 @@ fn validation_order_and_input_boundary() {
     assert_eq!(error.code, "undeclared_import");
     assert_eq!(error.import.as_deref(), Some("wasi:filesystem/types@0.2.0"));
     let wrong_kind = wat::parse_str(
-        "(component (type (func)) (import \"falcone:host/http@0.1.0\" (func (type 0))))",
+        "(component (type (func)) (import \"falcone:host/http@0.2.0\" (func (type 0))))",
     )
     .unwrap();
     assert_eq!(
@@ -181,14 +181,14 @@ fn validated_component_compiles_in_child_with_digest_key() {
     assert_eq!(supervisor.spawn_count(), 1);
     assert!(supervisor.last_child_status().unwrap().unwrap().success());
     assert!(result.as_str().starts_with("sha256:"));
-    let empty = b"\0asm\x0d\0\x01\0";
+    let empty = include_bytes!("../src/qualification/execute_fixtures/handler-wrapper.wasm");
     let result = supervisor
         .compile(empty, limits(), &std::sync::atomic::AtomicBool::new(false))
         .unwrap();
     assert!(
         result
             .as_str()
-            .contains("24eaf3439a60c96764c4f2c92a0a81b52bd4fe5d5b91f090184a0f6486b1bf29")
+            .contains("3ae603dc4024dc810219f4a1039e37a92397e7eaf12ff7dab4ffaa00b0ba0e78")
     );
 }
 
@@ -200,7 +200,7 @@ fn rejected_input_never_spawns_a_compiler() {
     let core = wat::parse_str("(module)").unwrap();
     let malformed = b"\0asm\x0d\0\x01\0\xff";
     let unlisted = wat::parse_str(
-        "(component (type (instance)) (import \"other:host/http@0.1.0\" (instance (type 0))))",
+        "(component (type (instance)) (import \"other:host/http@0.2.0\" (instance (type 0))))",
     )
     .unwrap();
     let oversized = vec![0; limits().input_bytes + 1];
@@ -230,11 +230,15 @@ fn heavy() -> &'static [u8] {
         let body = "i32.const 3 i32.mul i32.const 1 i32.add\n".repeat(8192);
         let function =
             include_str!("fixtures/was-02/heavy-function.wat").replace(";; OPERATIONS", &body);
-        wat::parse_str(format!(
+        let mut bytes = wat::parse_str(format!(
             "(component (core module {}))",
             function.repeat(128)
         ))
-        .unwrap()
+        .unwrap();
+        bytes.extend_from_slice(
+            &include_bytes!("../src/qualification/execute_fixtures/handler-wrapper.wasm")[8..],
+        );
+        bytes
     })
 }
 
@@ -456,4 +460,37 @@ fn budgets_are_mandatory_and_applied_before_input_reaches_child() {
         .unwrap_err();
     assert_eq!(error.code, "compile_failed");
     assert_eq!(supervisor.spawn_count(), 0);
+}
+
+#[test]
+fn handler_export_requires_the_full_wit_signature() {
+    let source = include_str!("../src/qualification/execute_fixtures/handler.wat");
+    let accepted = wat::parse_str(source).unwrap();
+    artifact::validate::validate(&accepted, accepted.len()).unwrap();
+    for (before, after) in [
+        ("(list u8)", "(list u16)"),
+        ("(param \"params\" $bytes)", "(param \"other\" $bytes)"),
+        ("(case \"failed\" string)", "(case \"other\" string)"),
+        ("(case \"failed\" string)", "(case \"failed\" $bytes)"),
+        (
+            "(export \"handle\" (func $handle))",
+            "(export \"other\" (func $handle))",
+        ),
+    ] {
+        let bytes = wat::parse_str(source.replace(before, after)).unwrap();
+        assert_eq!(
+            artifact::validate::validate(&bytes, bytes.len())
+                .unwrap_err()
+                .code,
+            "invalid_handler_signature"
+        );
+    }
+    for source in [
+        source.replace("falcone:host/handler@0.2.0", "other:host/handler@0.2.0"),
+        source.replace("(export \"falcone:host/handler@0.2.0\" (instance $handler))", ""),
+        source.replace("(export \"falcone:host/handler@0.2.0\" (instance $handler))", "(export \"falcone:host/handler@0.2.0\" (instance $handler)) (export \"other\" (instance $handler))"),
+    ] {
+        let bytes = wat::parse_str(source).unwrap();
+        assert_eq!(artifact::validate::validate(&bytes, bytes.len()).unwrap_err().code, "missing_handler_export");
+    }
 }

@@ -1,6 +1,6 @@
 # Compile/cache fixtures
 
-`valid.wasm` is the eight-byte empty component. `invalid.wasm` has component
+`valid.wasm` is the nested 0.2.0 handler component. `invalid.wasm` has component
 magic followed by a malformed section. `native.elf` is rejected at intake.
 The precompiled-input case generates real native output with the locked engine
 in the test, avoiding a checked-in architecture-specific engine artifact.
