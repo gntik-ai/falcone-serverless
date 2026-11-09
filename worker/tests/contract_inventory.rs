@@ -801,7 +801,13 @@ fn check_sensitive_fields(value: &Value, sensitive: bool) -> Result<(), String> 
 fn scan_decoded_strings(value: &Value) -> Result<(), String> {
     match value {
         Value::Object(map) => map.iter().try_for_each(|(key, child)| {
-            secret_scan(key).and_then(|()| scan_decoded_strings(child))
+            secret_scan(key)?;
+            scan_decoded_strings(child)?;
+            // A serialized body hides its own escapes one level deeper.
+            match json_body(key, child) {
+                Some(body) => scan_decoded_strings(&body),
+                None => Ok(()),
+            }
         }),
         Value::Array(items) => items.iter().try_for_each(scan_decoded_strings),
         Value::String(text) => secret_scan(text),
@@ -1537,6 +1543,23 @@ fn identifiers_and_secrets_inside_a_serialized_body_are_checked() {
         });
         rejects_because(&docs, reason);
     }
+}
+
+#[test]
+fn escaped_secrets_inside_a_serialized_body_are_rejected_once_decoded() {
+    // The URL's slashes are JSON-escaped inside the serialized body (and the
+    // body is itself a JSON string), so neither the raw text nor the outer
+    // decoded strings contain it; only the decoded body does.
+    let extra = r#","note":"postgres:\/\/svc:example@db.internal/app""#;
+    let mut docs = Documents::load();
+    docs.rewrite_fixture("invalid/oversized-body.json", |text| {
+        // Same body length: trim the padding by what the member adds.
+        let escaped = extra.replace('\\', "\\\\").replace('"', "\\\"");
+        let padded = text.replacen(&"A".repeat(extra.len()), "", 1);
+        assert_ne!(padded, text, "padding not found");
+        padded.replacen("\\\"}\"", &format!("\\\"{escaped}}}\""), 1)
+    });
+    rejects_because(&docs, "secret scan");
 }
 
 #[test]
