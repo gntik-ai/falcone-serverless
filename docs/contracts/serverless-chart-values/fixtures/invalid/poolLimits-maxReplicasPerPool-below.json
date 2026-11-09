@@ -1,0 +1,47 @@
+{
+  "images": {
+    "controller": {
+      "repository": "docker.io/falcone/controller",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "worker": {
+      "repository": "docker.io/falcone/worker",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "compiler": {
+      "repository": "docker.io/falcone/compiler",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "watchedPoolNamespaces": [
+    "fs-pool"
+  ],
+  "controllerNamespace": "fs-system",
+  "namespaceMode": "preprovisioned",
+  "prerequisites": {
+    "gatewayRoute": {
+      "name": "gatewayroute"
+    },
+    "storage": {
+      "name": "storage"
+    },
+    "broker": {
+      "name": "broker"
+    },
+    "networkPolicyEnforcement": {
+      "name": "networkpolicyenforcement"
+    },
+    "existingSCC": {
+      "name": "existingscc"
+    },
+    "rbac": {
+      "controllerRoleBinding": "falcone-controller"
+    }
+  },
+  "namespaceBindingsPath": "/etc/falcone/namespace-bindings.json",
+  "falconeDesiredStateEndpoint": "https://falcone.example/desired",
+  "falconeStatusEndpoint": "https://falcone.example/status",
+  "poolLimits": {
+    "maxReplicasPerPool": 0
+  }
+}

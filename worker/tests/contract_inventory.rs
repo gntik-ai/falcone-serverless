@@ -507,3 +507,66 @@ fn rejects_cell(id: &str, column: usize, value: &str) {
         "accepted {id} cell {column}: {value}"
     );
 }
+
+fn validate_serverless_registry(inventory: &str, schema: &[u8]) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let rows = table(
+        section(inventory, "Serverless-owned contracts")?,
+        &["ID", "Version", "Schema", "SHA256"],
+    )?;
+    let row = rows
+        .get("ctr-serverless-chart-values")
+        .ok_or("missing ctr-serverless-chart-values")?;
+    if row[1] != "v1" || row[2] != "serverless-chart-values/chart-values.v1.schema.json" {
+        return Err("chart values version or schema path drift".into());
+    }
+    let hash = format!("sha256:{:x}", Sha256::digest(schema));
+    if row[3] != hash {
+        return Err("chart values schema SHA256 mismatch".into());
+    }
+    let readme = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/contracts/serverless-chart-values/README.md"),
+    )
+    .map_err(|e| e.to_string())?;
+    if !readme
+        .lines()
+        .any(|line| line == format!("Schema SHA256: `{hash}`"))
+    {
+        return Err("chart values README SHA256 mismatch".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn serverless_owned_schema_hash_is_registered() {
+    let inventory = Documents::load().inventory;
+    let schema = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/contracts/serverless-chart-values/chart-values.v1.schema.json"),
+    )
+    .expect("read chart values schema bytes");
+    validate_serverless_registry(&inventory, &schema).unwrap();
+    let mut changed = schema.clone();
+    changed.push(b' ');
+    assert!(
+        validate_serverless_registry(&inventory, &changed)
+            .unwrap_err()
+            .contains("SHA256 mismatch"),
+        "changing one schema byte must invalidate the registry"
+    );
+    for invalid in [
+        inventory.replace("| ctr-serverless-chart-values |", "| missing-contract |"),
+        inventory.replace(
+            "| ctr-serverless-chart-values | v1 |",
+            "| ctr-serverless-chart-values | v2 |",
+        ),
+        inventory.replace(
+            "serverless-chart-values/chart-values.v1.schema.json",
+            "wrong.schema.json",
+        ),
+        inventory.replace("## Serverless-owned contracts", "## Missing registry"),
+    ] {
+        assert!(validate_serverless_registry(&invalid, &schema).is_err());
+    }
+}

@@ -15,8 +15,10 @@ continues. The preflight creates, updates, adopts and deletes nothing.
 ## Values the controller reads
 
 The controller reads the JSON values file named by `FALCONE_SERVERLESS_VALUES`,
-default `/etc/falcone-serverless/values.json`. It reads only the fields below and
-ignores every other key. This is the consumer side of `ctr-serverless-chart-values`;
+default `/etc/falcone-serverless/values.json`. It reads the first nine fields below
+and ignores every other key. Additional rows publish the chart-only portion of
+the same contract, including the ctr-controller-config inputs; the preflight does
+not parse those rows. This is the consumer side of `ctr-serverless-chart-values`;
 the chart owner in falcone-charts must render these exact field names. A name that
 differs fails closed as a missing prerequisite.
 
@@ -31,6 +33,33 @@ differs fails closed as a missing prerequisite.
 | `prerequisites.rbac.controllerRoleBinding` | Name of the pregranted controller RoleBinding. |
 | `prerequisites.networkPolicyEnforcement.name` | Name of the facility that enforces NetworkPolicy. |
 | `prerequisites.existingSCC.name` | Name of the existing operator-provided SCC, by reference only. |
+| `images.controller.repository` | Chart-only: Docker Hub repository, no tag or digest suffix. |
+| `images.controller.digest` | Chart-only: required sha256 digest with 64 lowercase hex digits. |
+| `images.worker.repository` | Chart-only: Docker Hub repository, no tag or digest suffix. |
+| `images.worker.digest` | Chart-only: required sha256 digest with 64 lowercase hex digits. |
+| `images.compiler.repository` | Chart-only: Docker Hub repository, no tag or digest suffix. |
+| `images.compiler.digest` | Chart-only: required sha256 digest with 64 lowercase hex digits. |
+| `replicas.controller` | Chart-only: bounded integer; see the chart-values contract README. |
+| `replicas.worker` | Chart-only: bounded integer; see the chart-values contract README. |
+| `replicas.compiler` | Chart-only: bounded integer; see the chart-values contract README. |
+| `poolLimits.maxPools` | Chart-only: bounded integer; see the chart-values contract README. |
+| `poolLimits.maxReplicasPerPool` | Chart-only: bounded integer; see the chart-values contract README. |
+| `watchedOCINamespaces` | Chart-only: OCI-only: explicit nonempty, unique DNS-1123 namespace names; required when enabled. |
+| `namespaceBindingsPath` | Chart-only: Required absolute path to the operator-owned namespace bindings file. |
+| `leaderElectionLeaseName` | Chart-only: Fixed falcone-pool-controller-leader. |
+| `scalerLeaseName` | Chart-only: Fixed falcone-pool-controller-scaler. |
+| `leaseDurationSeconds` | Chart-only: Positive integer seconds; default 15. |
+| `renewDeadlineSeconds` | Chart-only: Positive integer seconds; default 10. |
+| `retryPeriodSeconds` | Chart-only: Positive integer seconds; default 2. |
+| `falconeDesiredStateEndpoint` | Chart-only: Required operator-supplied HTTPS desired-state endpoint. |
+| `falconeStatusEndpoint` | Chart-only: Required operator-supplied HTTPS status endpoint. |
+| `serviceIdentitySecretName` | Chart-only: Existing service-identity Secret name only; default falcone-controller-service-identity. |
+| `platformRegistryPullSecretName` | Chart-only: OCI-only: existing platform pull Secret name only; required when enabled. |
+| `metricsPort` | Chart-only: Integer listener port; default 9090. |
+| `probePort` | Chart-only: Integer probe port; default 8081. |
+| `oci.enabled` | Chart-only: Boolean; absent means false. Disabled OCI accepts no OCI-only settings. |
+| `oci.shimImage.repository` | Chart-only: OCI-only: required Docker Hub shim repository when enabled. |
+| `oci.shimImage.digest` | Chart-only: OCI-only: required sha256 shim digest when enabled. |
 
 The access reviews authenticate with the in-cluster service account token and CA and
 reach the API through `KUBERNETES_SERVICE_HOST` and `KUBERNETES_SERVICE_PORT`. Each
@@ -38,6 +67,9 @@ request has a 10 second timeout, redirects are not followed and no proxy is used
 The access reviews work through the cluster's default binding for
 SelfSubjectAccessReview, not the controller Role; a cluster that removes that
 binding reports `error` and fails closed.
+
+Full schema, normalisation rules and numeric bounds:
+[ctr-serverless-chart-values v1](../contracts/serverless-chart-values/README.md).
 
 ## Prerequisite kinds
 

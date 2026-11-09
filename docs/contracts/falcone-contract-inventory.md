@@ -101,3 +101,12 @@ WAS-03; migration enforcement to MIG-02; OCI execution to EP-OCI/EP-CAT.
 Additive corrections require a minor contract version; removing or renaming
 rows, statuses, verdicts or conditions requires v2 and an updated gate in the
 same change. Until such a reviewed change, the cargo test freezes the v1 shape.
+
+## Serverless-owned contracts
+
+This additive registry is separate from the frozen Falcone surfaces above. Paths
+are relative to this inventory; hashes pin the exact schema bytes.
+
+| ID | Version | Schema | SHA256 |
+| --- | --- | --- | --- |
+| ctr-serverless-chart-values | v1 | serverless-chart-values/chart-values.v1.schema.json | sha256:b666128d7f20719abe56dae12b27a730bd8f42ade4bd703000f3b0cb0129f4a3 |
