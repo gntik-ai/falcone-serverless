@@ -436,6 +436,8 @@ fn parse_fixture(path: &str, bytes: &[u8]) -> Result<Value, String> {
     secret_scan(text).map_err(|reason| format!("{path}: secret scan: {reason}"))?;
     let fixture = serde_json::from_str(text).map_err(|_| format!("{path}: not JSON"))?;
     check_synthetic(&fixture).map_err(|reason| format!("{path}: {reason}"))?;
+    check_sensitive_fields(&fixture, false)
+        .map_err(|reason| format!("{path}: secret scan: {reason}"))?;
     Ok(fixture)
 }
 
@@ -741,6 +743,42 @@ fn check_synthetic(value: &Value) -> Result<(), String> {
     }
 }
 
+const SENSITIVE_KEYWORDS: [&str; 8] = [
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "credential",
+];
+
+/// Structural half of the secret scan: whatever the formatting, every value
+/// under a sensitive key (at any depth) must be a string marked synthetic.
+fn check_sensitive_fields(value: &Value, sensitive: bool) -> Result<(), String> {
+    match value {
+        Value::Object(map) => map.iter().try_for_each(|(key, child)| {
+            let lower = key.to_lowercase();
+            let sensitive = sensitive
+                || SENSITIVE_KEYWORDS
+                    .iter()
+                    .any(|keyword| lower.contains(keyword));
+            check_sensitive_fields(child, sensitive)
+        }),
+        Value::Array(items) => items
+            .iter()
+            .try_for_each(|item| check_sensitive_fields(item, sensitive)),
+        Value::String(text) if sensitive && !text.contains("synthetic") => {
+            Err("sensitive value not marked synthetic".into())
+        }
+        Value::Number(_) | Value::Bool(_) if sensitive => {
+            Err("sensitive value not marked synthetic".into())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Offline secret scan for fixtures: no scanner exists in the repository.
 fn secret_scan(text: &str) -> Result<(), String> {
     let lower = text.to_ascii_lowercase();
@@ -794,30 +832,20 @@ fn secret_scan(text: &str) -> Result<(), String> {
             return Err("credentialed URL".into());
         }
     }
-    for keyword in [
-        "password",
-        "passwd",
-        "secret",
-        "token",
-        "apikey",
-        "api_key",
-        "api-key",
-        "credential",
-    ] {
+    for keyword in SENSITIVE_KEYWORDS {
         for (at, _) in lower.match_indices(keyword) {
-            let rest = lower[at + keyword.len()..].trim_start_matches(['"', '\'', ' ', '\t', '\\']);
+            let skipped = |c: char| matches!(c, '"' | '\'' | '\\') || c.is_whitespace();
+            let rest = lower[at + keyword.len()..].trim_start_matches(skipped);
             let Some(rest) = rest.strip_prefix([':', '=']) else {
                 continue;
             };
-            let rest = rest.trim_start_matches(['"', '\'', ' ', '\t', '\\']);
+            let rest = rest.trim_start_matches(skipped);
             let value = &rest[..rest
                 .find(|c: char| {
                     c == '"' || c == '\'' || c == ',' || c == '}' || c == '\\' || c.is_whitespace()
                 })
                 .unwrap_or(rest.len())];
-            if value.starts_with(|c: char| c.is_ascii_alphanumeric())
-                && !value.contains("synthetic")
-            {
+            if !value.is_empty() && !value.starts_with(['{', '[']) && !value.contains("synthetic") {
                 return Err(format!("{keyword} value not marked synthetic"));
             }
         }
@@ -1386,6 +1414,21 @@ fn secrets_in_a_fixture_are_rejected() {
 }
 
 #[test]
+fn sensitive_action_params_must_be_synthetic_whatever_their_shape() {
+    for new in [
+        "\"__ow_query\": {},\n    \"password\": \"!hunter2\"",
+        "\"__ow_query\": {},\n    \"password\": \"\\nhunter2\"",
+        "\"__ow_query\": {},\n    \"password\":\n      \"hunter2\"",
+        "\"__ow_query\": {},\n    \"apiKey\": 12345",
+        "\"__ow_query\": {},\n    \"client_secret\": {\"value\": \"hunter2\"}",
+    ] {
+        let mut docs = Documents::load();
+        docs.mutate_fixture("valid/401.json", "\"__ow_query\": {}", new);
+        rejects_because(&docs, "secret scan");
+    }
+}
+
+#[test]
 fn secret_scan_recognises_credential_shapes() {
     let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.c2lnbmF0dXJl";
     for text in [
@@ -1399,6 +1442,9 @@ fn secret_scan_recognises_credential_shapes() {
         "{\"password\": \"hunter2\"}",
         "{\"apiKey\": \"abc123\"}",
         "client_secret=abc123",
+        "{\"password\": \"!hunter2\"}",
+        "{\"password\":\n\"hunter2\"}",
+        "password:\nhunter2",
         "{\\\"token\\\":\\\"abc123\\\"}",
     ] {
         assert!(secret_scan(text).is_err(), "accepted {text}");
