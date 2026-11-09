@@ -38,7 +38,7 @@ func TestContractReasonCodesMatchGoConstants(t *testing.T) {
 }
 
 func TestSchemaMatchesGoTypesAndConstants(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")["$defs"].(map[string]any)["current"].(map[string]any)
+	schema := readJSON(t, "v1.2/pool-status.schema.json")["$defs"].(map[string]any)["current"].(map[string]any)
 	var compare func(map[string]any, reflect.Type, string)
 	compare = func(s map[string]any, typ reflect.Type, path string) {
 		if typ.Kind() == reflect.Pointer {
@@ -98,7 +98,7 @@ func TestSchemaMatchesGoTypesAndConstants(t *testing.T) {
 			t.Fatalf("schema %v != Go %v", values, want)
 		}
 	}
-	setEqual(schema["required"], append(slices.Clone(poolstatus.RequiredReportFields), "contractRevision"))
+	setEqual(schema["required"], append(append(slices.Clone(poolstatus.RequiredReportFields), poolstatus.RequiredLineageFields...), "contractRevision"))
 	abs := props["verifiedAbsence"].(map[string]any)["items"].(map[string]any)
 	setEqual(abs["required"], poolstatus.RequiredAbsenceFields)
 	setEqual(props["poolRef"].(map[string]any)["required"], poolstatus.RequiredPoolRefFields)

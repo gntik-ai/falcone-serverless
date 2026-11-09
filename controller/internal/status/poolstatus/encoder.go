@@ -33,6 +33,9 @@ type Options struct{ DisableExtensions bool }
 // Encode builds a deterministic report, discarding caller-supplied OwnedObjects
 // and replacing objectRef names with the authoritative pool name. Observations
 // from foreign objects and the controller's singleton Leases are never encoded.
+// The report carries the caller's ReporterLineage (the singleton Lease UID) next to
+// its epoch and sequence; the receiver rejects a lineage it does not hold. The kill
+// switch emits v1, which has no lineage field, so it also drops the lineage.
 // The caller must supply reviewed descendant-proof evidence before setting
 // AbsenceVerified; no such proof or Kubernetes access is implemented here.
 func Encode(r Report, scope Scope, observed []ObservedObject, options Options) ([]byte, error) {
@@ -87,6 +90,7 @@ func Encode(r Report, scope Scope, observed []ObservedObject, options Options) (
 	})
 	if options.DisableExtensions {
 		r.ContractRevision = ""
+		r.ReporterLineage = ""
 		r.OwnedObjects = nil
 		r.VerifiedAbsence = nil
 		r.AbsenceVerified = false

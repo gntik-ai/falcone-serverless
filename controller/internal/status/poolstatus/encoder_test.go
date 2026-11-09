@@ -12,9 +12,9 @@ import (
 )
 
 func TestEncoderFixturesAndIsolation(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	old := readJSON(t, "v1/pool-status.schema.json")
-	for _, raw := range readJSON(t, "v1.1/conformance.json")["valid"].([]any) {
+	for _, raw := range readJSON(t, "v1.2/conformance.json")["valid"].([]any) {
 		fixture := raw.(map[string]any)
 		t.Run(fixture["name"].(string), func(t *testing.T) {
 			var r poolstatus.Report
@@ -242,7 +242,7 @@ func TestEncoderCanonicalizesOwnedObjects(t *testing.T) {
 		{Kind: "Lease", Namespace: scope.Namespace, Name: scope.Name, UID: "m-lease", ResourceVersion: "20"},
 		{Kind: "Service", Namespace: scope.Namespace, Name: scope.Name, UID: "a-service", ResourceVersion: "10"},
 	}
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	var first []byte
 	for _, order := range [][3]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
 		var observed []poolstatus.ObservedObject
@@ -294,7 +294,7 @@ func TestEncoderRejectsMalformedReadAt(t *testing.T) {
 }
 
 func TestEncoderPreservesValidReadAt(t *testing.T) {
-	schema := readJSON(t, "v1.1/pool-status.schema.json")
+	schema := readJSON(t, "v1.2/pool-status.schema.json")
 	for _, readAt := range []string{"2026-01-01T00:00:00.5Z", "2026-01-01T00:00:00.123456789+05:30", "2026-01-01T23:59:59-23:59"} {
 		t.Run(readAt, func(t *testing.T) {
 			report := decodeFixtureReport(t, "verified-absence-wasm")

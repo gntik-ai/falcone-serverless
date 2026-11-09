@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gntik-ai/falcone-serverless/controller/internal/leader"
 	"github.com/gntik-ai/falcone-serverless/controller/internal/preflight"
 	"github.com/gntik-ai/falcone-serverless/controller/internal/status"
 )
@@ -28,6 +30,7 @@ const (
 	pfTokenPath  = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 	pfValuesPath = "/etc/falcone-serverless/values.json"
 	pfController = "falcone-system"
+	pfPodName    = "controller-0"
 	pfSSARPath   = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
 )
 
@@ -62,6 +65,7 @@ func newPFAPI(t *testing.T, table []preflight.Requirement) *pfAPI {
 	}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body)) // respond hooks read it again
 		rec := pfRequest{method: r.Method, path: r.URL.Path}
 		var review struct {
 			Spec struct {
@@ -101,6 +105,7 @@ type pfEnv struct {
 	calls int
 	out   bytes.Buffer
 	api   *pfAPI
+	camp  campaignConfig // what the campaign was started with
 }
 
 func pfValues(edit func(m map[string]any)) []byte {
@@ -137,7 +142,10 @@ func pfNewEnv(t *testing.T, values []byte) *pfEnv {
 	}
 	return &pfEnv{
 		api: api,
-		env: map[string]string{"KUBERNETES_SERVICE_HOST": host, "KUBERNETES_SERVICE_PORT": port},
+		env: map[string]string{
+			"KUBERNETES_SERVICE_HOST": host, "KUBERNETES_SERVICE_PORT": port,
+			podNameEnv: pfPodName, podNamespaceEnv: pfController,
+		},
 		files: map[string][]byte{
 			pfValuesPath: values,
 			pfTokenPath:  []byte(pfToken + "\n"),
@@ -156,8 +164,12 @@ func (e *pfEnv) run() int {
 		},
 		client:  e.api.Client(),
 		timeout: 2 * time.Second,
-		start:   func() { e.calls++ },
-		stdout:  &e.out,
+		campaign: func(_ context.Context, c campaignConfig, _ deps) error {
+			e.calls++
+			e.camp = c
+			return nil
+		},
+		stdout: &e.out,
 	})
 }
 
@@ -494,6 +506,197 @@ func TestRunRejectsANullNamespaceMode(t *testing.T) {
 	r := e.requireFailedBeforeAnyRequest(t, e.run())
 	if !strings.Contains(r.Preflight.ConfigError, "namespaceMode") {
 		t.Fatalf("configError %q must name namespaceMode", r.Preflight.ConfigError)
+	}
+}
+
+func TestRunPassesTheDownwardAPIIdentityToTheCampaign(t *testing.T) {
+	e := pfNewEnv(t, pfValues(nil))
+	if code := e.run(); code != 0 || e.calls != 1 {
+		t.Fatalf("exit %d, campaigns %d; want 0, 1", code, e.calls)
+	}
+	e.report(t)
+	if e.camp.identity != pfPodName || e.camp.namespace != pfController || slices.Contains(pfPools, e.camp.namespace) {
+		t.Fatalf("campaign config %+v: the Lease namespace is the release namespace, never a pool namespace", e.camp)
+	}
+}
+
+func TestRunRejectsABadPodIdentityOrNamespaceBeforeAnyRequestAndNeverCampaigns(t *testing.T) {
+	for name, edit := range map[string]func(e *pfEnv){
+		"POD_NAME unset":                  func(e *pfEnv) { delete(e.env, podNameEnv) },
+		"POD_NAME empty":                  func(e *pfEnv) { e.env[podNameEnv] = "" },
+		"POD_NAME upper case":             func(e *pfEnv) { e.env[podNameEnv] = "Controller-0" },
+		"POD_NAME with slash":             func(e *pfEnv) { e.env[podNameEnv] = "a/b" },
+		"POD_NAME with space":             func(e *pfEnv) { e.env[podNameEnv] = "controller 0" },
+		"POD_NAME too long":               func(e *pfEnv) { e.env[podNameEnv] = strings.Repeat("a", 254) },
+		"POD_NAMESPACE unset":             func(e *pfEnv) { delete(e.env, podNamespaceEnv) },
+		"POD_NAMESPACE is a pool":         func(e *pfEnv) { e.env[podNamespaceEnv] = "pool-a" },
+		"POD_NAMESPACE differs":           func(e *pfEnv) { e.env[podNamespaceEnv] = "other-namespace" },
+		"POD_NAMESPACE with trailing dot": func(e *pfEnv) { e.env[podNamespaceEnv] = pfController + " " },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := pfNewEnv(t, pfValues(nil))
+			edit(e)
+			r := e.requireFailedBeforeAnyRequest(t, e.run())
+			if !strings.Contains(r.Preflight.ConfigError, "POD_NAME") && !strings.Contains(r.Preflight.ConfigError, "POD_NAMESPACE") {
+				t.Fatalf("configError %q must name the downward API variable", r.Preflight.ConfigError)
+			}
+			for _, leak := range []string{"pool-a", "other-namespace", "Controller-0"} {
+				if strings.Contains(r.Preflight.ConfigError, leak) {
+					t.Fatalf("configError echoes %q", leak)
+				}
+			}
+		})
+	}
+}
+
+func TestRunNeverCampaignsWhenTheLeaseAccessIsDenied(t *testing.T) {
+	for i, req := range preflight.Table(pfPools, pfController) {
+		if req.Resource != "leases" {
+			continue
+		}
+		e := pfNewEnv(t, pfValues(nil))
+		delete(e.api.granted, req)
+		code := e.run()
+		r := e.report(t)
+		if code != 1 || r.Preflight.Result != status.ResultFailed || e.calls != 0 || e.out.Len() == 0 {
+			t.Fatalf("check %d (%+v): exit %d, result %s, campaigns %d", i, req, code, r.Preflight.Result, e.calls)
+		}
+		e.api.Close()
+	}
+}
+
+// run blocks in the campaign until SIGTERM and then exits 0; a campaign that fails exits 1.
+func TestRunCampaignsUntilSIGTERM(t *testing.T) {
+	e := pfNewEnv(t, pfValues(nil))
+	ctx, sigterm := context.WithCancel(context.Background())
+	started, done := make(chan struct{}), make(chan int)
+	go func() {
+		done <- run(deps{
+			getenv:   func(k string) string { return e.env[k] },
+			readFile: func(name string) ([]byte, error) { return e.files[name], nil },
+			client:   e.api.Client(),
+			timeout:  2 * time.Second,
+			campaign: func(ctx context.Context, _ campaignConfig, _ deps) error {
+				close(started)
+				<-ctx.Done()
+				return ctx.Err()
+			},
+			signals: func() (context.Context, context.CancelFunc) { return ctx, sigterm },
+			stdout:  &e.out,
+		})
+	}()
+	<-started
+	select {
+	case code := <-done:
+		t.Fatalf("run returned %d before SIGTERM", code)
+	default:
+	}
+	sigterm()
+	if code := <-done; code != 0 {
+		t.Fatalf("exit %d after SIGTERM", code)
+	}
+	e.report(t)
+}
+
+func TestRunExitsOneWhenTheCampaignFailsWithoutLeakingTheToken(t *testing.T) {
+	e := pfNewEnv(t, pfValues(nil))
+	var stderr bytes.Buffer
+	code := run(deps{
+		getenv:   func(k string) string { return e.env[k] },
+		readFile: func(name string) ([]byte, error) { return e.files[name], nil },
+		client:   e.api.Client(),
+		timeout:  2 * time.Second,
+		campaign: func(context.Context, campaignConfig, deps) error { return errors.New("lease client is unusable") },
+		stdout:   &e.out,
+		stderr:   &stderr,
+	})
+	if code != 1 || !strings.Contains(stderr.String(), "lease client is unusable") || strings.Contains(stderr.String(), pfToken) {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	e.report(t)
+}
+
+// The real election over HTTP: the Lease is created and held in the release namespace, the
+// duties stop on SIGTERM, then the Lease is released, with exactly one JSON report on stdout.
+func TestRunElectsInTheReleaseNamespaceAndReleasesTheLeaseOnSIGTERM(t *testing.T) {
+	e := pfNewEnv(t, pfValues(nil))
+	const leases = "/apis/coordination.k8s.io/v1/namespaces/" + pfController + "/leases"
+	var mu sync.Mutex
+	var lease map[string]any
+	var calls []string
+	var released string
+	e.api.respond = func(w http.ResponseWriter, r *http.Request) bool {
+		if !strings.HasPrefix(r.URL.Path, "/apis/coordination.k8s.io/") {
+			return false
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		if r.Header.Get("Authorization") != "Bearer "+pfToken {
+			w.WriteHeader(http.StatusUnauthorized)
+			return true
+		}
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case r.Method == http.MethodGet && lease == nil:
+			w.WriteHeader(http.StatusNotFound)
+		case r.Method == http.MethodPost && r.URL.Path == leases:
+			_ = json.Unmarshal(body, &lease)
+			lease["metadata"].(map[string]any)["uid"] = "uid-1"
+			lease["metadata"].(map[string]any)["resourceVersion"] = "1"
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(lease)
+		case r.Method == http.MethodPatch:
+			var patch struct {
+				Spec struct {
+					HolderIdentity *string `json:"holderIdentity"`
+				} `json:"spec"`
+			}
+			_ = json.Unmarshal(body, &patch)
+			if patch.Spec.HolderIdentity != nil {
+				released = *patch.Spec.HolderIdentity
+				lease["spec"].(map[string]any)["holderIdentity"] = released
+			}
+			_ = json.NewEncoder(w).Encode(lease)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+		return true
+	}
+	sigtermCtx, sigterm := context.WithCancel(context.Background())
+	var stderr bytes.Buffer
+	code := run(deps{
+		getenv:   func(k string) string { return e.env[k] },
+		readFile: func(name string) ([]byte, error) { return e.files[name], nil },
+		client:   e.api.Client(),
+		timeout:  2 * time.Second,
+		// The first duty of the first term is where SIGTERM arrives.
+		duty: func(ctx context.Context, term *leader.Term) {
+			if term.Epoch != 1 || term.Lineage != "uid-1" {
+				t.Errorf("term %+v", term)
+			}
+			sigterm()
+			<-ctx.Done()
+		},
+		signals: func() (context.Context, context.CancelFunc) { return sigtermCtx, sigterm },
+		stdout:  &e.out,
+		stderr:  &stderr,
+	})
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	e.report(t) // exactly one JSON report, valid, with no token
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{"GET " + leases + "/falcone-pool-controller-leader", "POST " + leases, "PATCH " + leases + "/falcone-pool-controller-leader"}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("Lease calls %v, want %v (release namespace only, no pool namespace)", calls, want)
+	}
+	if released != "" || lease["spec"].(map[string]any)["holderIdentity"] != "" {
+		t.Fatalf("the Lease was not released: %v", lease["spec"])
+	}
+	if strings.Contains(stderr.String(), pfToken) {
+		t.Fatal("the token reached stderr")
 	}
 }
 

@@ -1,0 +1,1470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ctr-pool-status-report/v1.2",
+  "$defs": {
+    "legacy": {
+      "type": "object",
+      "properties": {
+        "poolRef": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "name"
+          ],
+          "additionalProperties": true
+        },
+        "observedGeneration": {
+          "type": "integer"
+        },
+        "reporterEpoch": {
+          "type": "integer"
+        },
+        "observationSeq": {
+          "type": "integer"
+        },
+        "desiredReplicas": {
+          "type": "integer"
+        },
+        "readyReplicas": {
+          "type": "integer"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "ready": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "revision",
+              "ready"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "readyCapacity": {
+          "type": "integer"
+        },
+        "draining": {
+          "type": "boolean"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "additionalProperties": true
+          }
+        },
+        "absenceVerified": {
+          "type": "boolean"
+        },
+        "runtimeMode": {
+          "type": "string",
+          "enum": [
+            "wasm",
+            "oci"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "materialized": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "poolRef",
+        "observedGeneration",
+        "reporterEpoch",
+        "observationSeq",
+        "desiredReplicas",
+        "readyReplicas",
+        "revisions",
+        "readyCapacity",
+        "draining",
+        "conditions",
+        "absenceVerified",
+        "runtimeMode"
+      ],
+      "additionalProperties": true,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtimeMode": {
+                "const": "oci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "revision",
+              "materialized"
+            ],
+            "properties": {
+              "revisions": {
+                "minItems": 1,
+                "maxItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "revision"
+                  ]
+                },
+                {
+                  "required": [
+                    "materialized"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "not": {
+        "required": [
+          "contractRevision"
+        ]
+      }
+    },
+    "revision1_1": {
+      "type": "object",
+      "properties": {
+        "poolRef": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "observedGeneration": {
+          "type": "integer"
+        },
+        "reporterEpoch": {
+          "type": "integer"
+        },
+        "observationSeq": {
+          "type": "integer"
+        },
+        "desiredReplicas": {
+          "type": "integer"
+        },
+        "readyReplicas": {
+          "type": "integer"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "ready": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "revision",
+              "ready"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "readyCapacity": {
+          "type": "integer"
+        },
+        "draining": {
+          "type": "boolean"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "UIDMismatch",
+                  "ResourceVersionMismatch",
+                  "OwnershipMismatch",
+                  "MissingPreconditions",
+                  "TerminationPending",
+                  "ImagePullFailed",
+                  "ContainerStartFailed",
+                  "ContractProbeFailed",
+                  "Dematerialized"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "uid_mismatch",
+                  "resource_version_mismatch",
+                  "ownership_mismatch",
+                  "missing_preconditions",
+                  "termination_pending",
+                  "image_pull_failed",
+                  "container_start_failed",
+                  "contract_probe_failed",
+                  "dematerialized"
+                ]
+              },
+              "objectRef": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "Deployment",
+                      "Service",
+                      "Lease"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false,
+                "not": {
+                  "properties": {
+                    "kind": {
+                      "const": "Lease"
+                    },
+                    "name": {
+                      "enum": [
+                        "falcone-pool-controller-leader",
+                        "falcone-pool-controller-scaler"
+                      ]
+                    }
+                  }
+                }
+              },
+              "remainingDescendants": {
+                "type": "object",
+                "properties": {
+                  "replicaSets": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pods": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "replicaSets",
+                  "pods"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "UIDMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "uid_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ResourceVersionMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "resource_version_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "OwnershipMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "ownership_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "MissingPreconditions"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "missing_preconditions"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "TerminationPending"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "termination_pending"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ImagePullFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "image_pull_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ContainerStartFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "container_start_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ContractProbeFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "contract_probe_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "Dematerialized"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "dematerialized"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "TerminationPending"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "remainingDescendants"
+                  ],
+                  "properties": {
+                    "remainingDescendants": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "replicaSets": {
+                              "minimum": 1
+                            }
+                          }
+                        },
+                        {
+                          "properties": {
+                            "pods": {
+                              "minimum": 1
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "remainingDescendants"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "absenceVerified": {
+          "type": "boolean"
+        },
+        "runtimeMode": {
+          "type": "string",
+          "enum": [
+            "wasm",
+            "oci"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "materialized": {
+          "type": "boolean"
+        },
+        "contractRevision": {
+          "const": "1.1",
+          "type": "string"
+        },
+        "ownedObjects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "Deployment",
+                  "Service",
+                  "Lease"
+                ]
+              },
+              "namespace": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uid": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resourceVersion": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind",
+              "namespace",
+              "name",
+              "uid",
+              "resourceVersion"
+            ],
+            "additionalProperties": false,
+            "not": {
+              "properties": {
+                "kind": {
+                  "const": "Lease"
+                },
+                "name": {
+                  "enum": [
+                    "falcone-pool-controller-leader",
+                    "falcone-pool-controller-scaler"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "verifiedAbsence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "readAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"
+              },
+              "absent": {
+                "type": "object",
+                "properties": {
+                  "deployments": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "services": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "leases": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "replicaSets": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "pods": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "deployments",
+                  "services",
+                  "leases",
+                  "replicaSets",
+                  "pods"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "generation",
+              "readAt",
+              "absent"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "poolRef",
+        "observedGeneration",
+        "reporterEpoch",
+        "observationSeq",
+        "desiredReplicas",
+        "readyReplicas",
+        "revisions",
+        "readyCapacity",
+        "draining",
+        "conditions",
+        "absenceVerified",
+        "runtimeMode",
+        "contractRevision"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtimeMode": {
+                "const": "oci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "revision",
+              "materialized"
+            ],
+            "properties": {
+              "revisions": {
+                "minItems": 1,
+                "maxItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "revision"
+                  ]
+                },
+                {
+                  "required": [
+                    "materialized"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "runtimeMode": {
+                "const": "oci"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verifiedAbsence": {
+                "items": {
+                  "required": [
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "verifiedAbsence": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "revision"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "absenceVerified": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "verifiedAbsence"
+            ],
+            "properties": {
+              "verifiedAbsence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "absenceVerified": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "required": [
+                  "verifiedAbsence"
+                ],
+                "properties": {
+                  "verifiedAbsence": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "ownedObjects": {
+                "maxItems": 0
+              },
+              "conditions": {
+                "not": {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "UIDMismatch",
+                          "ResourceVersionMismatch",
+                          "OwnershipMismatch",
+                          "MissingPreconditions",
+                          "TerminationPending"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "materialized": {
+                "const": false
+              },
+              "readyReplicas": {
+                "const": 0
+              },
+              "readyCapacity": {
+                "const": 0
+              },
+              "revisions": {
+                "items": {
+                  "properties": {
+                    "ready": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "current": {
+      "type": "object",
+      "properties": {
+        "poolRef": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "namespace",
+            "name"
+          ],
+          "additionalProperties": false
+        },
+        "observedGeneration": {
+          "type": "integer"
+        },
+        "reporterEpoch": {
+          "type": "integer"
+        },
+        "observationSeq": {
+          "type": "integer"
+        },
+        "desiredReplicas": {
+          "type": "integer"
+        },
+        "readyReplicas": {
+          "type": "integer"
+        },
+        "revisions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "ready": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "revision",
+              "ready"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "readyCapacity": {
+          "type": "integer"
+        },
+        "draining": {
+          "type": "boolean"
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "UIDMismatch",
+                  "ResourceVersionMismatch",
+                  "OwnershipMismatch",
+                  "MissingPreconditions",
+                  "TerminationPending",
+                  "ImagePullFailed",
+                  "ContainerStartFailed",
+                  "ContractProbeFailed",
+                  "Dematerialized"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "uid_mismatch",
+                  "resource_version_mismatch",
+                  "ownership_mismatch",
+                  "missing_preconditions",
+                  "termination_pending",
+                  "image_pull_failed",
+                  "container_start_failed",
+                  "contract_probe_failed",
+                  "dematerialized"
+                ]
+              },
+              "objectRef": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "Deployment",
+                      "Service",
+                      "Lease"
+                    ]
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "kind",
+                  "name"
+                ],
+                "additionalProperties": false,
+                "not": {
+                  "properties": {
+                    "kind": {
+                      "const": "Lease"
+                    },
+                    "name": {
+                      "enum": [
+                        "falcone-pool-controller-leader",
+                        "falcone-pool-controller-scaler"
+                      ]
+                    }
+                  }
+                }
+              },
+              "remainingDescendants": {
+                "type": "object",
+                "properties": {
+                  "replicaSets": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "pods": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                },
+                "required": [
+                  "replicaSets",
+                  "pods"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "UIDMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "uid_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ResourceVersionMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "resource_version_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "OwnershipMismatch"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "ownership_mismatch"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "MissingPreconditions"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "missing_preconditions"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "TerminationPending"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "termination_pending"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ImagePullFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "image_pull_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ContainerStartFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "container_start_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "ContractProbeFailed"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "contract_probe_failed"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "Dematerialized"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "reason": {
+                      "const": "dematerialized"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "TerminationPending"
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "remainingDescendants"
+                  ],
+                  "properties": {
+                    "remainingDescendants": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "replicaSets": {
+                              "minimum": 1
+                            }
+                          }
+                        },
+                        {
+                          "properties": {
+                            "pods": {
+                              "minimum": 1
+                            }
+                          }
+                        }
+                      ]
+                    }
+                  }
+                },
+                "else": {
+                  "not": {
+                    "required": [
+                      "remainingDescendants"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "absenceVerified": {
+          "type": "boolean"
+        },
+        "runtimeMode": {
+          "type": "string",
+          "enum": [
+            "wasm",
+            "oci"
+          ]
+        },
+        "revision": {
+          "type": "string"
+        },
+        "materialized": {
+          "type": "boolean"
+        },
+        "contractRevision": {
+          "const": "1.2",
+          "type": "string"
+        },
+        "ownedObjects": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "Deployment",
+                  "Service",
+                  "Lease"
+                ]
+              },
+              "namespace": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uid": {
+                "type": "string",
+                "minLength": 1
+              },
+              "resourceVersion": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "kind",
+              "namespace",
+              "name",
+              "uid",
+              "resourceVersion"
+            ],
+            "additionalProperties": false,
+            "not": {
+              "properties": {
+                "kind": {
+                  "const": "Lease"
+                },
+                "name": {
+                  "enum": [
+                    "falcone-pool-controller-leader",
+                    "falcone-pool-controller-scaler"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "verifiedAbsence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "revision": {
+                "type": "string"
+              },
+              "generation": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "readAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?(Z|[+-]([01][0-9]|2[0-3]):[0-5][0-9])$"
+              },
+              "absent": {
+                "type": "object",
+                "properties": {
+                  "deployments": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "services": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "leases": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "replicaSets": {
+                    "type": "boolean",
+                    "const": true
+                  },
+                  "pods": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "deployments",
+                  "services",
+                  "leases",
+                  "replicaSets",
+                  "pods"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "generation",
+              "readAt",
+              "absent"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "reporterLineage": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^\\S+$"
+        }
+      },
+      "required": [
+        "poolRef",
+        "observedGeneration",
+        "reporterEpoch",
+        "observationSeq",
+        "desiredReplicas",
+        "readyReplicas",
+        "revisions",
+        "readyCapacity",
+        "draining",
+        "conditions",
+        "absenceVerified",
+        "runtimeMode",
+        "contractRevision",
+        "reporterLineage"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "runtimeMode": {
+                "const": "oci"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "revision",
+              "materialized"
+            ],
+            "properties": {
+              "revisions": {
+                "minItems": 1,
+                "maxItems": 1
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "revision"
+                  ]
+                },
+                {
+                  "required": [
+                    "materialized"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "runtimeMode": {
+                "const": "oci"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "verifiedAbsence": {
+                "items": {
+                  "required": [
+                    "revision"
+                  ]
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "verifiedAbsence": {
+                "items": {
+                  "not": {
+                    "required": [
+                      "revision"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "absenceVerified": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "verifiedAbsence"
+            ],
+            "properties": {
+              "verifiedAbsence": {
+                "minItems": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "absenceVerified": {
+                    "const": true
+                  }
+                }
+              },
+              {
+                "required": [
+                  "verifiedAbsence"
+                ],
+                "properties": {
+                  "verifiedAbsence": {
+                    "minItems": 1
+                  }
+                }
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "ownedObjects": {
+                "maxItems": 0
+              },
+              "conditions": {
+                "not": {
+                  "contains": {
+                    "properties": {
+                      "type": {
+                        "enum": [
+                          "UIDMismatch",
+                          "ResourceVersionMismatch",
+                          "OwnershipMismatch",
+                          "MissingPreconditions",
+                          "TerminationPending"
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "materialized": {
+                "const": false
+              },
+              "readyReplicas": {
+                "const": 0
+              },
+              "readyCapacity": {
+                "const": 0
+              },
+              "revisions": {
+                "items": {
+                  "properties": {
+                    "ready": {
+                      "const": false
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/legacy"
+    },
+    {
+      "$ref": "#/$defs/revision1_1"
+    },
+    {
+      "$ref": "#/$defs/current"
+    }
+  ]
+}

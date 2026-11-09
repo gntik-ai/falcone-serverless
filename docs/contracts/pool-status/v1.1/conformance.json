@@ -1520,7 +1520,7 @@
         ],
         "absenceVerified": false,
         "runtimeMode": "wasm",
-        "contractRevision": "1.2"
+        "contractRevision": "1.3"
       }
     }
   ]

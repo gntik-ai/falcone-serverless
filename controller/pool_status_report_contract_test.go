@@ -39,9 +39,15 @@ var (
 		"Authorization":  {"ctr-namespace-bindings", "never from report fields", "namespaceMode", "ADR 0011", "alone does not establish tenant ownership", "before ordering"},
 		"Generation semantics": {
 			"observedGeneration", "reporterEpoch", "observationSeq", "Lease", "fencing", "contractVersion",
+			"`reporterLineage` (revision 1.2) is the `metadata.uid` of that Lease",
 			"A changed `readAt` or `resourceVersion` is a different payload and requires a new `observationSeq`.",
 		},
-		"Ordering cases":    {"lexicographic"},
+		"Ordering cases": {
+			"lexicographic", "records the lineage with the epoch and sequence",
+			"differs from the recorded one, whatever its epoch, generation or sequence",
+			"resets the receiver's recorded lineage and epoch",
+			"never adopts the lineage of whichever report arrives next",
+		},
 		"Repair conditions": {"absenceVerified"},
 		"Status mapping":    {"readiness only"},
 	}
@@ -71,6 +77,7 @@ var (
 
 	poolStatusExtensionFields = []struct{ name, typ, required string }{
 		{"contractRevision", "string", "no"},
+		{"reporterLineage", "string", "1.2"},
 		{"ownedObjects", "array", "no"},
 		{"ownedObjects[].kind", "string", "entry"},
 		{"ownedObjects[].namespace", "string", "entry"},
@@ -102,6 +109,7 @@ var (
 	poolStatusOCIConds  = []string{"ImagePullFailed", "ContainerStartFailed", "ContractProbeFailed", "Dematerialized"}
 	poolStatusOutcomes  = []string{"applied", "replay_noop", "refused", "conflict_refused"}
 	poolStatusCases     = []string{"G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"}
+	poolStatusLineages  = []string{"L1", "L2", "L3", "L4", "L5", "L6", "L7"}
 
 	tenantReasonFormat = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 	tenantReasonBanned = []string{"registry", "pod", "node"}
@@ -294,6 +302,16 @@ func referenceOutcome(stored, report reportKey, payloadSame bool, desiredGenerat
 	}
 }
 
+// referenceLineageOutcome is the test-only reference comparator for a revision 1.2
+// report: the receiver refuses a lineage that differs from the recorded one before
+// it looks at generation, epoch or sequence, and orders within one lineage as before.
+func referenceLineageOutcome(storedLineage, reportLineage string, stored, report reportKey, payloadSame bool, desiredGeneration int) string {
+	if storedLineage != reportLineage {
+		return "refused"
+	}
+	return referenceOutcome(stored, report, payloadSame, desiredGeneration)
+}
+
 // orderingScenario pins what each required G case must exercise, independently
 // of the row's own cells, so a row cannot be rewritten into a different case.
 type orderingScenario struct {
@@ -337,7 +355,7 @@ var orderingScenarios = map[string]orderingScenario{
 func checkPoolStatusReport(doc string) []string {
 	var errs []string
 	lines := strings.Split(doc, "\n")
-	for _, want := range []string{"Contract: ctr-pool-status-report", "contractVersion: 1", "contractRevision: 1.1"} {
+	for _, want := range []string{"Contract: ctr-pool-status-report", "contractVersion: 1", "contractRevision: 1.2"} {
 		if !slices.Contains(lines, want) {
 			errs = append(errs, fmt.Sprintf("header: missing line %q", want))
 		}
@@ -366,6 +384,7 @@ func checkPoolStatusReport(doc string) []string {
 	}
 	if body, ok := sections["Ordering cases"]; ok {
 		errs = append(errs, checkPoolStatusOrdering(body)...)
+		errs = append(errs, checkPoolStatusLineage(body)...)
 	}
 	if body, ok := sections["Repair conditions"]; ok {
 		errs = append(errs, checkPoolStatusRepair(body)...)
@@ -493,6 +512,78 @@ func checkPoolStatusOrdering(body string) []string {
 		notes := map[string]string{"G4": "readyReplicas 0 to 1", "G5": "readyReplicas 1 to 0"}
 		if want, ok := notes[id]; ok && !strings.Contains(cell(row, cols[6]), want) {
 			errs = append(errs, fmt.Sprintf("ordering case %s: notes must record %q", id, want))
+		}
+	}
+	return errs
+}
+
+// lineageScenario pins what each lineage case must exercise, independently of the
+// row's own cells.
+type lineageScenario struct {
+	shape   string
+	outcome string
+	holds   func(storedLineage, reportLineage string, stored, report reportKey) bool
+}
+
+var lineageScenarios = map[string]lineageScenario{
+	"L1": {"the same lineage with a higher sequence", "applied",
+		func(sl, rl string, s, r reportKey) bool {
+			return sl == rl && r.generation == s.generation && r.epoch == s.epoch && r.seq > s.seq
+		}},
+	"L2": {"a different lineage with a higher sequence", "refused",
+		func(sl, rl string, s, r reportKey) bool {
+			return sl != rl && r.generation == s.generation && r.epoch == s.epoch && r.seq > s.seq
+		}},
+	"L3": {"a different lineage with an equal key", "refused",
+		func(sl, rl string, s, r reportKey) bool { return sl != rl && r == s }},
+	"L4": {"a different lineage with a higher epoch", "refused",
+		func(sl, rl string, s, r reportKey) bool { return sl != rl && r.epoch > s.epoch }},
+	"L5": {"a different lineage with a lower epoch", "refused",
+		func(sl, rl string, s, r reportKey) bool { return sl != rl && r.epoch < s.epoch }},
+	"L6": {"a different lineage with a higher generation and epoch", "refused",
+		func(sl, rl string, s, r reportKey) bool {
+			return sl != rl && r.generation > s.generation && r.epoch > s.epoch
+		}},
+	"L7": {"the same lineage with a lower epoch", "refused",
+		func(sl, rl string, s, r reportKey) bool { return sl == rl && r.epoch < s.epoch }},
+}
+
+func checkPoolStatusLineage(body string) []string {
+	tb, ok := findTable(body, "Lineage case")
+	cols, hasCols := columns(tb, "Lineage case", "Stored lineage", "Report lineage", "Stored key", "Report key", "Outcome", "Notes")
+	if !ok || !hasCols {
+		return []string{"Ordering cases: missing table with columns Lineage case, Stored lineage, Report lineage, Stored key, Report key, Outcome, Notes"}
+	}
+	rows, errs := requireRows("Ordering cases", "lineage case", tb, poolStatusLineages)
+	for _, id := range poolStatusLineages {
+		row, present := rows[id]
+		if !present {
+			continue
+		}
+		storedLineage, reportLineage := cell(row, cols[1]), cell(row, cols[2])
+		stored, okStored := parseReportKey(cell(row, cols[3]))
+		report, okReport := parseReportKey(cell(row, cols[4]))
+		outcome := cell(row, cols[5])
+		switch {
+		case storedLineage == "" || reportLineage == "":
+			errs = append(errs, fmt.Sprintf("lineage case %s: stored and report lineage must be set", id))
+		case !okStored || !okReport:
+			errs = append(errs, fmt.Sprintf("lineage case %s: stored and report keys must look like (generation,epoch,seq)", id))
+		case !slices.Contains(poolStatusOutcomes, outcome):
+			errs = append(errs, fmt.Sprintf("lineage case %s: outcome %q is not one of %v", id, outcome, poolStatusOutcomes))
+		default:
+			// The payload differs in every case, and the desired generation is the report's own.
+			want := referenceLineageOutcome(storedLineage, reportLineage, stored, report, false, report.generation)
+			if outcome != want {
+				errs = append(errs, fmt.Sprintf("lineage case %s: outcome %q disagrees with reference comparator %q", id, outcome, want))
+			}
+			sc := lineageScenarios[id]
+			if !sc.holds(storedLineage, reportLineage, stored, report) {
+				errs = append(errs, fmt.Sprintf("lineage case %s: lineages and keys must exercise %s", id, sc.shape))
+			}
+			if outcome == want && outcome != sc.outcome {
+				errs = append(errs, fmt.Sprintf("lineage case %s: outcome must be %s", id, sc.outcome))
+			}
 		}
 	}
 	return errs
@@ -982,6 +1073,72 @@ func TestPoolStatusReportReferenceComparator(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := referenceOutcome(tc.stored, tc.report, tc.payloadSame, tc.desired); got != tc.want {
 				t.Fatalf("referenceOutcome = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPoolStatusReportRejectsMissingLineageRow(t *testing.T) {
+	doc := poolStatusDoc(t)
+	for _, id := range poolStatusLineages {
+		t.Run(id, func(t *testing.T) {
+			wantError(t, checkPoolStatusReport(dropRow(t, doc, id)), fmt.Sprintf("missing lineage case %q", id))
+		})
+	}
+	t.Run("missing field", func(t *testing.T) {
+		wantError(t, checkPoolStatusReport(dropRow(t, doc, "reporterLineage")), `missing required field "reporterLineage"`)
+	})
+}
+
+// A lineage row rewritten so that the receiver would accept a foreign lineage
+// must be caught by the reference comparator, whatever its epoch or sequence.
+func TestPoolStatusReportRejectsLineageRowsThatAcceptAForeignLineage(t *testing.T) {
+	doc := poolStatusDoc(t)
+	for _, id := range []string{"L2", "L3", "L4", "L5", "L6"} {
+		t.Run(id+" as applied", func(t *testing.T) {
+			errs := checkPoolStatusReport(setCell(t, doc, id, 5, "applied"))
+			wantError(t, errs, "lineage case "+id+":", `outcome "applied" disagrees`)
+		})
+	}
+	t.Run("L2 as the same lineage", func(t *testing.T) {
+		errs := checkPoolStatusReport(editRow(t, doc, "L2", func(c []string) []string {
+			c[2], c[5] = "A", "applied"
+			return c
+		}))
+		wantError(t, errs, "lineage case L2: lineages and keys must exercise")
+	})
+	t.Run("L3 as a replay of the stored key", func(t *testing.T) {
+		errs := checkPoolStatusReport(editRow(t, doc, "L3", func(c []string) []string {
+			c[2], c[5] = "A", "replay_noop"
+			return c
+		}))
+		wantError(t, errs, "lineage case L3:")
+	})
+}
+
+func TestPoolStatusReferenceLineageComparator(t *testing.T) {
+	tests := []struct {
+		name          string
+		storedLineage string
+		reportLineage string
+		stored        reportKey
+		report        reportKey
+		payloadSame   bool
+		want          string
+	}{
+		{"same lineage higher seq", "uid-a", "uid-a", reportKey{5, 2, 10}, reportKey{5, 2, 11}, false, "applied"},
+		{"same lineage replay", "uid-a", "uid-a", reportKey{5, 2, 10}, reportKey{5, 2, 10}, true, "replay_noop"},
+		{"same lineage lower epoch is fenced", "uid-a", "uid-a", reportKey{5, 2, 10}, reportKey{5, 1, 99}, false, "refused"},
+		{"foreign lineage, equal epoch and higher seq", "uid-a", "uid-b", reportKey{5, 2, 10}, reportKey{5, 2, 11}, false, "refused"},
+		{"foreign lineage, equal key, same payload", "uid-a", "uid-b", reportKey{5, 2, 10}, reportKey{5, 2, 10}, true, "refused"},
+		{"foreign lineage, higher epoch", "uid-a", "uid-b", reportKey{5, 2, 10}, reportKey{5, 3, 1}, false, "refused"},
+		{"foreign lineage, lower epoch", "uid-a", "uid-b", reportKey{5, 2, 10}, reportKey{5, 1, 1}, false, "refused"},
+		{"foreign lineage, higher generation and epoch", "uid-a", "uid-b", reportKey{5, 2, 10}, reportKey{6, 9, 1}, false, "refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := referenceLineageOutcome(tc.storedLineage, tc.reportLineage, tc.stored, tc.report, tc.payloadSame, 9); got != tc.want {
+				t.Fatalf("referenceLineageOutcome = %q, want %q", got, tc.want)
 			}
 		})
 	}
