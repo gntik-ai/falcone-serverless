@@ -66,7 +66,7 @@ func (c Config) Validate() error {
 }
 
 // Duty is the singleton work of one term. ctx is cancelled when the gate closes, and
-// every write must go through Elector.Publish (or carry term.Stamp()).
+// every write must go through Elector.Publish with that term (or carry term.Stamp()).
 type Duty func(ctx context.Context, term *Term)
 
 // Elector campaigns for the leader Lease. Tick drives it one step at a time, which keeps
@@ -87,6 +87,8 @@ type Elector struct {
 	observedHolder string
 	observedAt     time.Time
 	lastLogged     string
+
+	beforeTerm func() // test seam: runs between the deadline calculation and the term's context
 }
 
 // New validates cfg and returns an elector that has not contacted the API server.
@@ -148,19 +150,23 @@ func (e *Elector) fail(reason string, err error) time.Duration {
 	return e.cfg.RetryPeriod
 }
 
-// reject stops the instance after the receiver refused a write: the term ends, all duty
-// writes stop and the FenceRejected status stays. The epoch is neither retried nor
-// raised, and nothing is learned from the refusal. It may run on any goroutine, so it
-// leaves the Tick-owned state to Tick.
+// reject stops the instance after the receiver refused a write: every term ends, all
+// duty writes stop and the FenceRejected status stays. The refused term may not be the
+// current one (a refusal can arrive after the process re-acquired the Lease), so the
+// current term is cancelled too, and an acquisition still in flight opens no term. The
+// epoch is neither retried nor raised, and nothing is learned from the refusal. It may
+// run on any goroutine, so it leaves the Tick-owned state to Tick.
 func (e *Elector) reject(term *Term) {
 	e.mu.Lock()
 	e.stopped = true
-	if e.term == term {
-		e.term = nil
-	}
+	current := e.term
+	e.term = nil
 	e.status = Status{Reason: ReasonFenceRejected, Detail: "the receiver refused a write of this process; reset the receiver, then restart the controller"}
 	e.mu.Unlock()
 	term.reject()
+	if current != nil && current != term {
+		current.reject()
+	}
 	e.cfg.Logf("leader election: %s: write refused by the receiver's fence, all duty writes stopped", ReasonFenceRejected)
 }
 
@@ -207,8 +213,14 @@ func (e *Elector) renew(ctx context.Context, term *Term) time.Duration {
 			e.endTerm(term, ReasonLeadershipLost, "the Lease no longer belongs to this term")
 			return e.cfg.RetryPeriod
 		}
+		if !term.extend(start.Add(e.cfg.RenewDeadline)) {
+			// The renewal landed after the gate closed (a slow call): the term is not
+			// revived. This instance holds the Lease, so it hands it back.
+			e.endTerm(term, ReasonLeadershipLost, "the renew deadline passed before the renewal returned")
+			e.release(updated)
+			return e.cfg.RetryPeriod
+		}
 		e.lease = updated
-		term.extend(start.Add(e.cfg.RenewDeadline))
 		return e.cfg.RetryPeriod
 	case errors.Is(err, ErrConflict):
 		e.endTerm(term, ReasonLeadershipLost, "the Lease was changed by another writer")
@@ -307,7 +319,10 @@ func (e *Elector) bootstrap(ctx context.Context) time.Duration {
 }
 
 // lead opens the gate for a term whose Lease write succeeded. The Lease must carry the
-// term, including a UID: without a lineage there is nothing to fence with.
+// term, including a UID: without a lineage there is nothing to fence with. The deadline
+// counts from start, taken before the write was sent, so a slow or delayed answer
+// shortens the term instead of extending it; one that arrives after the deadline opens
+// no term at all.
 func (e *Elector) lead(ctx context.Context, l *Lease, epoch int64, start time.Time) time.Duration {
 	if l.UID == "" {
 		return e.fail(ReasonLeaseUnavailable, errors.New("the stored Lease has no UID"))
@@ -316,10 +331,25 @@ func (e *Elector) lead(ctx context.Context, l *Lease, epoch int64, start time.Ti
 	if err := e.ownsTerm(l, probe); err != nil {
 		return e.fail(ReasonLeaseUnavailable, err)
 	}
-	termCtx, cancel := context.WithCancel(ctx)
-	term := &Term{Lineage: l.UID, Epoch: epoch, clock: e.cfg.Clock, ctx: termCtx, cancel: cancel, dl: start.Add(e.cfg.RenewDeadline)}
+	deadline := start.Add(e.cfg.RenewDeadline)
+	if e.beforeTerm != nil {
+		e.beforeTerm()
+	}
+	term := newTerm(ctx, e.cfg.Clock, l.UID, epoch, deadline)
 	e.lease = l
 	e.mu.Lock()
+	if e.stopped {
+		// A refused write stopped the instance while this acquisition was in flight.
+		e.mu.Unlock()
+		term.cancel()
+		return e.cfg.RetryPeriod
+	}
+	if !term.Valid() {
+		e.mu.Unlock()
+		term.cancel()
+		e.releaseHeld()
+		return e.fail(ReasonLeaseUnavailable, errors.New("the renew deadline passed before the term started"))
+	}
 	e.term = term
 	onTerm := e.onTerm
 	e.mu.Unlock()

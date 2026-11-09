@@ -365,7 +365,7 @@ func TestTokenRotationMidRunKeepsRenewalsAndLaterTakeoverWorking(t *testing.T) {
 			t.Fatalf("takeover failed after rotation: %+v", b.Status())
 		}
 	}
-	if err := b.Publish(ctx, rec, nil); err != nil || rec.holds().Epoch != 2 {
+	if err := b.Publish(ctx, b.Term(), rec, nil); err != nil || rec.holds().Epoch != 2 {
 		t.Fatalf("publish %v, receiver %+v", err, rec.holds())
 	}
 	// The token disappears: renewals fail closed, no request is sent, and the gate closes.

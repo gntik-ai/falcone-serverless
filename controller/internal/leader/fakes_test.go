@@ -166,6 +166,8 @@ type fakeClient struct {
 	dropCreateReply bool // Create lands, but the reply is lost
 	dropUpdateReply bool // Update lands, but the reply is lost
 	afterGet        func()
+	afterCreate     func()       // runs after a Create landed, before its reply is returned
+	beforeUpdate    func() error // runs before an Update is applied; an error fails it
 	gets            int
 }
 
@@ -195,6 +197,14 @@ func (c *fakeClient) Get(context.Context) (*Lease, error) {
 }
 
 func (c *fakeClient) Create(_ context.Context, l *Lease) (*Lease, error) {
+	out, err := c.create(l)
+	if c.afterCreate != nil && err == nil {
+		c.afterCreate() // the reply is delayed while the rest of the world moves on
+	}
+	return out, err
+}
+
+func (c *fakeClient) create(l *Lease) (*Lease, error) {
 	c.api.mu.Lock()
 	defer c.api.mu.Unlock()
 	c.api.ops = append(c.api.ops, fakeOp{"create", c.namespace})
@@ -220,6 +230,11 @@ func (c *fakeClient) Create(_ context.Context, l *Lease) (*Lease, error) {
 }
 
 func (c *fakeClient) Update(_ context.Context, l *Lease) (*Lease, error) {
+	if c.beforeUpdate != nil {
+		if err := c.beforeUpdate(); err != nil {
+			return nil, err
+		}
+	}
 	c.api.mu.Lock()
 	defer c.api.mu.Unlock()
 	c.api.ops = append(c.api.ops, fakeOp{"update", c.namespace})
@@ -280,11 +295,13 @@ func (r *fakeReceiver) Write(_ context.Context, s Stamp, _ []byte) error {
 	return nil
 }
 
-// reset is the operator clearing the recorded lineage and epoch for this singleton.
-func (r *fakeReceiver) reset() {
+// reset is the operator recovery: it binds the receiver to the current Lease's uid with
+// epoch 0 and sequence 0. The receiver never adopts the lineage of whichever report
+// arrives next, so an old lineage's report that arrives first is still refused.
+func (r *fakeReceiver) reset(lineage string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.lineage, r.epoch, r.seq = "", 0, 0
+	r.lineage, r.epoch, r.seq = lineage, 0, 0
 }
 
 func (r *fakeReceiver) holds() Stamp {
@@ -328,8 +345,9 @@ func (i *instance) tick() { i.e.Tick(context.Background()) }
 
 func (i *instance) leads() bool { return i.e.Term() != nil }
 
+// publish is a duty publishing under the instance's current term.
 func (i *instance) publish(r *fakeReceiver) error {
-	return i.e.Publish(context.Background(), r, []byte(i.id))
+	return i.e.Publish(context.Background(), i.e.Term(), r, []byte(i.id))
 }
 
 // run advances the shared clock in retry-period steps for d, ticking each live

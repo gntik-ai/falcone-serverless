@@ -434,6 +434,201 @@ func TestRaceRepeated404sNeverLeadAndWriteNothingUnlessCreateSucceeds(t *testing
 	}
 }
 
+// The pause lands between the deadline calculation and the term's context: the term is born
+// past its deadline, opens no gate, and its epoch never reaches the receiver while the
+// standby that took over publishes at the next one.
+func TestRacePauseBetweenDeadlineAndContextOpensNoTermAndTheNewEpochIsAccepted(t *testing.T) {
+	clock, api, rec := newFakeClock(epoch0), newFakeAPI(), &fakeReceiver{}
+	held := validLease("4")
+	held.HolderIdentity = "ghost"
+	api.seed(held)
+	a, b := newInstance(t, api, clock, "controller-0"), newInstance(t, api, clock, "controller-1")
+	a.tick() // both observe the ghost's Lease at t=0
+	b.tick()
+	clock.Advance(DefaultLeaseDuration)
+	a.e.beforeTerm = func() {
+		a.e.beforeTerm = nil
+		// A has taken the Lease (epoch 5) and computed its deadline; the process now pauses.
+		// B sees the Lease unchanged for a lease duration and takes over at epoch 6.
+		for range 9 {
+			clock.Advance(tick)
+			b.tick()
+		}
+	}
+	// A's observation is a lease duration old, so it takes the Lease over now.
+	a.tick()
+	if a.leads() {
+		t.Fatalf("A opened a gate past its deadline: %+v", a.e.Status())
+	}
+	if got := a.e.Status().Reason; got != ReasonLeaseUnavailable {
+		t.Fatalf("A status %q", got)
+	}
+	if err := b.publish(rec); err != nil {
+		t.Fatalf("the new leader's report was refused: %v", err)
+	}
+	if got := rec.holds(); got.Epoch != 6 || got.Lineage != "uid-1" {
+		t.Fatalf("receiver %+v, want epoch 6 from B", got)
+	}
+	if err := a.publish(rec); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("the paused instance published: %v", err)
+	}
+	if api.snapshot().HolderIdentity != "controller-1" {
+		t.Fatalf("holder %q", api.snapshot().HolderIdentity)
+	}
+}
+
+// The Create lands but its successful reply is delayed past the deadline while the standby
+// takes over. The late reply opens no term and the receiver accepts only the new epoch.
+func TestRaceDelayedSuccessfulCreateOpensNoTermAndTheNewEpochIsAccepted(t *testing.T) {
+	clock, api, rec := newFakeClock(epoch0), newFakeAPI(), &fakeReceiver{}
+	a, b := newInstance(t, api, clock, "controller-0"), newInstance(t, api, clock, "controller-1")
+	a.client.afterCreate = func() {
+		a.client.afterCreate = nil
+		for range 9 { // 18 s: B sees the new Lease unchanged for a lease duration and takes it
+			clock.Advance(tick)
+			b.tick()
+		}
+	}
+	a.tick()
+	if a.leads() {
+		t.Fatalf("a reply that arrived after the deadline opened a gate: %+v", a.e.Status())
+	}
+	mustLead(t, b)
+	if err := b.publish(rec); err != nil {
+		t.Fatalf("the new leader's report was refused: %v", err)
+	}
+	if rec.holds().Epoch != 2 {
+		t.Fatalf("receiver %+v, want epoch 2", rec.holds())
+	}
+	if err := a.publish(rec); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("the delayed instance published: %v", err)
+	}
+	if rec.acceptedCount() != 1 {
+		t.Fatalf("accepted %d reports", rec.acceptedCount())
+	}
+}
+
+// A refusal that arrives after the process re-acquired the Lease still stops every term:
+// the term that was refused is not the current one.
+func TestFenceRefusalAfterReacquisitionStopsTheCurrentTermToo(t *testing.T) {
+	clock, api := newFakeClock(epoch0), newFakeAPI()
+	a := newInstance(t, api, clock, "controller-0")
+	a.tick()
+	termA := mustLead(t, a)
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+	sink := blockingSink{started: inFlight, release: release}
+	result := make(chan error, 1)
+	go func() { result <- a.e.Publish(context.Background(), termA, sink, nil) }()
+	<-inFlight
+
+	a.client.down = true // renewals fail until the gate closes, then the API returns
+	run(clock, 12*time.Second, a)
+	if a.leads() {
+		t.Fatal("A must have lost its term")
+	}
+	a.client.down = false
+	run(clock, 40*time.Second, a)
+	termB := mustLead(t, a)
+	if termB == termA || termB.Epoch != 2 {
+		t.Fatalf("the re-acquired term %+v", termB)
+	}
+
+	close(release) // the delayed refusal of term A arrives now
+	if err := <-result; !errors.Is(err, ErrFenceRejected) {
+		t.Fatalf("publish returned %v", err)
+	}
+	if a.leads() {
+		t.Fatal("the re-acquired term still leads after a refusal")
+	}
+	if _, err := termB.Stamp(); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("the re-acquired term can still stamp writes: %v", err)
+	}
+	select {
+	case <-termB.Context().Done():
+	default:
+		t.Fatal("the re-acquired term's duty work was not cancelled")
+	}
+	if s := a.e.Status(); s.Reason != ReasonFenceRejected || s.Ready || s.Leading {
+		t.Fatalf("status %+v", s)
+	}
+	a.tick() // a stopped instance releases the Lease and never campaigns again
+	if api.snapshot().HolderIdentity != "" {
+		t.Fatal("the stopped instance still holds the Lease")
+	}
+	run(clock, time.Minute, a)
+	if a.leads() || a.e.Status().Reason != ReasonFenceRejected {
+		t.Fatalf("status %+v", a.e.Status())
+	}
+}
+
+// A refusal that arrives while a takeover is still being answered opens no term.
+func TestFenceRefusalDuringAnInFlightAcquisitionOpensNoTerm(t *testing.T) {
+	clock, api := newFakeClock(epoch0), newFakeAPI()
+	a := newInstance(t, api, clock, "controller-0")
+	a.tick()
+	termA := mustLead(t, a)
+	a.client.down = true
+	run(clock, 12*time.Second, a)
+	a.client.down = false
+	refused := false
+	a.e.beforeTerm = func() {
+		a.e.beforeTerm = nil
+		refused = true
+		a.e.reject(termA) // the delayed refusal lands between the write and the gate
+	}
+	for !refused {
+		clock.Advance(tick)
+		a.tick()
+		if clock.Now().Sub(epoch0) > 10*time.Minute {
+			t.Fatal("the takeover never happened")
+		}
+	}
+	if a.leads() || a.e.Status().Reason != ReasonFenceRejected {
+		t.Fatalf("a term opened after the refusal: %+v", a.e.Status())
+	}
+	if a.e.Term() != nil {
+		t.Fatal("a term is open after the refusal")
+	}
+}
+
+// A duty that paused before publishing resumes after the process re-acquired the Lease: its
+// payload came from the old term, so it can neither be stamped with the new epoch nor sent.
+func TestPausedDutyCannotPublishUnderTheReacquiredTerm(t *testing.T) {
+	clock, api, rec := newFakeClock(epoch0), newFakeAPI(), &fakeReceiver{}
+	a := newInstance(t, api, clock, "controller-0")
+	a.tick()
+	termA := mustLead(t, a)
+	a.client.down = true
+	run(clock, 12*time.Second, a)
+	a.client.down = false
+	run(clock, 40*time.Second, a)
+	termB := mustLead(t, a)
+	if termB.Epoch != 2 {
+		t.Fatalf("epoch %d", termB.Epoch)
+	}
+	if err := a.e.Publish(context.Background(), termA, rec, []byte("stale result")); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("a duty of the old term published: %v", err)
+	}
+	if rec.acceptedCount() != 0 {
+		t.Fatalf("a stale payload reached the receiver: %+v", rec.accepted)
+	}
+	if err := a.e.Publish(context.Background(), termB, rec, []byte("current")); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rec.holds(), (Stamp{Lineage: "uid-1", Epoch: 2, Seq: 1}); got != want {
+		t.Fatalf("receiver %+v, want %+v", got, want)
+	}
+}
+
+type blockingSink struct{ started, release chan struct{} }
+
+func (s blockingSink) Write(context.Context, Stamp, []byte) error {
+	close(s.started)
+	<-s.release
+	return &FencedError{}
+}
+
 // --- deletion and lineage ----------------------------------------------------
 
 func TestDeletedLeaseIsFencedAtEveryEpochUntilTheOperatorResetsTheReceiver(t *testing.T) {
@@ -524,7 +719,14 @@ func TestDeletedLeaseIsFencedAtEveryEpochUntilTheOperatorResetsTheReceiver(t *te
 
 			// Operator recovery: reset the receiver, restart the controller. A new term is
 			// accepted, and a report delayed from the deleted lineage is still refused.
-			rec.reset()
+			rec.reset(api.snapshot().UID)
+			// A report delayed from the deleted lineage arrives first, right after the reset:
+			// it must neither be accepted nor reclaim the receiver for the old lineage.
+			requireFenced(t, rec.Write(context.Background(), delayedOld, nil))
+			requireFenced(t, rec.Write(context.Background(), Stamp{Lineage: oldTerm.Lineage, Epoch: 1, Seq: 1}, nil))
+			if rec.holds().Lineage != termNew.Lineage {
+				t.Fatalf("the old lineage reclaimed the receiver: %+v", rec.holds())
+			}
 			restarted := newInstance(t, api, clock, "controller-1")
 			for range 10 {
 				restarted.tick()
@@ -614,6 +816,49 @@ func TestRenewalFailureClosesTheGateAtTheRenewDeadlineAndCancelsDutyWork(t *test
 	}
 	if s := a.e.Status(); s.Reason != ReasonLeadershipLost || s.Ready {
 		t.Fatalf("status %+v", s)
+	}
+}
+
+// With the last renewal at t=0, a failing renewal that returns at t=7 and a retry from t=9
+// that succeeds at t=13: the gate closes at t=10 and the duty context is cancelled at once,
+// before any later Tick, and the late success does not reopen it.
+func TestGateExpiryCancelsDutyWorkWithoutATickAndALateRenewalDoesNotReviveIt(t *testing.T) {
+	clock, api, rec := newFakeClock(epoch0), newFakeAPI(), &fakeReceiver{}
+	a := newInstance(t, api, clock, "controller-0")
+	a.tick() // t=0: leads, renewed at t=0
+	term := mustLead(t, a)
+	calls := 0
+	a.client.beforeUpdate = func() error {
+		calls++
+		if calls == 1 { // a slow failure, back at t=7
+			clock.Advance(7 * time.Second)
+			return errDown
+		}
+		clock.Advance(4 * time.Second) // the retry from t=9 returns at t=13
+		select {
+		case <-term.Context().Done():
+		case <-time.After(10 * time.Second):
+			t.Error("the gate closed at t=10 without cancelling the duty context")
+		}
+		return nil
+	}
+	a.tick() // renewal fails at t=7: the gate is still open
+	if !a.leads() {
+		t.Fatal("the gate closed before the renew deadline")
+	}
+	clock.Advance(2 * time.Second) // t=9
+	a.tick()                       // the renewal lands at t=13, past the deadline
+	if a.leads() || a.e.Status().Reason != ReasonLeadershipLost {
+		t.Fatalf("the late renewal reopened the gate: %+v", a.e.Status())
+	}
+	if _, err := term.Stamp(); !errors.Is(err, ErrNotLeader) {
+		t.Fatalf("an expired term can still stamp writes: %v", err)
+	}
+	if err := a.e.Publish(context.Background(), term, rec, nil); !errors.Is(err, ErrNotLeader) || rec.acceptedCount() != 0 {
+		t.Fatalf("an expired term published: %v", err)
+	}
+	if api.snapshot().HolderIdentity != "" {
+		t.Fatal("the instance that lost its gate must hand the Lease back")
 	}
 }
 

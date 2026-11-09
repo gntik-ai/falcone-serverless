@@ -127,9 +127,11 @@ To recover, an operator:
 
 1. Confirms the cause: the Lease's `metadata.uid` differs from the lineage the receiver
    holds for this singleton.
-2. Resets the receiver's recorded lineage and epoch for this singleton, so that it
-   adopts the current Lease's lineage with the next accepted report. The reset is a
-   Falcone-side operation.
+2. Resets the receiver's recorded lineage and epoch for this singleton, binding it to
+   the current Lease's `metadata.uid` with epoch 0 and sequence 0. The reset names that
+   uid; the receiver does not adopt the lineage of whichever report arrives next, so a
+   report delayed from the deleted lineage that arrives right after the reset is still
+   refused. The reset is a Falcone-side operation.
 3. Restarts the controller pods, because `FenceRejected` lasts for the life of the
    process. A fresh process reads the epoch from the Lease and publishes at epoch plus
    one.

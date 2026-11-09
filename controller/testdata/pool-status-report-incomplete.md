@@ -264,9 +264,13 @@ revision 1.2 report whose `reporterLineage` differs from the recorded one,
 whatever its epoch, generation or sequence, with the state unchanged. This check
 runs before the epoch guard and the key comparison, so a recreated Lease cannot
 publish at an equal, lower or higher epoch until an operator resets the receiver's
-recorded lineage and epoch for this singleton, after which the receiver adopts the
-lineage of the next accepted report. Ordering within one lineage is
-unchanged. Otherwise:
+recorded lineage and epoch for this singleton. The reset names the lineage to bind,
+the `metadata.uid` of the current Lease: the receiver stores that uid with epoch 0
+and sequence 0, and never adopts the lineage of whichever report arrives next. A
+report delayed from the deleted lineage that arrives right after the reset therefore
+differs from the recorded lineage and is refused. Only a singleton that has never
+accepted a report has no recorded lineage, and the receiver records the first one's.
+Ordering within one lineage is unchanged. Otherwise:
 
 - Lower key: refused, state unchanged.
 - Equal key and identical payload: a replay, accepted as a no-op.

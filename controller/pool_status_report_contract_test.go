@@ -46,6 +46,7 @@ var (
 			"lexicographic", "records the lineage with the epoch and sequence",
 			"differs from the recorded one, whatever its epoch, generation or sequence",
 			"resets the receiver's recorded lineage and epoch",
+			"never adopts the lineage of whichever report arrives next",
 		},
 		"Repair conditions": {"absenceVerified"},
 		"Status mapping":    {"readiness only"},

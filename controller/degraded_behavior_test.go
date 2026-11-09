@@ -26,7 +26,7 @@ func TestDegradedBehaviorDocumentCoversEveryState(t *testing.T) {
 		"lineage fence":                    {"`reporterLineage` (the Lease `metadata.uid`)", "never accepted after a newer epoch has published"},
 		"overlap window":                   {"The overlap window", "Two replicas may both believe they lead", "paused", "clock runs slow"},
 		"Lease deletion":                   {"Lease deletion and operator recovery", "refuses every report of the new lineage", "no automatic recovery for a lost epoch or lineage"},
-		"operator recovery":                {"Resets the receiver's recorded lineage and epoch for this singleton", "Restarts the controller pods"},
+		"operator recovery":                {"Resets the receiver's recorded lineage and epoch for this singleton", "Restarts the controller pods", "binding it to the current Lease's `metadata.uid`", "still refused"},
 		"SIGTERM":                          {"SIGTERM", "stops its duties first", "releases the Lease"},
 		"kill switch":                      {"set the controller replica count to 1"},
 	} {
