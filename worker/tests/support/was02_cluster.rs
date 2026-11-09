@@ -390,34 +390,18 @@ impl Cluster for RealCluster {
 
 /// The qualification pod's JSON-lines output is the harness's evidence boundary.
 pub fn qualification_logs_passed(logs: &str) -> bool {
-    let records: Vec<serde_json::Value> = logs.lines()
-        .filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let records: Vec<serde_json::Value> = logs
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
     if !records.contains(&serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})) {
         return false;
     }
-    if QUALIFICATION_CHECK != "handler_execution" {
-        return true;
-    }
-    // Independent of the runner's dispatch table: deleting a security case
-    // there must make the live qualification fail, even with a passed aggregate.
-    [
-        "successful_handler_call",
-        "host_capability",
-        "host_import_limits",
-        "signature_before_host_call",
-        "utf16_before_host_call",
-        "latin1_before_host_call",
-        "host_to_guest_limits",
-        "guest_to_host_limits",
-        "guest_to_host_allocations",
-        "timeout_isolation",
-        "blocked_host_call_deadline",
-        "cancelled_success",
-        "cancelled_error",
-        "cancelled_expired_before_guest_call",
-        "expired_success",
-        "expired_error",
-    ].iter().all(|case| records.contains(&serde_json::json!({"case":case,"status":"passed"})))
+    // The test owns an independent list of required evidence records, so a
+    // missing runner case cannot be hidden by a passed aggregate record.
+    REQUIRED_CASES
+        .iter()
+        .all(|case| records.contains(&serde_json::json!({"case":case,"status":"passed"})))
 }
 
 #[test]

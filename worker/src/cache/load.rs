@@ -16,10 +16,26 @@ use wasmtime as engine;
 
 pub(super) type Engine = engine::Engine;
 
+/// Only the verified cache boundary can supply the execution component.
+///
+/// ```compile_fail
+/// use falcone_serverless_worker::cache::Loaded;
+/// use wasmtime as engine;
+/// fn forge(component: engine::component::Component) -> Loaded {
+///     Loaded { key: String::new(), cache_hit: false, component }
+/// }
+/// ```
 pub struct Loaded {
     pub key: String,
     pub cache_hit: bool,
-    pub component: engine::component::Component,
+    component: engine::component::Component,
+}
+
+impl Loaded {
+    /// Transfer the verified component to a trusted execution consumer.
+    pub fn into_component(self) -> engine::component::Component {
+        self.component
+    }
 }
 
 impl std::fmt::Debug for Loaded {

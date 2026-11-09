@@ -3,6 +3,9 @@
 #[path = "../artifact/mod.rs"]
 pub mod artifact;
 
+#[path = "../cache/mod.rs"]
+pub mod cache;
+
 #[path = "../host/mod.rs"]
 pub mod host;
 

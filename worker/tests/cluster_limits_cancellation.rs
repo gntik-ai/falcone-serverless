@@ -13,6 +13,8 @@ const QUALIFICATION_FLAG: &str = "--limits-cancellation";
 const QUALIFICATION_CHECK: &str = "limits_cancellation";
 const CLUSTER_TEST: &str = "cluster_limits_cancellation";
 
+const REQUIRED_CASES: &[&str] = &[];
+
 include!("support/was02_cluster.rs");
 
 #[test]

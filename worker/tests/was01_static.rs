@@ -169,17 +169,14 @@ fn source_valid(path: &Path, source: &str) -> bool {
     ]
     .iter()
     .any(|allowed| path == Path::new(allowed));
-    // WAS-01 handler execution needs typed component calls, a qualification CLI
-    // engine, and shared restricted-pod cases. Keep these exact exceptions;
-    // neighbouring modules still cannot construct engines or load components.
-    let execution = [
-        "host/execute.rs",
-        "main.rs",
-        "qualification/execute_cases.rs",
-    ]
-    .iter()
-    .any(|allowed| path == Path::new(allowed));
+    // Execution may call a verified component, but cannot build an engine or
+    // compile raw Wasm. The CLI and shared cases use the trusted cache API.
+    let execution = path == Path::new("host/execute.rs");
     (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
+        && (!execution
+            || !["Component::", "Module::", "Engine::", ".precompile_"]
+                .iter()
+                .any(|api| source.contains(api)))
         && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin || capability || execution)
         && (!source.contains("Status::Passed") || outcome)
@@ -244,6 +241,26 @@ fn qualification_sources_obey_boundaries() {
         ),
     ] {
         assert!(!source_valid(Path::new(path), source), "{path}: {source}");
+    }
+}
+
+#[test]
+fn handler_execution_cannot_construct_engines_or_compile_components() {
+    for source in [
+        "Component::new(engine, bytes)",
+        "Component::from_binary(engine, bytes)",
+        "Component::from_file(engine, path)",
+        "Module::new(engine, bytes)",
+        "engine.precompile_component(bytes)",
+        "Engine::new(config)",
+    ] {
+        assert!(
+            !source_valid(Path::new("host/execute.rs"), source),
+            "{source}"
+        );
+    }
+    for path in ["main.rs", "qualification/execute_cases.rs"] {
+        assert!(!source_valid(Path::new(path), "wasmtime::Engine"), "{path}");
     }
 }
 

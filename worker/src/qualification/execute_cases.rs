@@ -1,7 +1,14 @@
 //! Shared public execution cases, run in-process and by the restricted cluster runner.
+use falcone_serverless_worker::artifact::supervisor::CompileLimits;
+use falcone_serverless_worker::cache::{self, Cache, Loaded};
 use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
-use std::sync::Arc;
-use wasmtime::{Config, Engine};
+use falcone_serverless_worker::limits::Limits;
+use std::cell::RefCell;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ECHO: &[u8] = include_bytes!("execute_fixtures/echo.wasm");
 struct Deny;
@@ -10,10 +17,82 @@ impl Bindings for Deny {
         Err(HostError::Denied)
     }
 }
-fn engine() -> Engine {
-    let mut config = Config::new();
-    config.epoch_interruption(true);
-    Engine::new(&config).unwrap()
+// Use the production validation, bounded child and verified-load boundary in
+// both unit and restricted-pod cases. One owner supplies the shared engine.
+struct Compiler {
+    cache: RefCell<Cache>,
+    directory: PathBuf,
+}
+impl Compiler {
+    fn load(&self, bytes: &[u8], cancelled: &AtomicBool) -> Result<Loaded, host::ExecutionError> {
+        self.cache
+            .borrow_mut()
+            .compile(
+                cache::CONTRACT_VERSION,
+                bytes,
+                CompileLimits {
+                    input_bytes: 64 * 1024 * 1024,
+                    cpu_seconds: 120,
+                    memory_bytes: 4 * 1024 * 1024 * 1024,
+                    wall_clock_deadline: Instant::now() + Duration::from_secs(300),
+                },
+                cancelled,
+            )
+            .map_err(|error| host::ExecutionError {
+                code: error.code,
+                message: None,
+            })
+    }
+}
+impl Drop for Compiler {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+fn compiler() -> Compiler {
+    let directory = std::env::temp_dir().join(format!(
+        "handler-cache-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    // Cargo tests run in deps/, while the installed qualification binary lives
+    // beside the trusted child. Neither path comes from guest input.
+    let exe = std::env::current_exe().unwrap();
+    let parent = exe.parent().unwrap();
+    let parent = if parent.ends_with("deps") {
+        parent.parent().unwrap()
+    } else {
+        parent
+    };
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let cache = Cache::new(&directory, parent.join("artifact-compile-child")).unwrap();
+    Compiler {
+        cache: RefCell::new(cache),
+        directory,
+    }
+}
+fn prepared(
+    compiler: &Compiler,
+    bytes: &[u8],
+    host: Host,
+) -> Result<host::Prepared, host::ExecutionError> {
+    let loaded = compiler.load(bytes, &host.cancellation())?;
+    host::Prepared::new(loaded, host)
+}
+fn execute(
+    compiler: &Compiler,
+    bytes: &[u8],
+    params: &[u8],
+    host: Host,
+) -> Result<Vec<u8>, host::ExecutionError> {
+    let loaded = compiler.load(bytes, &host.cancellation())?;
+    host::execute(loaded, params, host)
 }
 fn host() -> Host {
     Host::new(Context::default(), Arc::new(Deny))
@@ -21,16 +100,11 @@ fn host() -> Host {
 
 #[cfg_attr(test, test)]
 pub fn successful_handler_echoes_the_params() {
-    let engine = engine();
+    let compiler = compiler();
     let params = br#"{"hello":"world"}"#;
-    assert_eq!(
-        host::execute(&engine, ECHO, params, host()).unwrap(),
-        params
-    );
+    assert_eq!(execute(&compiler, ECHO, params, host()).unwrap(), params);
 }
 
-use falcone_serverless_worker::limits::Limits;
-use std::sync::atomic::{AtomicUsize, Ordering};
 const ACTIONS: &[u8] = include_bytes!("execute_fixtures/actions.wasm");
 fn limits(limit: usize, deadline: u64) -> Limits {
     Limits::parse(&format!(r#"{{"version":1,"compiler_cpu_seconds":120,"compiler_memory_bytes":4294967296,"guest_memory_bytes":268435456,"guest_to_host_bytes":{limit},"host_to_guest_bytes":{limit},"guest_deadline_ms":{deadline},"host_call_deadline_ms":30000,"termination_budget_ms":500}}"#)).unwrap()
@@ -52,22 +126,20 @@ fn command(len: u32, outcome: u8, action: u8) -> Vec<u8> {
 #[cfg_attr(test, test)]
 pub fn params_are_bounded_before_guest_calls_at_small_and_default_limits() {
     let _case = crate::capability_support::serial_case();
-    let engine = engine();
+    let compiler = compiler();
     for limit in [128, host::BUFFER_BYTES] {
         let bindings = Arc::new(Count::default());
         let host = Host::with_limits(Context::default(), bindings.clone(), limits(limit, 30000));
         let mut params = command(0, 0, 1);
         params.resize(limit + 1, 0);
         assert_eq!(
-            host::execute(&engine, ACTIONS, &params, host)
-                .unwrap_err()
-                .code,
+            execute(&compiler, ACTIONS, &params, host).unwrap_err().code,
             "buffer_limit_exceeded"
         );
         assert_eq!(bindings.0.load(Ordering::SeqCst), 0);
         let params = vec![42; limit];
         let host = Host::with_limits(Context::default(), Arc::new(Deny), limits(limit, 30000));
-        assert_eq!(host::execute(&engine, ECHO, &params, host).unwrap(), params);
+        assert_eq!(execute(&compiler, ECHO, &params, host).unwrap(), params);
     }
 }
 
@@ -77,7 +149,7 @@ pub fn version_two_host_capability_is_callable() {
     let bindings = Arc::new(Count::default());
     let host = Host::new(Context::default(), bindings.clone());
     assert_eq!(
-        host::execute(&engine(), ACTIONS, &command(3, 0, 1), host).unwrap(),
+        execute(&compiler(), ACTIONS, &command(3, 0, 1), host).unwrap(),
         b"aaa"
     );
     assert_eq!(bindings.0.load(Ordering::SeqCst), 1);
@@ -105,11 +177,11 @@ pub fn handler_logging_preserves_host_import_limits() {
             Ok(Reply::Empty)
         }
     }
-    let engine = engine();
+    let compiler = compiler();
     let bindings = Arc::new(Logs(AtomicUsize::new(0)));
     let host = Host::with_limits(Context::default(), bindings.clone(), limits(128, 30000));
-    let mut prepared = host::Prepared::new(
-        &engine,
+    let mut prepared = prepared(
+        &compiler,
         include_bytes!("execute_fixtures/logging.wasm"),
         host,
     )
@@ -125,13 +197,13 @@ pub fn handler_logging_preserves_host_import_limits() {
 #[cfg_attr(test, test)]
 pub fn utf8_result_and_error_payloads_obey_configured_limits() {
     let _case = crate::capability_support::serial_case();
-    let engine = engine();
+    let compiler = compiler();
     for limit in [128, host::BUFFER_BYTES] {
         for kind in [0, 1, 2] {
             for len in [limit, limit + 1] {
                 let host =
                     Host::with_limits(Context::default(), Arc::new(Deny), limits(limit, 30000));
-                let result = host::execute(&engine, ACTIONS, &command(len as u32, kind, 0), host);
+                let result = execute(&compiler, ACTIONS, &command(len as u32, kind, 0), host);
                 if len > limit {
                     assert_eq!(result.unwrap_err().code, "buffer_limit_exceeded");
                 } else if kind == 0 {
@@ -154,17 +226,19 @@ pub fn utf8_result_and_error_payloads_obey_configured_limits() {
 }
 
 #[cfg_attr(test, test)]
+#[cfg_attr(
+    test,
+    ignore = "allocation probe: invoked by the parent case in a fresh child"
+)]
 pub fn execute_allocation_probe() {
-    let Ok(probe) = std::env::var("FS_EXECUTE_ALLOCATION") else {
-        return;
-    };
+    let probe = std::env::var("FS_EXECUTE_ALLOCATION").expect("allocation probe configuration");
     let parts: Vec<usize> = probe.split(':').map(|part| part.parse().unwrap()).collect();
     let [limit, len, kind] = parts[..] else {
         panic!("allocation probe config")
     };
-    let engine = engine();
+    let compiler = compiler();
     let host = Host::with_limits(Context::default(), Arc::new(Deny), limits(limit, 30000));
-    let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();
+    let mut prepared = prepared(&compiler, ACTIONS, host).unwrap();
     prepared.call(&command(0, 0, 0)).unwrap();
     let params = command(len as u32, kind as u8, 0);
     let before = crate::counting_alloc::reset_peak();
@@ -185,7 +259,7 @@ pub fn oversized_results_and_errors_are_rejected_before_host_allocation() {
         for len in [limit + 1, if limit == 128 { 1_048_576 } else { 2_097_152 }] {
             for kind in [0, 1, 2] {
                 let output = std::process::Command::new(std::env::current_exe().unwrap())
-                    .args(["execute_allocation_probe", "--nocapture"])
+                    .args(["execute_allocation_probe", "--ignored", "--nocapture"])
                     .env("FS_EXECUTE_ALLOCATION", format!("{limit}:{len}:{kind}"))
                     .output()
                     .unwrap();
@@ -202,8 +276,6 @@ pub fn oversized_results_and_errors_are_rejected_before_host_allocation() {
     }
 }
 
-use std::sync::{Mutex, atomic::AtomicBool};
-use std::time::{Duration, Instant};
 struct Completion {
     cancellation: Mutex<Option<Arc<AtomicBool>>>,
     delay: Duration,
@@ -220,7 +292,7 @@ impl Bindings for Completion {
     }
 }
 fn completion(kind: u8, cancel: bool, expire: bool) {
-    let engine = engine();
+    let compiler = compiler();
     let bindings = Arc::new(Completion {
         cancellation: Mutex::new(None),
         calls: AtomicUsize::new(0),
@@ -238,7 +310,7 @@ fn completion(kind: u8, cancel: bool, expire: bool) {
     if cancel {
         *bindings.cancellation.lock().unwrap() = Some(host.cancellation());
     }
-    let result = host::execute(&engine, ACTIONS, &command(3, kind, 1), host);
+    let result = execute(&compiler, ACTIONS, &command(3, kind, 1), host);
     assert_eq!(
         result.unwrap_err().code,
         if cancel { "cancelled" } else { "guest_timeout" }
@@ -263,12 +335,12 @@ pub fn cancellation_precedes_handler_error() {
 #[cfg_attr(test, test)]
 pub fn cancellation_precedes_expired_invocation_before_guest_call() {
     let _case = crate::capability_support::serial_case();
-    let engine = engine();
+    let compiler = compiler();
     for kind in [0, 2] {
         let bindings = Arc::new(Count::default());
         let host = Host::with_limits(Context::default(), bindings.clone(), limits(128, 50));
         let flag = host.cancellation();
-        let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();
+        let mut prepared = prepared(&compiler, ACTIONS, host).unwrap();
         std::thread::sleep(Duration::from_millis(70));
         flag.store(true, Ordering::Release);
         assert_eq!(
@@ -293,7 +365,7 @@ fn rejection(bytes: &[u8], code: &str) {
     let bindings = Arc::new(Count::default());
     let host = Host::new(Context::default(), bindings.clone());
     assert_eq!(
-        host::execute(&engine(), bytes, b"", host).unwrap_err().code,
+        execute(&compiler(), bytes, b"", host).unwrap_err().code,
         code
     );
     assert_eq!(bindings.0.load(Ordering::SeqCst), 0);
@@ -332,18 +404,17 @@ pub fn latin1_rejection_precedes_guest_start_and_host_calls() {
 #[cfg_attr(test, test)]
 pub fn guest_deadline_interrupts_only_its_store_on_a_shared_engine() {
     let _case = crate::capability_support::serial_case();
-    let mut config = Config::new();
-    config.epoch_interruption(true).consume_fuel(true);
-    let engine = Engine::new(&config).unwrap();
+    let compiler = compiler();
+    // Complete both compiles before starting either store's guest deadline.
+    let slow = compiler.load(ACTIONS, &AtomicBool::new(false)).unwrap();
+    let healthy = compiler.load(ECHO, &AtomicBool::new(false)).unwrap();
     let mut slow = host::Prepared::new(
-        &engine,
-        ACTIONS,
+        slow,
         Host::with_limits(Context::default(), Arc::new(Deny), limits(128, 150)),
     )
     .unwrap();
     let healthy = host::Prepared::new(
-        &engine,
-        ECHO,
+        healthy,
         Host::with_limits(Context::default(), Arc::new(Deny), limits(128, 2000)),
     )
     .unwrap();
@@ -374,14 +445,14 @@ pub fn guest_deadline_interrupts_only_its_store_on_a_shared_engine() {
 #[cfg_attr(test, test)]
 pub fn guest_deadline_also_bounds_a_blocked_host_call() {
     let _case = crate::capability_support::serial_case();
-    let engine = engine();
+    let compiler = compiler();
     let binding = Arc::new(Completion {
         cancellation: Mutex::new(None),
         delay: Duration::from_millis(400),
         calls: AtomicUsize::new(0),
     });
     let host = Host::with_limits(Context::default(), binding, limits(128, 50));
-    let mut prepared = host::Prepared::new(&engine, ACTIONS, host).unwrap();
+    let mut prepared = prepared(&compiler, ACTIONS, host).unwrap();
     let start = Instant::now();
     assert_eq!(
         prepared.call(&command(0, 0, 1)).unwrap_err().code,

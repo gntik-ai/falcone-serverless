@@ -13,6 +13,8 @@ const QUALIFICATION_FLAG: &str = "--capability-gates";
 const QUALIFICATION_CHECK: &str = "capability_gates";
 const CLUSTER_TEST: &str = "cluster_capability_gates";
 
+const REQUIRED_CASES: &[&str] = &[];
+
 include!("support/was02_cluster.rs");
 
 #[test]

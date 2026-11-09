@@ -71,7 +71,17 @@ fn execute_command(
     params: &std::ffi::OsStr,
 ) -> Result<Vec<u8>, String> {
     use falcone_serverless_worker::host::{self, Bindings, Context, HostError, Operation, Reply};
+    use falcone_serverless_worker::{artifact::supervisor::CompileLimits, cache, limits};
     use std::io::Read;
+    use std::os::unix::fs::DirBuilderExt;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    const MAX_COMPONENT_BYTES: usize = 64 * 1024 * 1024;
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
     struct NoBindings;
     impl Bindings for NoBindings {
         fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
@@ -90,13 +100,43 @@ fn execute_command(
         }
         Ok(data)
     }
-    let artifact = bounded(artifact, 64 * 1024 * 1024, "compile_size_limit_exceeded")?;
+    let artifact = bounded(artifact, MAX_COMPONENT_BYTES, "compile_size_limit_exceeded")?;
     let params = bounded(params, host::BUFFER_BYTES, "buffer_limit_exceeded")?;
-    let mut config = wasmtime::Config::new();
-    config.epoch_interruption(true).consume_fuel(true);
-    let engine = wasmtime::Engine::new(&config).map_err(|_| "engine_unavailable")?;
+    // Resolve only the installed platform sibling, never a tenant path or PATH.
+    let executable = std::env::current_exe().map_err(|_| "compile_failed")?;
+    let child = executable
+        .parent()
+        .ok_or("compile_failed")?
+        .join("artifact-compile-child");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "trusted_cache_unavailable")?
+        .as_nanos();
+    let directory =
+        std::env::temp_dir().join(format!("execute-cache-{}-{nonce}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|_| "trusted_cache_unavailable")?;
+    let scratch = Scratch(directory);
+    let mut cache = cache::Cache::new(&scratch.0, child).map_err(|error| error.code)?;
+    let contract = limits::Limits::compatibility();
+    let budgets = CompileLimits {
+        input_bytes: MAX_COMPONENT_BYTES,
+        cpu_seconds: contract.value(limits::Field::CompilerCpuSeconds),
+        memory_bytes: contract.value(limits::Field::CompilerMemoryBytes),
+        wall_clock_deadline: Instant::now() + Duration::from_secs(300),
+    };
     let host = host::Host::new(Context::default(), std::sync::Arc::new(NoBindings));
-    host::execute(&engine, &artifact, &params, host).map_err(|error| error.code.into())
+    let loaded = cache
+        .compile(
+            cache::CONTRACT_VERSION,
+            &artifact,
+            budgets,
+            &host.cancellation(),
+        )
+        .map_err(|error| error.code)?;
+    host::execute(loaded, &params, host).map_err(|error| error.code.into())
 }
 
 fn main() {

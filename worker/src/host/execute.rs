@@ -1,9 +1,9 @@
-//! Validated UTF-8 handler execution. Compilation here is qualification-only;
-//! the runtime adapter must use the supervised compiler and trusted cache.
+//! UTF-8 handler execution from verified trusted-compiler cache loads.
 use super::{Host, runtime};
-use crate::artifact::validate::{HANDLER_EXPORT, validate};
-use wasmtime::component::{Component, ComponentType, Lift, TypedFunc};
-use wasmtime::{CallHook, Engine, Store};
+use crate::artifact::validate::HANDLER_EXPORT;
+use crate::cache::Loaded;
+use wasmtime::component::{ComponentType, Lift, TypedFunc};
+use wasmtime::{CallHook, Store};
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct ExecutionError {
@@ -35,20 +35,19 @@ pub struct Prepared {
     import_fuel: usize,
 }
 impl Prepared {
-    /// Validates before Component::new, linking or any guest start function.
-    pub fn new(engine: &Engine, bytes: &[u8], host: Host) -> Result<Self, ExecutionError> {
+    /// The cache validates raw components before bounded child compilation and
+    /// verifies native output before loading. Execution never compiles raw Wasm.
+    pub fn new(loaded: Loaded, host: Host) -> Result<Self, ExecutionError> {
         if let Some(code) = host.completion_error() {
             return Err(ExecutionError::new(code));
         }
-        let validated =
-            validate(bytes, 64 * 1024 * 1024).map_err(|error| ExecutionError::new(error.code))?;
+        let component = loaded.into_component();
+        let engine = component.engine().clone();
         if !engine.get_epoch_interruption() {
             return Err(ExecutionError::new("guest_deadline_unavailable"));
         }
-        let component = Component::new(engine, validated.bytes())
-            .map_err(|_| ExecutionError::new("compile_failed"))?;
         let (mut store, instance) =
-            runtime::instantiate_component(engine, component, host, Some(u64::MAX))
+            runtime::instantiate_component(&engine, component, host, Some(u64::MAX))
                 .map_err(|_| ExecutionError::new("instantiation_failed"))?;
         let index = instance
             .get_export_index(&mut store, None, HANDLER_EXPORT)
@@ -116,17 +115,12 @@ impl Prepared {
     }
 }
 
-/// A single qualification invocation; never accepts native/precompiled artifacts.
-pub fn execute(
-    engine: &Engine,
-    bytes: &[u8],
-    params: &[u8],
-    host: Host,
-) -> Result<Vec<u8>, ExecutionError> {
+/// A single invocation of a verified trusted-compiler cache load.
+pub fn execute(loaded: Loaded, params: &[u8], host: Host) -> Result<Vec<u8>, ExecutionError> {
     if params.len() > host.output_limit() {
         return Err(ExecutionError::new("buffer_limit_exceeded"));
     }
-    Prepared::new(engine, bytes, host)?.call(params)
+    Prepared::new(loaded, host)?.call(params)
 }
 
 // The pinned engine keeps HostcallFuelExhausted private. Match its exact,

@@ -77,13 +77,21 @@ Only UTF-8 canonical string encoding is accepted, including on host imports.
 Validation rejects missing exports, incorrect signatures and unsupported encodings
 before compilation or instantiation. Cancellation takes precedence over deadline
 expiry for both successful and application-error completions.
+Every capability host call is bounded by the earlier of its host-call deadline
+and the store's guest deadline, including callers of the existing instantiation API.
 
 The qualification CLI is `falcone-serverless-worker execute COMPONENT PARAMS`,
 where both paths name bounded files. It writes only a complete result to stdout,
 or a stable error code to stderr. It grants no external bindings. The library
-`host::execute` accepts a verified Host with configured limits; compilation in
-this qualification path is in-process. A production adapter must use the existing
-supervised compiler and trusted cache rather than this fixture compilation path.
+`host::execute` and `host::Prepared::new` accept a `cache::Loaded` component and a
+verified Host with configured limits. Obtain the component through `Cache::compile`:
+it validates raw Wasm, supervises bounded compilation in the trusted child, and
+verifies the process-owned cache entry before loading. Execution never compiles
+tenant Wasm in-process (AVC-R3/R10/R11). The CLI resolves `artifact-compile-child`
+beside its installed executable, uses a private temporary cache, and refuses
+execution if the child or a verified load is unavailable. Compiler limits are
+120 CPU seconds, 4 GiB address space and a 300-second wall deadline; the guest
+deadline starts at instantiation. The CLI still provides no runtime adapter.
 
 Restricted-pod coverage uses `cluster_handler_execution` with
 `FS_TEST_CLUSTER=1`, the existing `FS_TEST_WAS02_IMAGE` digest-pinned qualification
