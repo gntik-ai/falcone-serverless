@@ -108,6 +108,20 @@ fn qualification_command_runs_the_selected_case() {
 }
 
 #[test]
+fn qualification_command_rejects_a_differently_named_export() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_compile-cache-qualification"))
+        .arg("--guest-execute=different-export")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"case\":\"different-export\""));
+}
+
+#[test]
 fn async_canonical_options_reject_non_utf8() {
     let base = include_str!("../src/qualification/execute_fixtures/handler.wat");
     let with_options = [

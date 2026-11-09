@@ -71,6 +71,7 @@ cluster_cases! {
     invalid_export => "invalid-export",
     wrong_signature => "wrong-signature",
     missing_export => "missing-export",
+    different_export => "different-export",
     forbidden_imports => "forbidden-imports",
     utf16 => "utf16",
     latin1 => "latin1",

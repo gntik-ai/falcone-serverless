@@ -36,6 +36,7 @@ pub const CASES: &[Case] = &[
     ("invalid-export", cases::invalid_export_before_host_call),
     ("wrong-signature", cases::wrong_signature_before_host_call),
     ("missing-export", cases::missing_export),
+    ("different-export", cases::different_export),
     ("forbidden-imports", cases::forbidden_imports),
     ("utf16", cases::utf16_before_host_call),
     ("latin1", cases::latin1_before_host_call),

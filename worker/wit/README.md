@@ -96,6 +96,11 @@ COMPONENT and PARAMS are files; LIMITS is an optional version-1 limits JSON file
 It writes the result bytes on success and only a stable error code on failure.
 It supplies no platform grants or credentials. This explicit source-based path
 is not the supervised compiler/runtime adapter required for deployment.
+Its absolute deadline currently begins in `Prepared::new`, before validation
+and compilation, so preparation consumes part of the invocation budget. Epoch
+interruption does not interrupt compilation. WAS-03 runtime adapter work must
+resolve the guest-budget start point and retain the AVC-R3/AVC-R10 separate
+trusted compiler requirement; this qualification API does not relax those gates.
 
 `guest_execute` tests cover the public execution and validation boundaries. The
 allocation probes re-execute the existing `compile-cache-qualification` binary,

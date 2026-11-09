@@ -268,6 +268,15 @@ pub fn forbidden_imports() {
 pub fn missing_export() {
     rejected_before_start(b"\0asm\x0d\0\x01\0", "missing_handler_export");
 }
+#[cfg_attr(test, test)]
+pub fn different_export() {
+    let mut bytes = fixture();
+    // Preserve the otherwise valid handler's types and binary section lengths.
+    let name = b"falcone:host/handler@0.2.0";
+    let offset = bytes.windows(name.len()).position(|s| s == name).unwrap();
+    bytes[offset..offset + name.len()].copy_from_slice(b"falcone:host/another@0.2.0");
+    rejected_before_start(&bytes, "missing_handler_export");
+}
 
 struct Timeout {
     cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -281,12 +290,13 @@ impl Bindings for Timeout {
     }
 }
 fn uncertain(mode: Mode, cancel: bool, size: usize) {
+    let started = std::time::Instant::now();
     let mut host = Host::with_limits(
         context(),
         Arc::new(Empty),
         limits(
             128,
-            if mode == Mode::MutationLoop {
+            if mode == Mode::MutationLoop && !cancel {
                 200
             } else {
                 30000
@@ -298,6 +308,11 @@ fn uncertain(mode: Mode, cancel: bool, size: usize) {
         cancel: cancel.then_some(flag),
     });
     let result = host::execute(&engine(), adversarial(), host, &params(mode, size));
+    if cancel {
+        // The 30 s deadline cannot explain this loop's completion. With the
+        // former 200 ms budget, deadline interruption could mask broken cancel.
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
     assert_eq!(result.outcome, host::outcome::InvocationOutcome::Uncertain);
     assert_eq!(result.result.unwrap_err().code, "uncertain");
 }

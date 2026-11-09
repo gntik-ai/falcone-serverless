@@ -419,7 +419,8 @@ pub fn run(
     Ok(path)
 }
 
-/// Existing dependency tables and lockfile package names, pinned to b5e7330.
+/// Dependency tables and lockfile package names from b5e7330, with #277's
+/// worker-only call-hook feature for bounded return lifting (see WAS-01 README).
 pub fn dependency_guard(root: &str, worker: &str, lock: &str) -> bool {
     fn tables(
         value: &toml::Value,
