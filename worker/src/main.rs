@@ -18,7 +18,7 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Run CLI arguments excluding the executable name; validation runs no guest code.
+/// Run CLI arguments excluding the executable name, including explicit execution.
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
     run_with_io(
         args,
@@ -75,6 +75,8 @@ fn execute_command(
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
     use falcone_serverless_worker::{
+        artifact::supervisor::CompileLimits,
+        cache::{CONTRACT_VERSION, Cache},
         host,
         limits::{Field, Limits},
     };
@@ -111,20 +113,69 @@ fn execute_command(
     }
     let params = read_bounded(params, limits.value(Field::HostToGuestBytes) as usize)?;
     let bytes = read_bounded(component, 64 * 1024 * 1024)?;
-    let mut config = wasmtime::Config::new();
-    config.epoch_interruption(true);
-    let engine = wasmtime::Engine::new(&config).map_err(|_| "engine_unavailable")?;
+    // Resolve the platform compiler beside this trusted executable; no request
+    // parameter or PATH lookup can select a tenant executable.
+    let compiler = std::env::current_exe()
+        .map_err(|_| "compile_failed")?
+        .with_file_name("artifact-compile-child");
+    let scratch = Scratch::new()?;
+    let mut cache = Cache::new(&scratch.0, compiler).map_err(|error| error.code)?;
+    // Explicit local-command budgets, separate from the guest invocation clock.
+    // Deployment profile selection remains the runtime adapter's responsibility.
+    let compile_limits = CompileLimits {
+        input_bytes: 64 * 1024 * 1024,
+        cpu_seconds: 120,
+        memory_bytes: 4 * 1024 * 1024 * 1024,
+        wall_clock_deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+    };
     let host = host::Host::with_limits(
         host::Context::default(),
         std::sync::Arc::new(Denied),
         limits,
     );
-    let result = host::execute(&engine, &bytes, host, &params)
+    let loaded = cache
+        .compile(
+            CONTRACT_VERSION,
+            &bytes,
+            compile_limits,
+            &host.cancellation(),
+        )
+        .map_err(|error| error.code)?;
+    let result = host::execute(&loaded, host, &params)
         .result
         .map_err(|error| error.code.to_owned())?;
     stdout
         .write_all(&result)
         .map_err(|_| "output_unavailable".into())
+}
+
+/// A private process-owned cache directory; no cache authority survives exit.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Self, String> {
+        use ring::rand::SecureRandom;
+        use std::os::unix::fs::DirBuilderExt;
+        let mut nonce = [0; 16];
+        ring::rand::SystemRandom::new()
+            .fill(&mut nonce)
+            .map_err(|_| "trusted_cache_unavailable")?;
+        let path = std::env::temp_dir().join(format!(
+            "falcone-execute-{:032x}",
+            u128::from_be_bytes(nonce)
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .map_err(|_| "trusted_cache_unavailable")?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn main() {

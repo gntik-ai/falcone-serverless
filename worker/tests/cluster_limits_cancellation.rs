@@ -12,6 +12,7 @@ const QUALIFICATION_PREFIX: &str = "was02-limits";
 const QUALIFICATION_FLAG: &str = "--limits-cancellation";
 const QUALIFICATION_CHECK: &str = "limits_cancellation";
 const CLUSTER_TEST: &str = "cluster_limits_cancellation";
+const SKIP_EXPLICIT_REQUEST_WITHOUT_GATE: bool = false;
 
 include!("support/was02_cluster.rs");
 

@@ -12,6 +12,7 @@ const QUALIFICATION_PREFIX: &str = "was02-gates";
 const QUALIFICATION_FLAG: &str = "--capability-gates";
 const QUALIFICATION_CHECK: &str = "capability_gates";
 const CLUSTER_TEST: &str = "cluster_capability_gates";
+const SKIP_EXPLICIT_REQUEST_WITHOUT_GATE: bool = false;
 
 include!("support/was02_cluster.rs");
 

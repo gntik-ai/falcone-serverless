@@ -4,10 +4,11 @@ use super::{
     outcome::{self, InvocationOutcome},
     runtime,
 };
-use crate::artifact::validate::{HANDLER_EXPORT, validate};
+use crate::artifact::validate::HANDLER_EXPORT;
+use crate::cache::Loaded;
 use std::time::Instant;
-use wasmtime::component::{Component, ComponentType, Lift, TypedFunc};
-use wasmtime::{CallHook, Engine, Store};
+use wasmtime::component::{ComponentType, Lift, TypedFunc};
+use wasmtime::{CallHook, Store};
 
 #[derive(ComponentType, Lift)]
 #[component(variant)]
@@ -43,16 +44,22 @@ pub struct Prepared {
     deadline: Instant,
 }
 impl Prepared {
-    pub fn new(engine: &Engine, bytes: &[u8], host: Host) -> Result<Self, Execution> {
+    /// Validation and bounded trusted compilation must complete before this call.
+    pub fn new(loaded: &Loaded, host: Host) -> Result<Self, Execution> {
+        let component = loaded.component();
+        let engine = component.engine();
         let deadline = Instant::now() + host.guest_duration();
         let mut store = Store::new(engine, host);
         let result = (|| {
-            validate(bytes, 64 * 1024 * 1024).map_err(|e| error(e.code))?;
             if !engine.get_epoch_interruption() {
                 return Err(error("epoch_interruption_required"));
             }
-            let component = Component::new(engine, bytes).map_err(|_| error("compile_failed"))?;
-            let instance = runtime::instantiate_in_store(engine, &component, &mut store, deadline)
+            // The trusted engine enables fuel. Guest time is bounded by the
+            // invocation's epoch deadline, independently of compilation budgets.
+            store
+                .set_fuel(u64::MAX)
+                .map_err(|_| error("fuel_required"))?;
+            let instance = runtime::instantiate_in_store(engine, component, &mut store, deadline)
                 .map_err(|_| error("instantiation_failed"))?;
             let (_, handler) = instance
                 .get_export(&mut store, None, HANDLER_EXPORT)
@@ -175,7 +182,7 @@ fn finish(
     };
     Execution { outcome, result }
 }
-pub fn execute(engine: &Engine, bytes: &[u8], host: Host, params: &[u8]) -> Execution {
+pub fn execute(loaded: &Loaded, host: Host, params: &[u8]) -> Execution {
     if params.len() > host.output_limit() {
         host.record(&Err::<(), _>(HostError::LimitExceeded));
         return finish(
@@ -185,7 +192,7 @@ pub fn execute(engine: &Engine, bytes: &[u8], host: Host, params: &[u8]) -> Exec
             None,
         );
     }
-    match Prepared::new(engine, bytes, host) {
+    match Prepared::new(loaded, host) {
         Ok(prepared) => prepared.call(params),
         Err(result) => result,
     }

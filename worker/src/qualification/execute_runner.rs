@@ -105,10 +105,10 @@ pub fn allocation_main() -> ExitCode {
         "error" => cases::Mode::Failed,
         _ => panic!("unknown allocation case"),
     };
-    let engine = cases::engine();
+    let compiler = cases::compiler();
     for size in [limit + 1, host::BUFFER_BYTES + 1] {
-        let prepared = host::Prepared::new(
-            &engine,
+        let prepared = cases::prepare(
+            &compiler,
             cases::adversarial(),
             host::Host::with_limits(
                 cases::context(),

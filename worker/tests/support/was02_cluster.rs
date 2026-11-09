@@ -498,7 +498,7 @@ fn gate_set_with_invalid_inputs_fails_the_default_run() {
 #[test]
 fn explicit_live_request_without_gate_reports_the_suite_contract() {
     let (passed, output) = run_self(&["--exact", CLUSTER_TEST, "--ignored", "--nocapture"], &[]);
-    if CLUSTER_TEST == "cluster_guest_execute" {
+    if SKIP_EXPLICIT_REQUEST_WITHOUT_GATE {
         // WAS-01 requires an explicit skip even when requested with --ignored.
         assert!(passed, "an unset guest-execute gate must skip: {output}");
         assert!(

@@ -16,10 +16,18 @@ use wasmtime as engine;
 
 pub(super) type Engine = engine::Engine;
 
+/// Only the verified trusted-cache path can construct this execution input.
 pub struct Loaded {
     pub key: String,
     pub cache_hit: bool,
-    pub component: engine::component::Component,
+    component: engine::component::Component,
+}
+
+impl Loaded {
+    /// Borrow the verified component without allowing its replacement.
+    pub fn component(&self) -> &engine::component::Component {
+        &self.component
+    }
 }
 
 impl std::fmt::Debug for Loaded {

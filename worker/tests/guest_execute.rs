@@ -1,4 +1,4 @@
-pub use falcone_serverless_worker::{artifact, host, limits};
+pub use falcone_serverless_worker::{artifact, cache, host, limits};
 #[path = "../src/qualification/execute_cases.rs"]
 mod cases;
 
@@ -71,6 +71,38 @@ fn execute_command_echoes_params() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(output.stdout, b"{\"command\":true}");
+}
+
+#[test]
+fn execute_command_refuses_execution_without_the_trusted_compiler() {
+    let root = std::env::temp_dir().join(format!("handler-no-compiler-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let worker = root.join("falcone-serverless-worker");
+    std::fs::copy(env!("CARGO_BIN_EXE_falcone-serverless-worker"), &worker).unwrap();
+    let component = root.join("handler.wasm");
+    let params = root.join("params.json");
+    std::fs::write(
+        &component,
+        include_bytes!("../src/qualification/execute_fixtures/handler.wasm"),
+    )
+    .unwrap();
+    std::fs::write(&params, b"must not execute").unwrap();
+    let output = std::process::Command::new(worker)
+        .arg("execute")
+        .arg(component)
+        .arg(params)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        !output.status.success(),
+        "execution bypassed the trusted compiler"
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "rejected execution returned output"
+    );
+    assert_eq!(output.stderr, b"compile_failed\n");
 }
 
 #[test]

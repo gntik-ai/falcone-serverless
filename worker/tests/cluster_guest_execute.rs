@@ -11,6 +11,7 @@ const QUALIFICATION_PREFIX: &str = "guest-execute";
 const QUALIFICATION_FLAG: &str = "--guest-execute=echo";
 const QUALIFICATION_CHECK: &str = "guest_execute";
 const CLUSTER_TEST: &str = "cluster_guest_execute";
+const SKIP_EXPLICIT_REQUEST_WITHOUT_GATE: bool = true;
 include!("support/was02_cluster.rs");
 
 #[test]

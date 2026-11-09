@@ -9,6 +9,9 @@ pub mod limits;
 #[path = "../artifact/mod.rs"]
 pub mod artifact;
 
+#[path = "../cache/mod.rs"]
+pub mod cache;
+
 use serde_json::Value;
 
 const RULE_IDS: [&str; 12] = [

@@ -1,8 +1,5 @@
 //! Standalone WAS-02 qualification of embedded fixtures; no worker service.
-#[path = "../artifact/mod.rs"]
-pub mod artifact;
-#[path = "../cache/mod.rs"]
-pub mod cache;
+pub use falcone_serverless_worker::{artifact, cache};
 mod capability_http;
 mod capability_invocations;
 mod capability_support;

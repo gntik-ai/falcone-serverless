@@ -1,4 +1,4 @@
-//! Pod-local, process-owned trusted compile cache. No runtime consumer is wired here.
+//! Pod-local, process-owned trusted compile cache for validated components.
 mod load;
 
 #[cfg(test)]

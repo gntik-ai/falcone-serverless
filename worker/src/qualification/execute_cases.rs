@@ -9,10 +9,82 @@ impl Bindings for Empty {
     }
 }
 
-pub(super) fn engine() -> wasmtime::Engine {
-    let mut config = wasmtime::Config::new();
-    config.epoch_interruption(true);
-    wasmtime::Engine::new(&config).unwrap()
+/// Fixture compilation uses the same bounded trusted path as the worker CLI.
+pub(super) struct Compiler {
+    cache: std::cell::RefCell<crate::cache::Cache>,
+    directory: std::path::PathBuf,
+}
+
+pub(super) fn compiler() -> Compiler {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let directory =
+        std::env::temp_dir().join(format!("guest-execute-cache-{}-{id}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let parent = exe.parent().unwrap();
+    // Cargo integration tests live in deps/; the qualification binary is beside
+    // the compiler in both the local build and the restricted qualification pod.
+    let binaries = if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent().unwrap()
+    } else {
+        parent
+    };
+    let cache =
+        crate::cache::Cache::new(&directory, binaries.join("artifact-compile-child")).unwrap();
+    Compiler {
+        cache: std::cell::RefCell::new(cache),
+        directory,
+    }
+}
+
+impl Compiler {
+    fn compile(&self, bytes: &[u8], host: &Host) -> Result<crate::cache::Loaded, host::Execution> {
+        use crate::artifact::supervisor::CompileLimits;
+        let limits = CompileLimits {
+            input_bytes: 64 * 1024 * 1024,
+            cpu_seconds: 120,
+            memory_bytes: 4 * 1024 * 1024 * 1024,
+            wall_clock_deadline: std::time::Instant::now() + std::time::Duration::from_secs(300),
+        };
+        self.cache
+            .borrow_mut()
+            .compile(
+                crate::cache::CONTRACT_VERSION,
+                bytes,
+                limits,
+                &host.cancellation(),
+            )
+            .map_err(|error| host::Execution {
+                outcome: host::outcome::InvocationOutcome::Failed,
+                result: Err(host::ExecuteError {
+                    code: error.code,
+                    message: None,
+                }),
+            })
+    }
+}
+
+impl Drop for Compiler {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.directory).unwrap();
+    }
+}
+
+pub(super) fn prepare(
+    compiler: &Compiler,
+    bytes: &[u8],
+    host: Host,
+) -> Result<host::Prepared, host::Execution> {
+    let loaded = compiler.compile(bytes, &host)?;
+    host::Prepared::new(&loaded, host)
+}
+
+fn execute(compiler: &Compiler, bytes: &[u8], host: Host, params: &[u8]) -> host::Execution {
+    match compiler.compile(bytes, &host) {
+        Ok(loaded) => host::execute(&loaded, host, params),
+        Err(error) => error,
+    }
 }
 fn fixture() -> Vec<u8> {
     // Wasmtime accepts WAT, but the artifact gate deliberately accepts only binary.
@@ -22,8 +94,8 @@ fn fixture() -> Vec<u8> {
 
 #[cfg_attr(test, test)]
 pub fn echo() {
-    let execution = host::execute(
-        &engine(),
+    let execution = execute(
+        &compiler(),
         &fixture(),
         Host::new(Context::default(), Arc::new(Empty)),
         b"{\"hello\":true}",
@@ -82,11 +154,11 @@ pub(super) fn adversarial() -> &'static [u8] {
 
 #[cfg_attr(test, test)]
 pub fn configured_output_limit() {
-    let engine = engine();
+    let compiler = compiler();
     for mode in [Mode::Result, Mode::InvalidInput, Mode::Failed] {
         for limit in [128, host::BUFFER_BYTES] {
             let host = || Host::with_limits(context(), Arc::new(Empty), limits(limit, 30000));
-            let at = host::execute(&engine, adversarial(), host(), &params(mode, limit));
+            let at = execute(&compiler, adversarial(), host(), &params(mode, limit));
             if mode == Mode::Result {
                 assert_eq!(at.result.unwrap(), vec![b'x'; limit]);
             } else {
@@ -101,7 +173,7 @@ pub fn configured_output_limit() {
                 );
                 assert_eq!(error.message.unwrap().len(), limit);
             }
-            let over = host::execute(&engine, adversarial(), host(), &params(mode, limit + 1));
+            let over = execute(&compiler, adversarial(), host(), &params(mode, limit + 1));
             let error = over.result.unwrap_err();
             assert_eq!(error.code, "buffer_limit_exceeded");
             assert_eq!(error.message, None);
@@ -112,15 +184,15 @@ pub fn configured_output_limit() {
 #[cfg_attr(test, test)]
 pub fn oversized_params_never_call_guest() {
     // The trap would win if handle were entered.
-    let execution = host::execute(
-        &engine(),
+    let execution = execute(
+        &compiler(),
         adversarial(),
         Host::with_limits(context(), Arc::new(Empty), limits(128, 30000)),
         &[Mode::Trap as u8; 129],
     );
     assert_eq!(execution.result.unwrap_err().code, "buffer_limit_exceeded");
-    let at = host::execute(
-        &engine(),
+    let at = execute(
+        &compiler(),
         &fixture(),
         Host::with_limits(Context::default(), Arc::new(Empty), limits(128, 30000)),
         &[b'x'; 128],
@@ -144,7 +216,7 @@ fn cancelled_completion(mode: Mode) {
     let binding = Arc::new(Cancel(std::sync::Mutex::new(None)));
     let host = Host::new(context(), binding.clone());
     *binding.0.lock().unwrap() = Some(host.cancellation());
-    let result = host::execute(&engine(), adversarial(), host, &params(mode, 0));
+    let result = execute(&compiler(), adversarial(), host, &params(mode, 0));
     assert_eq!(result.result.unwrap_err().code, "cancelled");
     assert_eq!(result.outcome, host::outcome::InvocationOutcome::Cancelled);
 }
@@ -165,8 +237,8 @@ impl Bindings for Delay {
     }
 }
 fn deadline_completion(mode: Mode) {
-    let execution = host::execute(
-        &engine(),
+    let execution = execute(
+        &compiler(),
         adversarial(),
         Host::with_limits(context(), Arc::new(Delay), limits(128, 200)),
         &params(mode, 0),
@@ -184,8 +256,8 @@ pub fn deadline_on_error() {
 
 #[cfg_attr(test, test)]
 pub fn expired_prepared_invocation() {
-    let prepared = host::Prepared::new(
-        &engine(),
+    let prepared = prepare(
+        &compiler(),
         &fixture(),
         Host::with_limits(Context::default(), Arc::new(Empty), limits(128, 200)),
     )
@@ -206,14 +278,16 @@ impl Bindings for Count {
 }
 fn rejected_before_start(bytes: &[u8], code: &str) {
     let binding = Arc::new(Count(std::sync::atomic::AtomicUsize::new(0)));
-    let result = host::execute(
-        &engine(),
+    let compiler = compiler();
+    let result = execute(
+        &compiler,
         bytes,
         Host::new(context(), binding.clone()),
         &params(Mode::Result, 0),
     );
     assert_eq!(result.result.unwrap_err().code, code);
     assert_eq!(binding.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(compiler.cache.borrow().spawn_count(), 0);
 }
 #[cfg_attr(test, test)]
 pub fn invalid_export_before_host_call() {
@@ -307,7 +381,7 @@ fn uncertain(mode: Mode, cancel: bool, size: usize) {
     host.bindings = Arc::new(Timeout {
         cancel: cancel.then_some(flag),
     });
-    let result = host::execute(&engine(), adversarial(), host, &params(mode, size));
+    let result = execute(&compiler(), adversarial(), host, &params(mode, size));
     if cancel {
         // The 30 s deadline cannot explain this loop's completion. With the
         // former 200 ms budget, deadline interruption could mask broken cancel.
@@ -338,8 +412,8 @@ pub fn uncertainty_on_size_limit() {
 }
 #[cfg_attr(test, test)]
 pub fn non_mutating_timeout() {
-    let result = host::execute(
-        &engine(),
+    let result = execute(
+        &compiler(),
         adversarial(),
         Host::new(context(), Arc::new(Timeout { cancel: None })),
         &params(Mode::LogSuccess, 0),
@@ -357,20 +431,15 @@ impl Bindings for Ready {
 }
 #[cfg_attr(test, test)]
 pub fn timeout_isolation() {
-    let engine = engine();
+    let compiler = compiler();
     let (send, receive) = std::sync::mpsc::sync_channel(1);
-    let blocked = host::Prepared::new(
-        &engine,
-        adversarial(),
-        Host::with_limits(context(), Arc::new(Ready(send)), limits(128, 500)),
-    )
-    .unwrap();
-    let other = host::Prepared::new(
-        &engine,
-        &fixture(),
-        Host::new(Context::default(), Arc::new(Empty)),
-    )
-    .unwrap();
+    let blocked_host = Host::with_limits(context(), Arc::new(Ready(send)), limits(128, 500));
+    let other_host = Host::new(Context::default(), Arc::new(Empty));
+    // Prepare both compiled inputs before either invocation's deadline begins.
+    let blocked_input = compiler.compile(adversarial(), &blocked_host).unwrap();
+    let other_input = compiler.compile(&fixture(), &other_host).unwrap();
+    let blocked = host::Prepared::new(&blocked_input, blocked_host).unwrap();
+    let other = host::Prepared::new(&other_input, other_host).unwrap();
     let start = std::time::Instant::now();
     std::thread::scope(|scope| {
         let running = scope.spawn(|| blocked.call(&params(Mode::LogLoop, 0)));
@@ -397,7 +466,7 @@ impl Bindings for CancelDeadline {
 fn cancellation_before_deadline(mode: Mode) {
     let mut host = Host::with_limits(context(), Arc::new(Empty), limits(128, 200));
     host.bindings = Arc::new(CancelDeadline(host.cancellation()));
-    let prepared = host::Prepared::new(&engine(), adversarial(), host).unwrap();
+    let prepared = prepare(&compiler(), adversarial(), host).unwrap();
     let result = prepared.call(&params(mode, 0));
     assert_eq!(result.result.unwrap_err().code, "cancelled");
 }
@@ -417,15 +486,15 @@ pub fn uncertainty_on_deadline() {
 
 #[cfg_attr(test, test)]
 pub fn output_survives_post_return_cleanup() {
-    let result = host::execute(
-        &engine(),
+    let result = execute(
+        &compiler(),
         include_bytes!("execute_fixtures/post-return.wasm"),
         Host::new(Context::default(), Arc::new(Empty)),
         b"owned before cleanup",
     );
     assert_eq!(result.result.unwrap(), b"owned before cleanup");
-    let result = host::execute(
-        &engine(),
+    let result = execute(
+        &compiler(),
         include_bytes!("execute_fixtures/error-post-return.wasm"),
         Host::new(context(), Arc::new(Empty)),
         &params(Mode::Failed, 16),
@@ -453,8 +522,8 @@ impl Bindings for ImportLog {
 #[cfg_attr(test, test)]
 pub fn in_limit_import_fields_keep_their_existing_budget() {
     let binding = std::sync::Arc::new(ImportLog(std::sync::Mutex::new(Vec::new())));
-    let result = host::execute(
-        &engine(),
+    let result = execute(
+        &compiler(),
         adversarial(),
         host::Host::with_limits(context(), binding.clone(), limits(128, 30000)),
         &params(Mode::LogFields, 1),
@@ -467,8 +536,8 @@ pub fn in_limit_import_fields_keep_their_existing_budget() {
 pub fn oversized_import_returns_wit_error_and_guest_continues() {
     for limit in [128, host::BUFFER_BYTES] {
         let binding = std::sync::Arc::new(ImportLog(std::sync::Mutex::new(Vec::new())));
-        let result = host::execute(
-            &engine(),
+        let result = execute(
+            &compiler(),
             adversarial(),
             host::Host::with_limits(context(), binding.clone(), limits(limit, 30000)),
             &params(Mode::OversizedPublish, limit + 1),

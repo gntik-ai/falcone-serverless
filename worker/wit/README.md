@@ -68,13 +68,19 @@ legacy JSON input and result envelopes. `handler-error` has exactly
 
 Only UTF-8 canonical string encoding is accepted. The artifact gate checks the
 single handler instance export, its complete function signature, imports and
-canonical encoding options before `Component::new`, instantiation or start code.
+canonical encoding options before trusted compilation, instantiation or start code.
 Non-UTF-8 canonical options, including async intrinsics and nested components,
 are rejected with `unsupported_string_encoding`; invalid handler types use
 `invalid_handler_signature`, and missing or different exports use
 `missing_handler_export`.
 
-`host::execute` and `host::Prepared` retain the Host until every completion has
+`host::execute` and `host::Prepared` accept only a `cache::Loaded` component from
+the verified trusted-compiler path; they never compile raw tenant bytes. They
+use that component's engine, configured with fuel and epoch interruption as
+pinned by `ENGINE_CONFIG`. The guest store receives fuel for deadline-based
+execution; its epoch deadline starts after trusted compilation, immediately
+before instantiation. Compilation has separate supervisor-enforced budgets.
+Both execution entry points retain the Host until every completion has
 passed `outcome::classify`. Uncertainty keeps its existing highest precedence.
 Completion checks cancellation first, then the absolute guest deadline, on both
 success and error paths. No rejected invocation returns partial output.
@@ -94,15 +100,19 @@ maps that exact pinned engine diagnostic to `buffer_limit_exceeded`.
 The local CLI is `falcone-serverless-worker execute COMPONENT PARAMS [LIMITS]`.
 COMPONENT and PARAMS are files; LIMITS is an optional version-1 limits JSON file.
 It writes the result bytes on success and only a stable error code on failure.
-It supplies no platform grants or credentials. This explicit source-based path
-is not the supervised compiler/runtime adapter required for deployment.
-Its absolute deadline currently begins in `Prepared::new`, before validation
-and compilation, so preparation consumes part of the invocation budget. Epoch
-interruption does not interrupt compilation. WAS-03 runtime adapter work must
-resolve the guest-budget start point and retain the AVC-R3/AVC-R10 separate
-trusted compiler requirement; this qualification API does not relax those gates.
+It supplies no platform grants or credentials. The CLI resolves the trusted
+`artifact-compile-child` beside its executable and uses `Cache::compile` to
+validate, supervise compilation and verify the returned native cache before
+execution. Missing or failed compilation refuses execution without a fallback.
+The process-owned cache uses a private directory under the temporary directory
+and is removed on completion. This local command caps raw input at 64 MiB,
+compiler CPU at 120 seconds, address space at 4 GiB and compilation elapsed time
+at 300 seconds, independently of the guest deadline in LIMITS. These local
+budgets do not enable a deployment profile or wire a platform runtime adapter.
 
-`guest_execute` tests cover the public execution and validation boundaries. The
+`guest_execute` tests cover the public execution and validation boundaries,
+including refusal when the trusted compiler is unavailable. The shared local
+and restricted-pod execution cases also compile through the trusted cache. The
 allocation probes re-execute the existing `compile-cache-qualification` binary,
 keeping the counting allocator within ADR 0014's approved link scope. They bound
 host heap growth below 4 KiB for a rejected 1 MiB payload at both 128 B and 1 MiB
