@@ -353,11 +353,19 @@ fn failure_codes_agree_across_types_fixtures_and_spec() {
             FailureClass::NonRetryable,
             FailureClass::NonRetryable,
             FailureClass::NonRetryable,
-            FailureClass::NonRetryable,
-            FailureClass::Retryable,
-            FailureClass::Uncertain,
         ]
     );
+    // The class vocabulary stays complete even though every v1 code is non-retryable.
+    for class in [
+        FailureClass::Retryable,
+        FailureClass::NonRetryable,
+        FailureClass::Uncertain,
+    ] {
+        assert_eq!(
+            serde_json::from_value::<FailureClass>(json!(class.as_str())).unwrap(),
+            class
+        );
+    }
 }
 
 #[test]
@@ -417,14 +425,14 @@ fn oci_and_base_codes_match_the_pinned_functions_api_fixtures() {
         assert_eq!(error["status"], status);
         assert_eq!(error["retryable"], code.class() == FailureClass::Retryable);
     }
-    // Every code with a gateway name is one of the three; the only OCI/base code that is
-    // worker-only is the non-wasm refusal.
+    // Every code with a gateway name is one of the three; the only worker-only code in the
+    // whole table is the non-wasm refusal.
     let table = contract_value("failure-codes.json");
     let worker_only: Vec<_> = table
         .as_array()
         .unwrap()
         .iter()
-        .filter(|row| row["family"] == "oci_base" && row["gateway_code"].is_null())
+        .filter(|row| row["gateway_code"].is_null())
         .map(|row| row["code"].as_str().unwrap())
         .collect();
     assert_eq!(worker_only, ["runtime_mode_not_wasm"]);
@@ -689,8 +697,8 @@ fn invalid_legacy_fixtures_are_rejected_before_invocation() {
         request["params"] = fixture["params"].clone();
         let error = admit(&request).unwrap_err();
         assert_eq!(error, ApiError::Rejected(reason), "{name}");
-        assert_eq!(error.code(), Some(FailureCode::InvalidRequest));
-        assert_eq!(error.code().unwrap().class(), FailureClass::NonRetryable);
+        // A local rejection before invocation: no wire code is defined for it.
+        assert_eq!(error.code(), None, "{name}");
     }
     let oversized: Value =
         serde_json::from_slice(&legacy_bytes("invalid/oversized-body.json")).unwrap();

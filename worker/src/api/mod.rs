@@ -187,8 +187,8 @@ mod tests {
         assert_eq!(errors[0], ApiError::Malformed(MalformedReason::Json));
         assert_eq!(errors[2], ApiError::Rejected(RequestReason::BodyNotJson));
         for error in errors {
-            assert_eq!(error.code(), Some(FailureCode::InvalidRequest));
-            assert!(error.log_line().contains("non_retryable"));
+            assert_eq!(error.code(), None);
+            assert!(error.log_line().starts_with("execution_api kind="));
         }
         assert_eq!(MalformedReason::BaseAlias.as_str(), "base_alias");
         assert_eq!(RequestReason::BodyTooLarge.label(), "body-too-large");
@@ -201,7 +201,7 @@ mod tests {
                 .code()
                 .is_none()
         );
-        assert_eq!(FailureCode::ALL.len(), 7);
+        assert_eq!(FailureCode::ALL.len(), 4);
         assert_eq!(
             FailureCode::BaseDisabled.class(),
             FailureClass::NonRetryable

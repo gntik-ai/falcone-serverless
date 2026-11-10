@@ -110,12 +110,13 @@ pub enum ApiError {
 }
 
 impl ApiError {
-    /// The wire failure code, for errors that are reported to the dispatcher.
+    /// The wire failure code, for errors that are reported to the dispatcher. Only the
+    /// non-wasm refusal has one: a malformed document, a legacy rejection or an identity
+    /// mismatch is rejected locally, before invocation, and has no wire code.
     pub fn code(&self) -> Option<FailureCode> {
         match self {
             Self::Refused(_) => Some(FailureCode::RuntimeModeNotWasm),
-            Self::Malformed(_) | Self::Rejected(_) => Some(FailureCode::InvalidRequest),
-            Self::IdentityMismatch(_) => None,
+            Self::Malformed(_) | Self::Rejected(_) | Self::IdentityMismatch(_) => None,
         }
     }
 

@@ -165,16 +165,50 @@ const NATIVE_LOAD_APIS: [&str; 6] = [
 
 /// The hard rule is that a tenant-supplied precompiled artifact is never deserialized.
 /// Every file under `worker/src` therefore fails on a Wasmtime artifact-loading API, and
-/// outside `cache/load.rs` and `api/` on any use of `deserialize`. `api/` is allowed serde
-/// JSON deserialization (`serde::Deserialize`, a hand-written `fn deserialize`,
-/// `deserialize_with`) because it only parses JSON requests and results. It may not use
-/// `wasmtime::` at all (checked in `source_valid`), so it cannot reach an artifact loader.
+/// outside `cache/load.rs` and `api/` on any use of `deserialize`. `api/` only parses JSON
+/// requests and results, so it may use exactly the serde spellings in `API_SERDE_SPELLINGS`
+/// and nothing else that contains `deserialize`. Any other spelling fails, so a crate or
+/// type alias cannot hide a loader: `Native::deserialize(&engine, bytes)` is not a serde
+/// spelling. `api/` also may not name the `wasmtime` crate (only the `wasmtime_version`
+/// identity field) and may not use `extern crate`.
 fn deserialize_valid(path: &Path, source: &str) -> bool {
     if path == Path::new("cache/load.rs") {
         return true;
     }
+    if !path.starts_with("api") {
+        return !source.contains("deserialize");
+    }
+    api_serde_only(source)
+}
+
+/// The only spellings containing `deserialize` that an api file may use: serde's derive
+/// attribute, a hand-written serde `fn deserialize` and the serde call that forwards the
+/// deserializer parameter.
+const API_SERDE_SPELLINGS: [&str; 3] = [
+    "deserialize_with = \"",
+    "fn deserialize<",
+    "::deserialize(deserializer)",
+];
+
+fn api_serde_only(source: &str) -> bool {
+    let code = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut rest = code.clone();
+    for spelling in API_SERDE_SPELLINGS {
+        rest = rest.replace(spelling, " ");
+    }
+    let crate_named = code
+        .match_indices("wasmtime")
+        .any(|(at, _)| !code[at + "wasmtime".len()..].starts_with('_'));
+    // The `deserializer` parameter name is an identifier, not a call.
+    let rest = rest.replace("deserializer", " ");
     !NATIVE_LOAD_APIS.iter().any(|api| source.contains(api))
-        && (path.starts_with("api") || !source.contains("deserialize"))
+        && !rest.contains("deserialize")
+        && !crate_named
+        && !code.contains("extern crate")
 }
 
 fn source_valid(path: &Path, source: &str) -> bool {
@@ -322,6 +356,26 @@ fn wasmtime_artifact_loading_fails_everywhere_but_the_trusted_loader() {
         }
         assert!(deserialize_valid(Path::new("cache/load.rs"), call));
     }
+    // Aliasing the crate and the type does not hide a loader: only serde spellings pass.
+    for alias in [
+        "use wasmtime as w;\ntype Native = w::Module;\nlet m = Native::deserialize(&engine, bytes);",
+        "use wasmtime as w;\ntype Native = w::component::Component;\nlet m = Native::deserialize(&engine, bytes);",
+        "type Native = w::Module;\nNative::deserialize_file(&engine, path);",
+        "type Native = w::Module;\nlet load = Native::deserialize;\nload(&engine, bytes);",
+        "extern crate wasmtime as w;",
+        "use wasmtime as w;",
+        "T::deserialize(&engine, bytes)",
+        "Native :: deserialize ( & engine , bytes )",
+    ] {
+        for path in ["api/mod.rs", "api/result.rs", "api/nested/request.rs"] {
+            assert!(!source_valid(Path::new(path), alias), "{path}: {alias}");
+        }
+    }
+    // The serde forwarding call and the identity field name stay valid.
+    assert!(source_valid(
+        Path::new("api/redact.rs"),
+        "let t = String::deserialize(deserializer)?;\n// deserializes as plain text\nwasmtime_version"
+    ));
     // The api tree may not reach Wasmtime at all.
     assert!(!source_valid(
         Path::new("api/mod.rs"),

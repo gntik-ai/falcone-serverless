@@ -26,26 +26,5 @@
     "class": "non_retryable",
     "gateway_code": null,
     "pinned_fixture": null
-  },
-  {
-    "code": "invalid_request",
-    "family": "execution",
-    "class": "non_retryable",
-    "gateway_code": null,
-    "pinned_fixture": null
-  },
-  {
-    "code": "worker_unavailable",
-    "family": "execution",
-    "class": "retryable",
-    "gateway_code": null,
-    "pinned_fixture": null
-  },
-  {
-    "code": "outcome_unknown",
-    "family": "execution",
-    "class": "uncertain",
-    "gateway_code": null,
-    "pinned_fixture": null
   }
 ]

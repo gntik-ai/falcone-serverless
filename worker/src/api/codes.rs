@@ -33,25 +33,14 @@ pub enum FailureCode {
     BaseMismatch,
     /// Worker-only: the Wasm worker refuses any `runtime_mode` other than `wasm`.
     RuntimeModeNotWasm,
-    /// Worker-only: the request is not a valid v1 execute attempt, or its legacy envelope
-    /// is rejected before invocation.
-    InvalidRequest,
-    /// Worker-only: the attempt did not start, so no guest ran and a retry is safe.
-    WorkerUnavailable,
-    /// Worker-only: the attempt may have started and its outcome is unknown, so side
-    /// effects may exist and the attempt must not be blindly replayed.
-    OutcomeUnknown,
 }
 
 impl FailureCode {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 4] = [
         Self::OciNotAuthorized,
         Self::BaseDisabled,
         Self::BaseMismatch,
         Self::RuntimeModeNotWasm,
-        Self::InvalidRequest,
-        Self::WorkerUnavailable,
-        Self::OutcomeUnknown,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -60,21 +49,15 @@ impl FailureCode {
             Self::BaseDisabled => "base_disabled",
             Self::BaseMismatch => "base_mismatch",
             Self::RuntimeModeNotWasm => "runtime_mode_not_wasm",
-            Self::InvalidRequest => "invalid_request",
-            Self::WorkerUnavailable => "worker_unavailable",
-            Self::OutcomeUnknown => "outcome_unknown",
         }
     }
 
     pub const fn class(self) -> FailureClass {
         match self {
-            Self::WorkerUnavailable => FailureClass::Retryable,
-            Self::OutcomeUnknown => FailureClass::Uncertain,
             Self::OciNotAuthorized
             | Self::BaseDisabled
             | Self::BaseMismatch
-            | Self::RuntimeModeNotWasm
-            | Self::InvalidRequest => FailureClass::NonRetryable,
+            | Self::RuntimeModeNotWasm => FailureClass::NonRetryable,
         }
     }
 
