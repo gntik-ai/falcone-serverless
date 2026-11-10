@@ -49,7 +49,7 @@
     "container_contract_version": "1"
   },
   "credential": {
-    "token": "synthetic-placeholder-token-0001",
+    "token": "synthetic-0000-0000-0000",
     "claims": {
       "iss": "dispatcher-synthetic",
       "aud": "worker-pool-synthetic",

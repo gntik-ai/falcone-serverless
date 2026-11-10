@@ -37,7 +37,7 @@ const PINNED_ERRORS: [(&str, &str); 3] = [
 const CLAIMS_SCHEMA_SHA256: &str =
     "9c98ba16548e724004fbf17c38d3d689fd7183d25b386c83e61b13ff8b31ecf0";
 const OPENAPI_SHA256: &str = "03121286b0c7ec716304d51a41b866477f4fc21671d95ebeafb8bf9da70e8960";
-const SYNTHETIC_TOKEN: &str = "synthetic-placeholder-token-0001";
+const SYNTHETIC_TOKEN: &str = "synthetic-0000-0000-0000";
 
 fn manifest() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
