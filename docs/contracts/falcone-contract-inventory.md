@@ -109,4 +109,4 @@ are relative to this inventory; hashes pin the exact schema bytes.
 
 | ID | Version | Schema | SHA256 |
 | --- | --- | --- | --- |
-| ctr-serverless-chart-values | v1 | serverless-chart-values/chart-values.v1.schema.json | sha256:b666128d7f20719abe56dae12b27a730bd8f42ade4bd703000f3b0cb0129f4a3 |
+| ctr-serverless-chart-values | v1 | serverless-chart-values/chart-values.v1.schema.json | sha256:30ffbb33a4a1f2c76efabe7026f32eee19f77933b9998bac9d7b93760c420846 |

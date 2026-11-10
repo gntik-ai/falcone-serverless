@@ -10,7 +10,7 @@ wasi_interface = "none"
 qualification_status = "unqualified"
 contract_inventory_path = "docs/contracts/falcone-contract-inventory.md"
 # OPS-01.t1 adds the Serverless-owned contracts registry; frozen MIG-01 surfaces are unchanged.
-contract_inventory_sha256 = "4b29052cdafc186fb6918b751644f3a36a3e6f513bb29666e2f162c1b4d3bfda"
+contract_inventory_sha256 = "c8c72dcb6b49e9684861a57d8a81e09d0c01dbb431b994cb11fd6761437bcc7d"
 kubernetes_version = "unverified"
 openshift_version = "unverified"
 namespaced_permissions = "unverified"

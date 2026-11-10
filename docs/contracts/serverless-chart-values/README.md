@@ -23,8 +23,10 @@ hex digits. Repository strings have no tag or digest suffix. Docker Hub is the
 only allowed registry: `docker.io/team/image`, `team/image`, `library/image` and
 bare `image` are accepted. Consumers resolve registry-less names to `docker.io`
 and bare names to `docker.io/library/`. The schema validates those original
-strings itself; the tests never normalise input. The first registry-less segment
-must have no dot or colon and cannot be `localhost`. Other registries, ports,
+strings itself; the tests never normalise input. Bare names may contain dots
+(for example `worker.v1` resolves to `docker.io/library/worker.v1`). In a
+multi-segment registry-less name, the first segment must have no dot or colon;
+`localhost` is excluded as a first segment or bare name. Other registries, ports,
 URLs and Docker Hub lookalikes (including `index.docker.io`) are rejected. The
 remaining path segments use lowercase Docker repository components.
 
@@ -89,4 +91,4 @@ Mutation witnesses prove the fixtures detect missing digest requirements, open
 objects and registry-policy weakening. Harness negatives exercise missing/empty
 fixture directories, malformed JSON, invalid schemas and non-local references.
 
-Schema SHA256: `sha256:b666128d7f20719abe56dae12b27a730bd8f42ade4bd703000f3b0cb0129f4a3`
+Schema SHA256: `sha256:30ffbb33a4a1f2c76efabe7026f32eee19f77933b9998bac9d7b93760c420846`
