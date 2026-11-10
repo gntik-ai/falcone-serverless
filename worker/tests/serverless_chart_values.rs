@@ -118,8 +118,8 @@ fn published_valid_values_are_accepted() {
 
 // Expected paths name the intended rule, so an unrelated rejection cannot pass.
 const INVALID: &[(&str, &str, &str)] = &[
-    ("oci-missing-namespaces", "", "required"),
-    ("oci-missing-pull-secret", "", "required"),
+    ("oci-missing-namespaces", "", "then/required"),
+    ("oci-missing-pull-secret", "", "then/required"),
     ("oci-empty-namespaces", "/watchedOCINamespaces", "minItems"),
     (
         "oci-duplicate-namespaces",
@@ -260,6 +260,26 @@ fn check_invalid(schema: &Value) -> Result<(), String> {
 fn each_invalid_fixture_fails_on_its_intended_rule() {
     let schema = read_json(&contract().join("chart-values.v1.schema.json")).unwrap();
     check_invalid(&schema).unwrap();
+}
+
+#[test]
+fn unconditional_required_errors_do_not_satisfy_oci_rules() {
+    let schema = read_json(&contract().join("chart-values.v1.schema.json")).unwrap();
+    for property in ["watchedOCINamespaces", "platformRegistryPullSecretName"] {
+        let mut misplaced = schema.clone();
+        misplaced["then"]["required"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|value| value != property);
+        misplaced["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(property.into());
+        assert!(
+            check_invalid(&misplaced).is_err(),
+            "root required must not substitute for OCI then/required: {property}"
+        );
+    }
 }
 
 #[test]
