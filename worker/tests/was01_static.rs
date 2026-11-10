@@ -76,6 +76,10 @@ fn pinned_versions_and_inventory() {
     let path = versions["contract_inventory_path"].as_str().unwrap();
     let digest = versions["contract_inventory_sha256"].as_str().unwrap();
     assert!(inventory_valid(root(), path, digest));
+    // The v1 inventory digest is retired: the pin follows the v1.1 inventory (MIG-01.t3).
+    let v1_digest = "c9c4921595cfe5e0662e082d1af860453e4c40e49e473f4baa213fa11f871973";
+    assert_ne!(digest, v1_digest);
+    assert!(!inventory_valid(root(), path, v1_digest));
     assert!(!inventory_valid(root(), path, &"0".repeat(64)));
     assert!(!inventory_valid(root(), "missing-was01-inventory", digest));
     assert!(!inventory_valid(root(), "docs/contracts", digest));

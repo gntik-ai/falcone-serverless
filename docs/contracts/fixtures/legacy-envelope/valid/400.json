@@ -1,0 +1,33 @@
+{
+  "path": "400",
+  "decidedBy": "path",
+  "description": "Authenticated, __ow_path present but it does not match /v1/workspaces/{id}/openapi.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0002",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/projects/ws-synthetic-0002/openapi",
+    "__ow_query": {}
+  },
+  "dependencyState": {},
+  "expected": {
+    "statusCode": 400,
+    "body": {
+      "code": "INVALID_PATH",
+      "message": "workspaceId missing from path"
+    }
+  }
+}

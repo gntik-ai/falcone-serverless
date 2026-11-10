@@ -1,0 +1,51 @@
+{
+  "path": "200-yaml",
+  "decidedBy": "format",
+  "description": "format=yaml in __ow_query selects the formatYaml text.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0008",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0008/openapi",
+    "__ow_query": {
+      "format": "yaml"
+    }
+  },
+  "dependencyState": {
+    "rateLimit": {
+      "limit": 60,
+      "now": 1767225600000,
+      "priorBucket": null
+    },
+    "currentSpec": {
+      "tenantId": "tenant-synthetic-0001",
+      "specVersion": "1.0.0",
+      "contentHash": "sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32",
+      "formatJson": "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"Synthetic workspace API\",\"version\":\"1.0.0\"},\"paths\":{}}",
+      "formatYaml": "openapi: 3.0.3\ninfo:\n  title: Synthetic workspace API\n  version: 1.0.0\npaths: {}\n"
+    }
+  },
+  "expected": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/x-yaml",
+      "ETag": "\"sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32\"",
+      "X-Spec-Version": "1.0.0",
+      "Cache-Control": "max-age=60, must-revalidate"
+    },
+    "body": "openapi: 3.0.3\ninfo:\n  title: Synthetic workspace API\n  version: 1.0.0\npaths: {}\n"
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "path": "429",
+  "decidedBy": "rate-limit",
+  "description": "The workspace bucket already holds limit requests in the current minute.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0003",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0003/openapi",
+    "__ow_query": {}
+  },
+  "dependencyState": {
+    "rateLimit": {
+      "limit": 60,
+      "now": 1767225600000,
+      "priorBucket": {
+        "minute": 29453760,
+        "count": 60
+      }
+    }
+  },
+  "expected": {
+    "statusCode": 429,
+    "headers": {
+      "Retry-After": "60"
+    },
+    "body": {
+      "code": "RATE_LIMITED",
+      "message": "Too many requests"
+    }
+  }
+}

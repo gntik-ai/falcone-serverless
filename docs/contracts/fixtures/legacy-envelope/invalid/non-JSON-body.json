@@ -1,0 +1,30 @@
+{
+  "case": "non-JSON-body",
+  "description": "A JSON request (content-type application/json) whose __ow_body is not parsable JSON.",
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0100",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "post",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001",
+      "content-type": "application/json"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0009/openapi",
+    "__ow_query": {},
+    "__ow_body": "{\"parameters\": not-json"
+  },
+  "expected": {
+    "invoked": false,
+    "rejection": "body-not-json"
+  }
+}
