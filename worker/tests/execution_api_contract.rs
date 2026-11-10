@@ -184,8 +184,8 @@ fn an_unknown_runtime_mode_value_is_refused_like_oci() {
     let value = serde_json::to_value(&result).unwrap();
     assert_eq!(value["failure"]["code"], "runtime_mode_not_wasm");
     assert_eq!(value["failure"]["class"], "non_retryable");
-    // The unrecognised value is never echoed or invented into the identity.
-    assert!(value["identity"].get("runtime_mode").is_none());
+    // The identity keeps the requested mode as written.
+    assert_eq!(value["identity"]["runtime_mode"], "native");
     ExecutionResult::from_value(&value).expect("refusal for an unknown mode is valid");
 }
 
@@ -849,11 +849,19 @@ fn refusal_identity_never_claims_wasm() {
     let oci = attempt("byo-base");
     oci.check_result(&result("refusal-non-wasm"))
         .expect("refusal matches the oci request");
-    // A typed attempt knows its mode, so its refusal must name it.
+    // A typed attempt knows its mode, so its refusal must name that mode.
+    let mut renamed = fixture("result/refusal-non-wasm.json");
+    set(&mut renamed, "/identity/runtime_mode", json!("native"));
+    let renamed = ExecutionResult::from_value(&renamed).expect("an unknown-mode refusal is valid");
+    assert!(oci.check_result(&renamed).is_err());
+    // A refusal omitting the mode is malformed, and a non-refusal result never carries an
+    // unrecognised mode.
     let mut unnamed = fixture("result/refusal-non-wasm.json");
     remove(&mut unnamed, "/identity/runtime_mode");
-    let unnamed = ExecutionResult::from_value(&unnamed).expect("an unknown-mode refusal is valid");
-    assert!(oci.check_result(&unnamed).is_err());
+    assert!(ExecutionResult::from_value(&unnamed).is_err());
+    let mut odd = fixture("result/failure-base_mismatch.json");
+    set(&mut odd, "/identity/runtime_mode", json!("native"));
+    assert!(ExecutionResult::from_value(&odd).is_err());
     let mut wrong = fixture("result/refusal-non-wasm.json");
     set(
         &mut wrong,

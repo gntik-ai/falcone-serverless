@@ -99,9 +99,10 @@ projection carries, so fields another mode adds later cannot turn the refusal in
 parse error. The worker executes nothing and answers with the refusal result
 (`runtime_mode_not_wasm`, `non_retryable`), whose identity describes the pinned revision:
 the revision, the raw `artifact_digest`, the `language_profile`, the `base_digest` exactly
-when a base is pinned, and the requested mode when it is `oci`; `wasmtime_version` and
+when a base is pinned, and `runtime_mode` as requested (`oci`, or the unrecognised value as
+written, a 1-256 byte identifier); `wasmtime_version` and
 `interface_version` are the worker's own. A missing or non-string `runtime_mode` is
-malformed, not a refusal; so is a refused projection without `artifact_digest` or
+malformed, not a refusal; so is a mode that is not a 1-256 byte identifier, and so is a refused projection without `artifact_digest` or
 `language_profile`, or with a pinned base whose kind is unknown, whose digest is missing
 or malformed, or whose catalog id is an unresolved alias.
 
@@ -181,7 +182,7 @@ Every result carries `identity`:
 | Field | Meaning |
 | --- | --- |
 | `function_revision` | Always required. |
-| `runtime_mode` | `wasm` or `oci`. Always required, except that a refusal of an unrecognised mode omits it. |
+| `runtime_mode` | Always required: the mode the projection requested. `wasm` or `oci`; on a refusal only, the unrecognised value as written (any identifier other than `wasm`). A refusal never reports `wasm`. |
 | `artifact_digest` | Raw artifact digest. Always required. |
 | `base_digest` | The digest of the pinned base; present **exactly when** the revision pins a base (catalog `digest`, or BYO `image_digest`). |
 | `wasmtime_version` | Wasmtime version that ran the attempt; a refusal reports the worker's own. Always required. |

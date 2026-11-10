@@ -106,11 +106,10 @@ impl ExecuteAttempt {
             return Err(ContractError::new("v1: identity names another revision"));
         }
         let refusal = result.is_refusal();
-        // The attempt parsed, so its mode is a known one and the identity must name it. Only
-        // a refusal of an unrecognised mode, which never becomes an attempt, omits it.
-        if identity.runtime_mode != Some(projection.runtime_mode) {
+        // The attempt parsed, so its mode is a known one and the identity must name it.
+        if identity.runtime_mode.as_str() != projection.runtime_mode.as_str() {
             return Err(ContractError::new(
-                "v1: identity runtime_mode is required and must equal the projection",
+                "v1: identity runtime_mode must equal the projection",
             ));
         }
         if identity.base_digest.as_ref() != projection.base.as_ref().map(|base| base.digest()) {

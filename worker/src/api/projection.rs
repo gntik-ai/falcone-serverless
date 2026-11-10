@@ -12,6 +12,15 @@ pub enum RuntimeMode {
     Oci,
 }
 
+impl RuntimeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wasm => "wasm",
+            Self::Oci => "oci",
+        }
+    }
+}
+
 /// A catalog base reference `name@version`. Unresolved default aliases are malformed:
 /// the name may not be `default` and the version must start with a digit, so a
 /// version-less id, `latest` and similar aliases are rejected.

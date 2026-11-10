@@ -73,14 +73,14 @@ pub struct Failure {
 
 /// The activation runtime identity. Every result carries the revision, the raw artifact
 /// digest, the language profile and the Wasmtime and interface versions, whatever the
-/// mode; `base_digest` follows the pinned base. The mode is absent only on a refusal of a
-/// mode the worker does not recognise. Fields OCI-04 adds are additive and optional.
+/// mode; `base_digest` follows the pinned base. `runtime_mode` is the mode the projection
+/// requested: `wasm` or `oci`, or, on a refusal only, the unrecognised value that was
+/// refused (any identifier other than `wasm`). Fields OCI-04 adds are additive and optional.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeIdentity {
     pub function_revision: Id,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_mode: Option<RuntimeMode>,
+    pub runtime_mode: Id,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_digest: Option<Digest>,
     /// Present exactly when the revision pins a base (see `ExecuteAttempt::check_result`).
@@ -144,12 +144,16 @@ impl ExecutionResult {
             }
         }
         let identity = &self.identity;
-        if identity.runtime_mode.is_none() && !self.is_refusal() {
-            return Err(ContractError::new("v1: identity runtime_mode is required"));
-        }
-        if self.is_refusal() && identity.runtime_mode == Some(RuntimeMode::Wasm) {
+        let mode = identity.runtime_mode.as_str();
+        if self.is_refusal() {
+            if mode == RuntimeMode::Wasm.as_str() {
+                return Err(ContractError::new(
+                    "v1: a refusal never reports runtime_mode wasm",
+                ));
+            }
+        } else if mode != RuntimeMode::Wasm.as_str() && mode != RuntimeMode::Oci.as_str() {
             return Err(ContractError::new(
-                "v1: a refusal never reports runtime_mode wasm",
+                "v1: identity runtime_mode must be wasm or oci",
             ));
         }
         if identity.artifact_digest.is_none()
@@ -170,24 +174,37 @@ pub struct WorkerFacts<'a> {
     pub interface_version: &'a str,
 }
 
-/// The Wasm worker's refusal of a revision whose runtime mode is not `wasm`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The Wasm worker's refusal of a revision whose runtime mode is not `wasm`. Its `Debug`
+/// output omits the requested mode, which is tenant-supplied text; only the refusal
+/// result reports it.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Refusal {
     activation_id: Id,
     attempt_id: Id,
     function_revision: Id,
-    /// The mode that was asked for, when it is one the contract knows.
-    requested: Option<RuntimeMode>,
+    /// The mode that was asked for, kept as written (`oci` or an unrecognised value).
+    requested: Id,
     artifact_digest: Digest,
     language_profile: LanguageProfile,
     /// The digest of the pinned base; `None` exactly when the revision pins none.
     base_digest: Option<Digest>,
 }
 
+impl std::fmt::Debug for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Refusal")
+            .field("activation_id", &self.activation_id)
+            .field("attempt_id", &self.attempt_id)
+            .field("function_revision", &self.function_revision)
+            .field("requested", &"<omitted>")
+            .finish_non_exhaustive()
+    }
+}
+
 impl Refusal {
     /// The non-retryable result for the refused attempt. The refusal ran no guest, so
     /// its identity describes the pinned revision (artifact digest, language profile and
-    /// the base digest when a base is pinned), the requested mode when known, and the
+    /// the base digest when a base is pinned), the requested mode as written, and the
     /// worker's own versions.
     pub fn into_result(self, worker: WorkerFacts<'_>) -> Result<ExecutionResult, ContractError> {
         let code = FailureCode::RuntimeModeNotWasm;
@@ -265,7 +282,7 @@ pub fn admit_wasm_attempt(bytes: &[u8]) -> Result<ExecuteAttempt, AdmitError> {
             activation_id: id("/activation_id")?,
             attempt_id: id("/attempt_id")?,
             function_revision: id("/projection/revision")?,
-            requested: (mode == "oci").then_some(RuntimeMode::Oci),
+            requested: Id::try_from(mode.to_owned()).map_err(AdmitError::Malformed)?,
             artifact_digest,
             language_profile,
             base_digest,
