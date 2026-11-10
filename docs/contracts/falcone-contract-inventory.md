@@ -206,7 +206,7 @@ published input contract, not Helm rendering or runtime enablement evidence.
 
 | Contract | Version | Schema | sha256 |
 | --- | --- | --- | --- |
-| ctr-serverless-chart-values | v1 | docs/contracts/serverless-chart-values/chart-values.v1.schema.json | a47207c988884432b53eb998bc6bd8ba108c97546c581142d9b3a39ccb53283e |
+| ctr-serverless-chart-values | v1 | docs/contracts/serverless-chart-values/chart-values.v1.schema.json | 563060d0f30968864ff8b6984d0af16aa48176da11b6c9bcbecbf839ea015ed7 |
 
 Field descriptions, provisional replica/pool bounds, OCI requirements and
 synthetic valid/invalid fixtures are in

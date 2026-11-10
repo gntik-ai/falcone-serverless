@@ -21,7 +21,8 @@ components use alphanumeric runs separated by one dot, one or two underscores,
 or one or more hyphens. Empty components and leading/trailing separators fail.
 An explicit registry must be exactly `docker.io`; ports, `localhost`, `ghcr.io`,
 `quay.io` and any other first component containing a dot or colon fail.
-After an explicit `docker.io/`, path components may contain dots.
+Unqualified repositories have one component (`name`) or two (`ns/name`).
+After an explicit `docker.io/`, paths may have more components and contain dots.
 
 Consumers normalize `name` to `docker.io/library/name`, `library/name` to
 `docker.io/library/name` and `ns/name` to `docker.io/ns/name`. An explicit

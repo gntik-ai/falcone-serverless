@@ -203,6 +203,11 @@ const INVALID: &[(&str, &str, &str)] = &[
     ("localhost", "/compiler/image/repository", "pattern"),
     ("registry-port", "/controller/image/repository", "pattern"),
     ("registry-dot", "/controller/image/repository", "pattern"),
+    (
+        "unqualified-nested-path",
+        "/controller/image/repository",
+        "pattern",
+    ),
     ("docker-port", "/controller/image/repository", "pattern"),
     ("bare-localhost", "/controller/image/repository", "pattern"),
     ("uppercase", "/controller/image/repository", "pattern"),
