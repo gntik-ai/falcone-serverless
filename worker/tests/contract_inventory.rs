@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
+const CHART_SCHEMA: &str = "docs/contracts/serverless-chart-values/chart-values.v1.schema.json";
+
 const FIXTURE_DIR: &str = "docs/contracts/fixtures/legacy-envelope/";
 const REFERENCE_SOURCE: &str = "packages/openapi-sdk-service/actions/openapi-spec-serve.mjs";
 const REFERENCE_REVISION: &str = "10a3c6e7a23c9a29b934c35f0682bbdef232099f";
@@ -66,6 +68,7 @@ const FROZEN_V1_SECTIONS: [(&str, &str); 4] = [
 
 struct Documents {
     inventory: String,
+    chart_schema: Vec<u8>,
     design: String,
     readme: String,
     adr_names: Vec<String>,
@@ -100,6 +103,7 @@ impl Documents {
         let base = root.join(FIXTURE_DIR);
         collect_files(&base, &base, &mut fixtures);
         Self {
+            chart_schema: fs::read(root.join(CHART_SCHEMA)).expect("read chart values schema"),
             host_wit: fs::read_to_string(root.join("worker/wit/host.wit")).expect("read host.wit"),
             fixtures,
             inventory: fs::read_to_string(docs.join("contracts/falcone-contract-inventory.md"))
@@ -122,6 +126,7 @@ impl Documents {
 
     fn validate(&self) -> Result<(), String> {
         validate(&self.inventory, &self.design, &self.readme, &self.adr_names)?;
+        validate_chart_values(&self.inventory, &self.chart_schema)?;
         validate_legacy(&self.inventory, &self.fixtures, &self.host_wit)
     }
 
@@ -204,9 +209,9 @@ fn validate(
 ) -> Result<(), String> {
     if !inventory
         .lines()
-        .any(|line| line == "Contract version: v1.1")
+        .any(|line| line == "Contract version: v1.2")
     {
-        return Err("missing Contract version: v1.1".into());
+        return Err("missing Contract version: v1.2".into());
     }
     let rows = table(
         section(inventory, "Contract surfaces")?,
@@ -305,11 +310,30 @@ fn validate(
     Ok(())
 }
 
+fn validate_chart_values(inventory: &str, schema: &[u8]) -> Result<(), String> {
+    let rows = table(
+        section(inventory, "Serverless chart values")?,
+        &["Contract", "Version", "Schema", "sha256"],
+    )?;
+    let row = rows
+        .get("ctr-serverless-chart-values")
+        .ok_or("missing chart values contract")?;
+    if rows.len() != 1 || row[1] != "v1" || row[2] != CHART_SCHEMA {
+        return Err(
+            "chart values must pin ctr-serverless-chart-values v1 and its schema path".into(),
+        );
+    }
+    if row[3] != sha256_hex(schema) {
+        return Err("chart values schema sha256 mismatch".into());
+    }
+    Ok(())
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// The frozen v1 sections must keep their published bytes; v1.1 is additive.
+/// The frozen v1 sections must keep their published bytes; v1.2 is additive.
 fn frozen_v1_unchanged(inventory: &str) -> Result<(), String> {
     for (heading, digest) in FROZEN_V1_SECTIONS {
         if sha256_hex(section(inventory, heading)?.as_bytes()) != digest {
@@ -1262,8 +1286,8 @@ fn altered_frozen_v1_row_is_rejected() {
 
 #[test]
 fn v1_version_line_is_rejected() {
-    rejects_replacement("Contract version: v1.1", "Contract version: v1");
-    rejects_replacement("Contract version: v1.1", "Contract version: v1.2");
+    rejects_replacement("Contract version: v1.2", "Contract version: v1");
+    rejects_replacement("Contract version: v1.2", "Contract version: v1.1");
 }
 
 #[test]
@@ -1667,10 +1691,31 @@ fn reference_decisions_follow_the_pinned_order() {
 }
 
 #[test]
-fn readme_describes_inventory_as_v1_1() {
+fn readme_describes_inventory_as_v1_2() {
     let docs = Documents::load();
     assert!(
         docs.readme
-            .contains("frozen Falcone contract inventory v1.1")
+            .contains("frozen Falcone contract inventory v1.2")
+    );
+}
+
+#[test]
+fn chart_values_inventory_pins_published_schema_bytes() {
+    let docs = Documents::load();
+    validate_chart_values(&docs.inventory, &docs.chart_schema).unwrap();
+    let mut changed = docs.chart_schema.clone();
+    changed.push(b' ');
+    assert!(
+        validate_chart_values(&docs.inventory, &changed)
+            .unwrap_err()
+            .contains("sha256 mismatch")
+    );
+    let wrong_digest = docs
+        .inventory
+        .replace(&sha256_hex(&docs.chart_schema), &"0".repeat(64));
+    assert!(
+        validate_chart_values(&wrong_digest, &docs.chart_schema)
+            .unwrap_err()
+            .contains("sha256 mismatch")
     );
 }
