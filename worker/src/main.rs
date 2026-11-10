@@ -5,6 +5,10 @@
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
+// The dispatcher issue that first calls the execution API removes this allowance.
+#[cfg_attr(not(test), allow(dead_code))]
+mod api;
+
 mod config;
 
 #[cfg(test)]

@@ -1,0 +1,15 @@
+{
+  "contract_version": 1,
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "projection": {
+    "revision": "rev-synthetic-0001",
+    "runtime_mode": "oci",
+    "base": {
+      "kind": "byo",
+      "image_digest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "signer_identity": "signer-synthetic-0001",
+      "attestation_ref": "attestation-synthetic-0001"
+    }
+  }
+}

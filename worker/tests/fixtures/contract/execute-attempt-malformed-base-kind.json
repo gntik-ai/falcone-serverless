@@ -1,0 +1,71 @@
+{
+  "contract_version": 1,
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "deadline_unix_ms": 1767225660000,
+  "execution_credential": {
+    "iss": "dispatcher-synthetic-0001",
+    "aud": "worker-pool-synthetic-0001",
+    "tenant": "tenant-synthetic-0001",
+    "workspace": "ws-synthetic-0001",
+    "pool_profile": "wasm-default",
+    "revision": "rev-synthetic-0001",
+    "activation": "act-synthetic-0001",
+    "attempt": "attempt-synthetic-0001",
+    "iat": 1767225600,
+    "exp": 1767225660,
+    "allowed_capabilities": [
+      {
+        "capability": "logging"
+      }
+    ]
+  },
+  "projection": {
+    "revision": "rev-synthetic-0001",
+    "runtime_mode": "wasm",
+    "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "component_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "language_profile": "javascript",
+    "engine_version": "49.0.5",
+    "wasi_version": "0.2.3",
+    "interface_version": "falcone:host@0.2.0",
+    "imports": [
+      "falcone:host/logging@0.2.0"
+    ],
+    "budgets": {
+      "guest_memory_bytes": 268435456,
+      "guest_to_host_bytes": 1048576,
+      "host_to_guest_bytes": 1048576,
+      "guest_deadline_ms": 30000,
+      "host_call_deadline_ms": 30000,
+      "termination_budget_ms": 1000
+    },
+    "granted_capabilities": [
+      "logging"
+    ],
+    "base": {
+      "kind": "default",
+      "id": "python-base@1.4.0"
+    }
+  },
+  "invocation": {
+    "headers": {
+      "X-Correlation-Id": "corr-legacy-0001",
+      "Idempotency-Key": "idem-legacy-0001"
+    },
+    "identity": {
+      "invocation-key": "inv-synthetic-0007",
+      "attempt-id": "attempt-synthetic-0001",
+      "idempotency-key": "idem-legacy-0001"
+    }
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0007/openapi",
+    "__ow_query": {}
+  }
+}

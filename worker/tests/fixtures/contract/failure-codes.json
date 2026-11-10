@@ -1,0 +1,51 @@
+[
+  {
+    "code": "oci_not_authorized",
+    "family": "oci_base",
+    "class": "non_retryable",
+    "gateway_code": "GW_OCI_NOT_AUTHORIZED",
+    "pinned_fixture": "oci_not_authorized.json"
+  },
+  {
+    "code": "base_disabled",
+    "family": "oci_base",
+    "class": "non_retryable",
+    "gateway_code": "GW_BASE_DISABLED",
+    "pinned_fixture": "base_disabled.json"
+  },
+  {
+    "code": "base_mismatch",
+    "family": "oci_base",
+    "class": "non_retryable",
+    "gateway_code": "GW_BASE_MISMATCH",
+    "pinned_fixture": "base_mismatch.json"
+  },
+  {
+    "code": "runtime_mode_not_wasm",
+    "family": "oci_base",
+    "class": "non_retryable",
+    "gateway_code": null,
+    "pinned_fixture": null
+  },
+  {
+    "code": "invalid_request",
+    "family": "execution",
+    "class": "non_retryable",
+    "gateway_code": null,
+    "pinned_fixture": null
+  },
+  {
+    "code": "worker_unavailable",
+    "family": "execution",
+    "class": "retryable",
+    "gateway_code": null,
+    "pinned_fixture": null
+  },
+  {
+    "code": "outcome_unknown",
+    "family": "execution",
+    "class": "uncertain",
+    "gateway_code": null,
+    "pinned_fixture": null
+  }
+]

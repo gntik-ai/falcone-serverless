@@ -212,3 +212,21 @@ Field descriptions, provisional replica/pool bounds, OCI requirements and
 synthetic valid/invalid fixtures are in
 [serverless-chart-values/README.md](serverless-chart-values/README.md). The
 inventory test recomputes the lowercase sha256 of the schema bytes.
+
+## Worker execution API consumed sources
+
+`ctr-worker-execution-api` v1 (RUN-01.t1, [spec](worker-execution-api/execution-api-v1.md))
+consumes these gntik-ai/falcone sources, all at revision
+`a19f40ab9e160cd522c110efd50c30b2f5e0d708`. The frozen v1 sections and the v1.1 and
+v1.2 contracts above are unchanged. The three error fixtures are pinned as copies in
+`worker/tests/fixtures/contract/pinned/`, with path, revision and sha256 recorded in
+`worker/tests/fixtures/contract/pinned-sources.json`. The legacy envelope fixtures it also
+uses are the v1.1 fixtures above, byte for byte.
+
+| Source | Revision | sha256 | Role |
+| --- | --- | --- | --- |
+| docs/contracts/serverless/functions-api/openapi.v1.yaml | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | 03121286b0c7ec716304d51a41b866477f4fc21671d95ebeafb8bf9da70e8960 | ctr-functions-api v1; OCI and base failure code names |
+| docs/contracts/serverless/execution-credential/execution-credential.v1.claims.schema.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | 9c98ba16548e724004fbf17c38d3d689fd7183d25b386c83e61b13ff8b31ecf0 | ctr-execution-credential v1 claims |
+| tests/contracts/functions-api/fixtures/errors/base_disabled.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | 9ed46a38dca56af8f9b9fdc16a413fec45f48a4b1324de2d9a400ed31c49c7d8 | GW_BASE_DISABLED error fixture |
+| tests/contracts/functions-api/fixtures/errors/base_mismatch.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | 2ac0fa4c05c628d6a251657de9918564652d32af9473502de510eaedfdcfa92c | GW_BASE_MISMATCH error fixture |
+| tests/contracts/functions-api/fixtures/errors/oci_not_authorized.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 | ef0763c3f590a7e5fb31b59073e240d5320681b0f70f13757327cdb7bb26d740 | GW_OCI_NOT_AUTHORIZED error fixture |

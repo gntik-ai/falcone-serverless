@@ -1,0 +1,29 @@
+{
+  "repository": "gntik-ai/falcone",
+  "revision": "a19f40ab9e160cd522c110efd50c30b2f5e0d708",
+  "openapi": {
+    "path": "docs/contracts/serverless/functions-api/openapi.v1.yaml",
+    "sha256": "03121286b0c7ec716304d51a41b866477f4fc21671d95ebeafb8bf9da70e8960"
+  },
+  "execution_credential_claims_schema": {
+    "path": "docs/contracts/serverless/execution-credential/execution-credential.v1.claims.schema.json",
+    "sha256": "9c98ba16548e724004fbf17c38d3d689fd7183d25b386c83e61b13ff8b31ecf0"
+  },
+  "error_fixtures": [
+    {
+      "path": "tests/contracts/functions-api/fixtures/errors/base_disabled.json",
+      "copy": "pinned/base_disabled.json",
+      "sha256": "9ed46a38dca56af8f9b9fdc16a413fec45f48a4b1324de2d9a400ed31c49c7d8"
+    },
+    {
+      "path": "tests/contracts/functions-api/fixtures/errors/base_mismatch.json",
+      "copy": "pinned/base_mismatch.json",
+      "sha256": "2ac0fa4c05c628d6a251657de9918564652d32af9473502de510eaedfdcfa92c"
+    },
+    {
+      "path": "tests/contracts/functions-api/fixtures/errors/oci_not_authorized.json",
+      "copy": "pinned/oci_not_authorized.json",
+      "sha256": "ef0763c3f590a7e5fb31b59073e240d5320681b0f70f13757327cdb7bb26d740"
+    }
+  ]
+}

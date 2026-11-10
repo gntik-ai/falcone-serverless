@@ -152,6 +152,31 @@ fn embedded_fixtures_are_exact_and_import_free() {
     }
 }
 
+/// Wasmtime APIs that load precompiled native code. No source file may name one, except the
+/// single trusted loader `cache/load.rs`.
+const NATIVE_LOAD_APIS: [&str; 6] = [
+    "Module::deserialize",
+    "Component::deserialize",
+    "deserialize_raw",
+    "deserialize_file",
+    "deserialize_open_file",
+    "deserialize_open",
+];
+
+/// The hard rule is that a tenant-supplied precompiled artifact is never deserialized.
+/// Every file under `worker/src` therefore fails on a Wasmtime artifact-loading API, and
+/// outside `cache/load.rs` and `api/` on any use of `deserialize`. `api/` is allowed serde
+/// JSON deserialization (`serde::Deserialize`, a hand-written `fn deserialize`,
+/// `deserialize_with`) because it only parses JSON requests and results. It may not use
+/// `wasmtime::` at all (checked in `source_valid`), so it cannot reach an artifact loader.
+fn deserialize_valid(path: &Path, source: &str) -> bool {
+    if path == Path::new("cache/load.rs") {
+        return true;
+    }
+    !NATIVE_LOAD_APIS.iter().any(|api| source.contains(api))
+        && (path.starts_with("api") || !source.contains("deserialize"))
+}
+
 fn source_valid(path: &Path, source: &str) -> bool {
     let engine = path == Path::new("qualification/engine.rs");
     let bin = path == Path::new("bin/qualification_runner.rs");
@@ -169,7 +194,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     ]
     .iter()
     .any(|allowed| path == Path::new(allowed));
-    (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
+    deserialize_valid(path, source)
         && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin || capability)
         && (!source.contains("Status::Passed") || outcome)
@@ -247,4 +272,87 @@ fn native_load_exception_is_exactly_one_source_path() {
             "{sibling}"
         );
     }
+}
+
+#[test]
+fn serde_deserialization_is_allowed_only_under_api() {
+    let serde_code = "impl<'de> Deserialize<'de> for Digest {\n    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> { todo!() }\n}\n#[serde(deserialize_with = \"present\")]\n";
+    for path in ["api/mod.rs", "api/request.rs", "api/nested/result.rs"] {
+        assert!(source_valid(Path::new(path), serde_code), "{path}");
+    }
+    for path in [
+        "config.rs",
+        "checkpoint.rs",
+        "host/runtime.rs",
+        "cache/other.rs",
+        "cache/nested/load.rs",
+        "qualification/api/mod.rs",
+        "api.rs",
+        "apiary/mod.rs",
+        "api.bak/mod.rs",
+    ] {
+        assert!(!source_valid(Path::new(path), serde_code), "{path}");
+    }
+    assert!(source_valid(Path::new("cache/load.rs"), serde_code));
+}
+
+#[test]
+fn wasmtime_artifact_loading_fails_everywhere_but_the_trusted_loader() {
+    let serde_code = "#[serde(deserialize_with = \"present\")]\n";
+    for call in [
+        "Module::deserialize(&engine, bytes)",
+        "Module::deserialize_file(&engine, path)",
+        "Module::deserialize_open_file(&engine, file)",
+        "Component::deserialize(&engine, bytes)",
+        "Component::deserialize_file(&engine, path)",
+        "Component::deserialize_raw(&engine, bytes)",
+        "engine_ref.deserialize_raw(slice)",
+        "wasmtime::Module::deserialize(&engine, bytes)",
+    ] {
+        for path in [
+            "api/mod.rs",
+            "api/request.rs",
+            "api/nested/result.rs",
+            "config.rs",
+            "host/runtime.rs",
+            "qualification/engine.rs",
+        ] {
+            let source = format!("{serde_code}{call};");
+            assert!(!source_valid(Path::new(path), &source), "{path}: {call}");
+        }
+        assert!(deserialize_valid(Path::new("cache/load.rs"), call));
+    }
+    // The api tree may not reach Wasmtime at all.
+    assert!(!source_valid(
+        Path::new("api/mod.rs"),
+        "use wasmtime::Engine;"
+    ));
+}
+
+#[test]
+fn api_sources_are_json_parsing_only() {
+    let api = root().join("worker/src/api");
+    let mut checked = 0;
+    for entry in fs::read_dir(&api).unwrap() {
+        let path = entry.unwrap().path();
+        let source = fs::read_to_string(&path).unwrap();
+        for forbidden in NATIVE_LOAD_APIS.iter().chain(&["wasmtime::", "tests/"]) {
+            assert!(
+                !source.contains(forbidden),
+                "{}: {forbidden}",
+                path.display()
+            );
+        }
+        // No item in the api carries its own dead-code allowance, and nothing but a test
+        // module is gated by cfg(test).
+        assert!(!source.contains("allow(dead_code)") && !source.contains("expect(dead_code)"));
+        assert_eq!(
+            source.matches("cfg(test)").count(),
+            usize::from(path.ends_with("mod.rs")),
+            "{}",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(checked >= 7);
 }
