@@ -4,7 +4,7 @@
   "invocation": {
     "invocation_key": "inv-synthetic-0001",
     "attempt_id": "attempt-synthetic-0001",
-    "idempotency_key": "idem-synthetic-0001",
+    "idempotency_key": "idem-0000-0000-0000",
     "correlation_id": "corr-synthetic-0001"
   },
   "projection": {
