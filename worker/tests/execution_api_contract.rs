@@ -684,11 +684,23 @@ fn valid_legacy_fixtures_round_trip_unchanged() {
 fn invalid_legacy_fixtures_are_rejected_before_invocation() {
     let template = contract_value("execute-attempt-absent-base.json");
     let expected = [
-        ("invalid/missing-path.json", RequestReason::EnvelopeInvalid),
-        ("invalid/oversized-body.json", RequestReason::BodyTooLarge),
-        ("invalid/non-JSON-body.json", RequestReason::BodyNotJson),
+        (
+            "invalid/missing-path.json",
+            RequestReason::EnvelopeInvalid,
+            "legacy_envelope_invalid",
+        ),
+        (
+            "invalid/oversized-body.json",
+            RequestReason::BodyTooLarge,
+            "legacy_body_too_large",
+        ),
+        (
+            "invalid/non-JSON-body.json",
+            RequestReason::BodyNotJson,
+            "legacy_body_not_json",
+        ),
     ];
-    for (name, reason) in expected {
+    for (name, reason, rejection_code) in expected {
         let fixture: Value = serde_json::from_slice(&legacy_bytes(name)).unwrap();
         assert_eq!(fixture["expected"]["invoked"], false);
         assert_eq!(fixture["expected"]["rejection"], reason.label(), "{name}");
@@ -697,8 +709,16 @@ fn invalid_legacy_fixtures_are_rejected_before_invocation() {
         request["params"] = fixture["params"].clone();
         let error = admit(&request).unwrap_err();
         assert_eq!(error, ApiError::Rejected(reason), "{name}");
-        // A local rejection before invocation: no wire code is defined for it.
+        // Mapped to a worker rejection code: local, non-retryable, and not a wire
+        // failure code (no result is produced before invocation).
         assert_eq!(error.code(), None, "{name}");
+        assert_eq!(error.rejection_code(), Some(rejection_code), "{name}");
+        assert_eq!(reason.class(), FailureClass::NonRetryable, "{name}");
+        assert!(
+            error.log_line().contains(rejection_code),
+            "{name}: {}",
+            error.log_line()
+        );
     }
     let oversized: Value =
         serde_json::from_slice(&legacy_bytes("invalid/oversized-body.json")).unwrap();

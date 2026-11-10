@@ -50,6 +50,21 @@ impl RequestReason {
             Self::BodyTooLarge => "body-too-large",
         }
     }
+
+    /// The worker rejection code the fixture label maps to. It is a local code: it is not
+    /// a [`FailureCode`], never appears in a result's `failure.code` and is not a wire code.
+    pub const fn rejection_code(self) -> &'static str {
+        match self {
+            Self::EnvelopeInvalid => "legacy_envelope_invalid",
+            Self::BodyNotJson => "legacy_body_not_json",
+            Self::BodyTooLarge => "legacy_body_too_large",
+        }
+    }
+
+    /// A retry of the same envelope cannot succeed.
+    pub const fn class(self) -> FailureClass {
+        FailureClass::NonRetryable
+    }
 }
 
 /// Which identity field of a request, credential or result disagrees.
@@ -112,11 +127,21 @@ pub enum ApiError {
 impl ApiError {
     /// The wire failure code, for errors that are reported to the dispatcher. Only the
     /// non-wasm refusal has one: a malformed document, a legacy rejection or an identity
-    /// mismatch is rejected locally, before invocation, and has no wire code.
+    /// mismatch is rejected locally, before invocation, and has no wire code (a legacy
+    /// rejection has the local [`Self::rejection_code`] instead).
     pub fn code(&self) -> Option<FailureCode> {
         match self {
             Self::Refused(_) => Some(FailureCode::RuntimeModeNotWasm),
             Self::Malformed(_) | Self::Rejected(_) | Self::IdentityMismatch(_) => None,
+        }
+    }
+
+    /// The worker rejection code of a legacy envelope rejected before invocation. It is
+    /// local to the worker (no result is produced), so it is not a [`FailureCode`].
+    pub fn rejection_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Rejected(reason) => Some(reason.rejection_code()),
+            _ => None,
         }
     }
 
@@ -125,7 +150,12 @@ impl ApiError {
         let detail = match self {
             Self::Refused(_) => "kind=refused".to_owned(),
             Self::Malformed(reason) => format!("kind=malformed reason={}", reason.as_str()),
-            Self::Rejected(reason) => format!("kind=rejected reason={}", reason.label()),
+            Self::Rejected(reason) => format!(
+                "kind=rejected reason={} rejection_code={} class={}",
+                reason.label(),
+                reason.rejection_code(),
+                reason.class().as_str()
+            ),
             Self::IdentityMismatch(field) => {
                 format!("kind=identity_mismatch field={}", field.as_str())
             }

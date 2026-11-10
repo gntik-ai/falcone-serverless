@@ -186,6 +186,8 @@ mod tests {
         ];
         assert_eq!(errors[0], ApiError::Malformed(MalformedReason::Json));
         assert_eq!(errors[2], ApiError::Rejected(RequestReason::BodyNotJson));
+        assert_eq!(errors[0].rejection_code(), None);
+        assert_eq!(errors[2].rejection_code(), Some("legacy_body_not_json"));
         for error in errors {
             assert_eq!(error.code(), None);
             assert!(error.log_line().starts_with("execution_api kind="));

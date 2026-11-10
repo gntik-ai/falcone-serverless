@@ -29,7 +29,7 @@ revision and activation state) are Proposed.
 | E3 | Every digest is `sha256:` followed by 64 lowercase hex digits. |
 | E4 | The execution credential is the structured `ctr-execution-credential` v1 claims, never an opaque string. Its `activation`, `attempt` and `revision` claims must equal the request's `activation_id`, `attempt_id` and `projection.revision`. Signature, issuer, audience and time validity are checked by the host capability layer, not by admission. |
 | E5 | `invocation.identity.attempt-id` equals `attempt_id`, and `invocation.identity.idempotency-key` equals the `Idempotency-Key` header. |
-| E6 | The legacy params are rejected before invocation when `__ow_path` is absent, when `__ow_body` exceeds 1048576 bytes (`max-host-to-guest-bytes`), or when a body under a JSON `content-type` is not JSON. All three are local rejections before invocation: no wire failure code is defined for them and no result is produced. |
+| E6 | The legacy params are rejected before invocation when `__ow_path` is absent, when `__ow_body` exceeds 1048576 bytes (`max-host-to-guest-bytes`), or when a body under a JSON `content-type` is not JSON. All three are local rejections before invocation, mapped to the worker rejection codes under Legacy rejections: no wire failure code is defined for them and no result is produced. |
 | E7 | Every result of an admitted attempt carries the activation runtime identity block, and the identity must equal the request's projection. `base_digest` is present exactly when the projection pins a base, and equals the catalog `digest` or the BYO `image_digest`. The result parsing entry point enforces this in every build. |
 | E8 | A failure's `class` is the class of its `code` (table below). The class never depends on the attempt number: a retry of a non-retryable code is still non-retryable. |
 | E9 | No formatted error text, log line or message prints a request field. `activation_id`, `attempt_id`, `projection.revision` and every other request string appear only as `<redacted>`; request-derived enums and validated codes may be printed. Serialized results keep their contract fields. Serde error text is never forwarded, because it echoes input values. |
@@ -135,14 +135,18 @@ retries. `runtime_mode_not_wasm` is the Wasm worker's refusal of a non-`wasm` mo
 
 ### Legacy rejections
 
-The invalid fixtures of inventory v1.1 carry fixture labels, not wire codes. They are
-rejected before invocation (`ApiError::Rejected`) and have no wire failure code:
+The invalid fixtures of inventory v1.1 carry fixture labels, not wire codes. Each is
+rejected before invocation (`ApiError::Rejected`) and mapped to a worker rejection code.
+A rejection code is local to the worker: no attempt runs and no result is produced, so it
+is never a `failure.code`, is not in the failure code table above and has no
+ctr-functions-api counterpart. It is `non_retryable`: the same envelope cannot succeed on
+a retry. The worker-only exception for failure codes covers the OCI and base failure family; these rejection codes are a separate local set.
 
-| Fixture label | Reason |
-| --- | --- |
-| envelope-invalid | `__ow_path` is absent |
-| body-too-large | `__ow_body` is over the limit |
-| body-not-json | a JSON body is not parsable |
+| Fixture label | Worker rejection code | Class | Reason |
+| --- | --- | --- | --- |
+| envelope-invalid | legacy_envelope_invalid | non_retryable | `__ow_path` is absent |
+| body-too-large | legacy_body_too_large | non_retryable | `__ow_body` is over the limit |
+| body-not-json | legacy_body_not_json | non_retryable | a JSON body is not parsable |
 
 ## Consumed sources
 
