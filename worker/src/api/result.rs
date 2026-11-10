@@ -1,6 +1,6 @@
 //! Result envelope, failure codes and classes, runtime identity and the Wasm-worker gate.
 
-use super::projection::{LanguageProfile, RuntimeMode};
+use super::projection::{CatalogBaseId, LanguageProfile, RuntimeMode};
 use super::request::ExecuteAttempt;
 use super::types::{ContractError, Digest, Id, parse};
 use serde::{Deserialize, Serialize};
@@ -71,9 +71,10 @@ pub struct Failure {
     pub message: Option<Id>,
 }
 
-/// The activation runtime identity. A `wasm` identity carries every field; for other
-/// modes only the revision and mode are required here (OCI-04 adds the rest), and the
-/// mode is absent only on a refusal of a mode the worker does not recognise.
+/// The activation runtime identity. Every result carries the revision, the raw artifact
+/// digest, the language profile and the Wasmtime and interface versions, whatever the
+/// mode; `base_digest` follows the pinned base. The mode is absent only on a refusal of a
+/// mode the worker does not recognise. Fields OCI-04 adds are additive and optional.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeIdentity {
@@ -143,24 +144,20 @@ impl ExecutionResult {
             }
         }
         let identity = &self.identity;
-        match identity.runtime_mode {
-            Some(RuntimeMode::Wasm) => {
-                if self.is_refusal() {
-                    return Err(ContractError::new(
-                        "v1: a refusal never reports runtime_mode wasm",
-                    ));
-                }
-                if identity.artifact_digest.is_none()
-                    || identity.wasmtime_version.is_none()
-                    || identity.language_profile.is_none()
-                    || identity.interface_version.is_none()
-                {
-                    return Err(ContractError::new("v1: incomplete wasm runtime identity"));
-                }
-            }
-            Some(RuntimeMode::Oci) => {}
-            None if self.is_refusal() => {}
-            None => return Err(ContractError::new("v1: identity runtime_mode is required")),
+        if identity.runtime_mode.is_none() && !self.is_refusal() {
+            return Err(ContractError::new("v1: identity runtime_mode is required"));
+        }
+        if self.is_refusal() && identity.runtime_mode == Some(RuntimeMode::Wasm) {
+            return Err(ContractError::new(
+                "v1: a refusal never reports runtime_mode wasm",
+            ));
+        }
+        if identity.artifact_digest.is_none()
+            || identity.wasmtime_version.is_none()
+            || identity.language_profile.is_none()
+            || identity.interface_version.is_none()
+        {
+            return Err(ContractError::new("v1: incomplete runtime identity"));
         }
         Ok(())
     }
@@ -181,11 +178,16 @@ pub struct Refusal {
     function_revision: Id,
     /// The mode that was asked for, when it is one the contract knows.
     requested: Option<RuntimeMode>,
+    artifact_digest: Digest,
+    language_profile: LanguageProfile,
+    /// The digest of the pinned base; `None` exactly when the revision pins none.
+    base_digest: Option<Digest>,
 }
 
 impl Refusal {
     /// The non-retryable result for the refused attempt. The refusal ran no guest, so
-    /// its identity holds only the revision, the requested mode when known and the
+    /// its identity describes the pinned revision (artifact digest, language profile and
+    /// the base digest when a base is pinned), the requested mode when known, and the
     /// worker's own versions.
     pub fn into_result(self, worker: WorkerFacts<'_>) -> Result<ExecutionResult, ContractError> {
         let code = FailureCode::RuntimeModeNotWasm;
@@ -203,10 +205,10 @@ impl Refusal {
             identity: RuntimeIdentity {
                 function_revision: self.function_revision,
                 runtime_mode: self.requested,
-                artifact_digest: None,
-                base_digest: None,
+                artifact_digest: Some(self.artifact_digest),
+                base_digest: self.base_digest,
                 wasmtime_version: Some(Id::try_from(worker.wasmtime_version.to_owned())?),
-                language_profile: None,
+                language_profile: Some(self.language_profile),
                 interface_version: Some(Id::try_from(worker.interface_version.to_owned())?),
             },
         };
@@ -220,13 +222,15 @@ pub enum AdmitError {
     /// The request is not a well-formed v1 attempt.
     Malformed(ContractError),
     /// The projection's runtime mode is not `wasm`; the worker executes nothing.
-    Refused(Refusal),
+    Refused(Box<Refusal>),
 }
 
 /// The Wasm worker's admission gate. The runtime mode is read first: a mode other than
 /// `wasm` (`oci` or an unknown value) is refused whatever else the projection carries,
 /// so fields a later additive revision defines for another mode cannot turn a refusal
-/// into a parse error. A missing or non-string mode is malformed.
+/// into a parse error. A missing or non-string mode is malformed, and so is a refused
+/// projection that lacks the identity facts a refusal must report: the artifact digest,
+/// the language profile, and a well-formed base (digest included) when one is pinned.
 pub fn admit_wasm_attempt(bytes: &[u8]) -> Result<ExecuteAttempt, AdmitError> {
     let malformed = |message: &str| AdmitError::Malformed(ContractError::new(message));
     let value: Value = serde_json::from_slice(bytes)
@@ -243,12 +247,48 @@ pub fn admit_wasm_attempt(bytes: &[u8]) -> Result<ExecuteAttempt, AdmitError> {
         Some(_) => return Err(malformed("v1: runtime_mode must be a string")),
     };
     if mode != "wasm" {
-        return Err(AdmitError::Refused(Refusal {
+        let artifact_digest = match value.pointer("/projection/artifact_digest") {
+            Some(Value::String(text)) => Digest::try_from(text.clone()),
+            _ => Err(ContractError::new("missing field `artifact_digest`")),
+        }
+        .map_err(AdmitError::Malformed)?;
+        let language_profile = match value.pointer("/projection/language_profile") {
+            Some(profile) => parse::<LanguageProfile>(profile),
+            None => Err(ContractError::new("missing field `language_profile`")),
+        }
+        .map_err(AdmitError::Malformed)?;
+        let base_digest = match value.pointer("/projection/base") {
+            None => None,
+            Some(base) => Some(pinned_base_digest(base).map_err(AdmitError::Malformed)?),
+        };
+        return Err(AdmitError::Refused(Box::new(Refusal {
             activation_id: id("/activation_id")?,
             attempt_id: id("/attempt_id")?,
             function_revision: id("/projection/revision")?,
             requested: (mode == "oci").then_some(RuntimeMode::Oci),
-        }));
+            artifact_digest,
+            language_profile,
+            base_digest,
+        })));
     }
     ExecuteAttempt::from_value(&value).map_err(AdmitError::Malformed)
+}
+
+/// The digest of a pinned base read from the raw projection of a refused attempt. Only
+/// the kind, the digest and (for a catalog base) the id are read, so fields another mode
+/// adds to the base cannot turn a refusal into a parse error; an unresolved alias, an
+/// unknown kind or a missing or malformed digest is still malformed.
+fn pinned_base_digest(base: &Value) -> Result<Digest, ContractError> {
+    let text = |key: &str| match base.get(key) {
+        Some(Value::String(text)) => Ok(text.clone()),
+        _ => Err(ContractError::new("v1: base is missing a required field")),
+    };
+    match base.get("kind").and_then(Value::as_str) {
+        Some("catalog") => {
+            CatalogBaseId::try_from(text("id")?)?;
+            Digest::try_from(text("digest")?)
+        }
+        Some("byo") => Digest::try_from(text("image_digest")?),
+        _ => Err(ContractError::new("v1: base kind is not catalog or byo")),
+    }
 }

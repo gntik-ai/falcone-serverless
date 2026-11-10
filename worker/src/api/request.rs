@@ -105,41 +105,34 @@ impl ExecuteAttempt {
         if identity.function_revision != projection.revision {
             return Err(ContractError::new("v1: identity names another revision"));
         }
-        if result.is_refusal() {
-            // A refusal ran nothing: only the mode it saw has to agree.
-            return match identity.runtime_mode {
-                Some(mode) if mode != projection.runtime_mode => Err(ContractError::new(
+        let refusal = result.is_refusal();
+        match identity.runtime_mode {
+            Some(mode) if mode != projection.runtime_mode => {
+                return Err(ContractError::new(
                     "v1: identity runtime_mode differs from the projection",
-                )),
-                _ => Ok(()),
-            };
-        }
-        if identity.runtime_mode != Some(projection.runtime_mode) {
-            return Err(ContractError::new(
-                "v1: identity runtime_mode differs from the projection",
-            ));
+                ));
+            }
+            None if !refusal => {
+                return Err(ContractError::new("v1: identity runtime_mode is required"));
+            }
+            _ => {}
         }
         if identity.base_digest.as_ref() != projection.base.as_ref().map(|base| base.digest()) {
             return Err(ContractError::new(
                 "v1: base_digest must be present exactly when the revision pins a base, and equal it",
             ));
         }
-        if identity
-            .artifact_digest
-            .as_ref()
-            .is_some_and(|d| *d != projection.artifact_digest)
-            || identity
-                .wasmtime_version
-                .as_ref()
-                .is_some_and(|v| *v != projection.engine_version)
-            || identity
-                .interface_version
-                .as_ref()
-                .is_some_and(|v| *v != projection.interface_version)
-            || identity
-                .language_profile
-                .as_ref()
-                .is_some_and(|p| *p != projection.language_profile)
+        if identity.artifact_digest.as_ref() != Some(&projection.artifact_digest)
+            || identity.language_profile.as_ref() != Some(&projection.language_profile)
+        {
+            return Err(ContractError::new(
+                "v1: identity differs from the pinned projection",
+            ));
+        }
+        // A refusal reports the worker's own versions; any other result ran the pinned ones.
+        if !refusal
+            && (identity.wasmtime_version.as_ref() != Some(&projection.engine_version)
+                || identity.interface_version.as_ref() != Some(&projection.interface_version))
         {
             return Err(ContractError::new(
                 "v1: identity differs from the pinned projection",
@@ -229,4 +222,10 @@ pub struct CancelMessage {
     pub activation_id: Id,
     pub attempt_id: Id,
     pub state: CancelState,
+}
+
+impl CancelMessage {
+    pub fn from_value(value: &Value) -> Result<Self, ContractError> {
+        parse(value)
+    }
 }

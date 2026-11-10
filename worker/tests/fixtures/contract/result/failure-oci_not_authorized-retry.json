@@ -11,6 +11,13 @@
   "identity": {
     "function_revision": "rev-synthetic-0001",
     "runtime_mode": "oci",
-    "base_digest": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+    "base_digest": "sha256:d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+    "artifact_digest": "sha256:a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "wasmtime_version": "49.0.5",
+    "language_profile": {
+      "name": "javascript",
+      "version": "synthetic-1"
+    },
+    "interface_version": "0.2.0"
   }
 }

@@ -862,6 +862,275 @@ fn refusal_identity_never_claims_wasm() {
 }
 
 #[test]
+fn every_result_identity_field_is_required_for_refusals_and_oci_results() {
+    for name in [
+        "refusal-non-wasm",
+        "failure-oci_not_authorized",
+        "failure-oci_not_authorized-retry",
+    ] {
+        let valid = fixture(&format!("result/{name}.json"));
+        ExecutionResult::from_value(&valid).expect(name);
+        for field in [
+            "function_revision",
+            "artifact_digest",
+            "wasmtime_version",
+            "language_profile",
+            "interface_version",
+        ] {
+            let mut value = valid.clone();
+            remove(&mut value, &format!("/identity/{field}"));
+            assert!(
+                ExecutionResult::from_value(&value).is_err(),
+                "{name} accepted an identity without {field}"
+            );
+        }
+    }
+}
+
+#[test]
+fn refusal_and_oci_results_follow_the_pinned_base_exactly() {
+    let byo = attempt("byo-base");
+    for name in ["refusal-non-wasm", "failure-oci_not_authorized"] {
+        byo.check_result(&result(name)).expect(name);
+        // Pinned base, digest omitted.
+        let mut missing = fixture(&format!("result/{name}.json"));
+        remove(&mut missing, "/identity/base_digest");
+        let missing = ExecutionResult::from_value(&missing).expect("well-formed");
+        assert!(
+            byo.check_result(&missing).is_err(),
+            "{name}: missing digest"
+        );
+        // Pinned base, another digest.
+        let mut other = fixture(&format!("result/{name}.json"));
+        set(
+            &mut other,
+            "/identity/base_digest",
+            json!(format!("sha256:{}", "e5".repeat(32))),
+        );
+        let other = ExecutionResult::from_value(&other).expect("well-formed");
+        assert!(byo.check_result(&other).is_err(), "{name}: other digest");
+        // Artifact and language profile must be the pinned ones too.
+        let mut artifact = fixture(&format!("result/{name}.json"));
+        set(
+            &mut artifact,
+            "/identity/artifact_digest",
+            json!(format!("sha256:{}", "f6".repeat(32))),
+        );
+        let artifact = ExecutionResult::from_value(&artifact).expect("well-formed");
+        assert!(byo.check_result(&artifact).is_err(), "{name}: artifact");
+        let mut profile = fixture(&format!("result/{name}.json"));
+        set(
+            &mut profile,
+            "/identity/language_profile",
+            json!({"name": "python", "version": "synthetic-1"}),
+        );
+        let profile = ExecutionResult::from_value(&profile).expect("well-formed");
+        assert!(byo.check_result(&profile).is_err(), "{name}: profile");
+    }
+    // No base pinned: a refusal that reports one is a mismatch.
+    let mut request = fixture("request/absent-base.json");
+    set(&mut request, "/projection/runtime_mode", json!("oci"));
+    let absent_oci = ExecuteAttempt::from_value(&request).expect("typed oci request");
+    assert!(
+        absent_oci
+            .check_result(&result("refusal-non-wasm"))
+            .is_err()
+    );
+    let mut no_base = fixture("result/refusal-non-wasm.json");
+    remove(&mut no_base, "/identity/base_digest");
+    absent_oci
+        .check_result(&ExecutionResult::from_value(&no_base).unwrap())
+        .expect("no base pinned, no digest");
+}
+
+#[test]
+fn a_refusal_reports_the_pinned_artifact_language_and_base() {
+    for (request, base_digest) in [
+        ("request/catalog-base.json", Some("c3")),
+        ("request/absent-base.json", None),
+    ] {
+        let mut value = fixture(request);
+        set(&mut value, "/projection/runtime_mode", json!("native"));
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let Err(AdmitError::Refused(refusal)) = admit_wasm_attempt(&bytes) else {
+            panic!("{request}: expected the refusal");
+        };
+        let identity =
+            serde_json::to_value(refusal.into_result(WORKER).unwrap()).unwrap()["identity"].clone();
+        assert_eq!(
+            identity["artifact_digest"],
+            value["projection"]["artifact_digest"]
+        );
+        assert_eq!(
+            identity["language_profile"],
+            value["projection"]["language_profile"]
+        );
+        match base_digest {
+            Some(byte) => assert_eq!(
+                identity["base_digest"],
+                json!(format!("sha256:{}", byte.repeat(32)))
+            ),
+            None => assert!(identity.get("base_digest").is_none()),
+        }
+    }
+}
+
+#[test]
+fn a_refused_projection_missing_identity_facts_or_with_a_bad_base_is_malformed() {
+    let bad_digest = json!("sha256:short");
+    let cases: Vec<(&str, &str, Option<Value>)> = vec![
+        ("request/byo-base.json", "/projection/artifact_digest", None),
+        (
+            "request/byo-base.json",
+            "/projection/artifact_digest",
+            Some(bad_digest.clone()),
+        ),
+        (
+            "request/byo-base.json",
+            "/projection/language_profile",
+            None,
+        ),
+        (
+            "request/byo-base.json",
+            "/projection/base/image_digest",
+            None,
+        ),
+        (
+            "request/byo-base.json",
+            "/projection/base/image_digest",
+            Some(bad_digest.clone()),
+        ),
+        (
+            "request/byo-base.json",
+            "/projection/base/kind",
+            Some(json!("floating")),
+        ),
+        ("request/catalog-base.json", "/projection/base/digest", None),
+        (
+            "request/catalog-base.json",
+            "/projection/base/digest",
+            Some(bad_digest),
+        ),
+        (
+            "request/catalog-base.json",
+            "/projection/base/id",
+            Some(json!("default@latest")),
+        ),
+        (
+            "request/catalog-base.json",
+            "/projection/base/id",
+            Some(json!("python")),
+        ),
+    ];
+    for (name, pointer, replacement) in cases {
+        let mut request = fixture(name);
+        set(&mut request, "/projection/runtime_mode", json!("oci"));
+        match replacement {
+            Some(new) => set(&mut request, pointer, new),
+            None => remove(&mut request, pointer),
+        }
+        let bytes = serde_json::to_vec(&request).unwrap();
+        assert!(
+            matches!(admit_wasm_attempt(&bytes), Err(AdmitError::Malformed(_))),
+            "{name} {pointer} was not malformed"
+        );
+    }
+}
+
+// ---- Error messages never echo rejected input ----
+
+const SECRET: &str = "synthetic-secret-value-9f3a";
+
+fn assert_no_echo(error: &dyn std::fmt::Debug, what: &str) {
+    assert!(
+        !format!("{error:?}").contains(SECRET),
+        "{what} echoed the rejected input"
+    );
+}
+
+#[test]
+fn rejected_input_is_never_echoed_by_errors() {
+    let mut cases: Vec<(&str, Value)> = Vec::new();
+    for (name, base, pointer) in [
+        (
+            "unknown request key",
+            "request/catalog-base.json",
+            "/projection",
+        ),
+        (
+            "unknown credential key",
+            "request/catalog-base.json",
+            "/credential/claims",
+        ),
+        (
+            "unknown base key",
+            "request/catalog-base.json",
+            "/projection/base",
+        ),
+    ] {
+        let mut value = fixture(base);
+        insert(&mut value, pointer, SECRET, json!(1));
+        cases.push((name, value));
+    }
+    for (name, pointer) in [
+        ("base kind", "/projection/base/kind"),
+        ("runtime mode", "/projection/runtime_mode"),
+        ("digest", "/projection/artifact_digest"),
+        ("deadline", "/deadline"),
+        ("catalog id", "/projection/base/id"),
+        ("fuel", "/projection/budgets/fuel"),
+    ] {
+        let mut value = fixture("request/catalog-base.json");
+        set(&mut value, pointer, json!(SECRET));
+        cases.push((name, value));
+    }
+    for (name, request) in cases {
+        let from_value = ExecuteAttempt::from_value(&request).expect_err(name);
+        assert_no_echo(&from_value, name);
+        assert!(!from_value.to_string().contains(SECRET), "{name}");
+        let bytes = serde_json::to_vec(&request).unwrap();
+        let from_slice = ExecuteAttempt::from_slice(&bytes).expect_err(name);
+        assert_no_echo(&from_slice, name);
+        if let Err(admit) = admit_wasm_attempt(&bytes) {
+            assert_no_echo(&admit, name);
+        }
+    }
+    let mut result_cases = Vec::new();
+    for pointer in [
+        "/status",
+        "/failure/code",
+        "/failure/class",
+        "/identity/runtime_mode",
+    ] {
+        let mut value = fixture("result/failure-base_mismatch.json");
+        set(&mut value, pointer, json!(SECRET));
+        result_cases.push(value);
+    }
+    let mut value = fixture("result/failure-base_mismatch.json");
+    insert(&mut value, "/identity", SECRET, json!(1));
+    result_cases.push(value);
+    for value in result_cases {
+        let error = ExecutionResult::from_value(&value).expect_err("rejected result");
+        assert_no_echo(&error, "result");
+        assert!(!error.to_string().contains(SECRET));
+    }
+    let update = json!({
+        "activation_id": "act-synthetic-0001", "attempt_id": "attempt-synthetic-0001",
+        "sequence": 1, "update": {"type": SECRET}
+    });
+    assert_no_echo(
+        &ExecutionUpdate::from_value(&update).unwrap_err(),
+        "update type",
+    );
+    let mut cancel = fixture("cancel/requested.json");
+    set(&mut cancel, "/state", json!(SECRET));
+    assert_no_echo(
+        &CancelMessage::from_value(&cancel).unwrap_err(),
+        "cancel state",
+    );
+}
+
+#[test]
 fn success_fixtures_carry_the_legacy_envelope() {
     for name in ["success-catalog-base", "success-absent-base"] {
         let value = fixture(&format!("result/{name}.json"));

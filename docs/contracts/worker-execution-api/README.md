@@ -27,7 +27,9 @@ over [worker/tests/fixtures/contract/](../../../worker/tests/fixtures/contract/)
 - Identifiers (`Id`) are 1–256 bytes without control characters. Digests are `sha256:`
   followed by exactly 64 lowercase hex digits. `deadline` is an RFC 3339 UTC timestamp
   ending in `Z`.
-- Error messages never echo input values, because an input may hold a credential.
+- Error messages never echo input values, because an input may hold a credential. An
+  unknown field, an unknown variant and a type or value mismatch are reported as fixed
+  text, never with the offending key or value.
 - Fixtures contain only synthetic values and no credential.
 
 ## Execute attempt
@@ -95,9 +97,13 @@ The Wasm worker reads `projection.runtime_mode` first. Any string other than `wa
 (`oci`, or a value this contract does not know) is **refused**, whatever else the
 projection carries, so fields another mode adds later cannot turn the refusal into a
 parse error. The worker executes nothing and answers with the refusal result
-(`runtime_mode_not_wasm`, `non_retryable`), whose identity holds the revision, the
-requested mode when it is `oci`, and the worker's own `wasmtime_version` and
-`interface_version`. A missing or non-string `runtime_mode` is malformed, not a refusal.
+(`runtime_mode_not_wasm`, `non_retryable`), whose identity describes the pinned revision:
+the revision, the raw `artifact_digest`, the `language_profile`, the `base_digest` exactly
+when a base is pinned, and the requested mode when it is `oci`; `wasmtime_version` and
+`interface_version` are the worker's own. A missing or non-string `runtime_mode` is
+malformed, not a refusal; so is a refused projection without `artifact_digest` or
+`language_profile`, or with a pinned base whose kind is unknown, whose digest is missing
+or malformed, or whose catalog id is an unresolved alias.
 
 ## Execution credential
 
@@ -176,16 +182,17 @@ Every result carries `identity`:
 | --- | --- |
 | `function_revision` | Always required. |
 | `runtime_mode` | `wasm` or `oci`. Always required, except that a refusal of an unrecognised mode omits it. |
-| `artifact_digest` | Raw artifact digest. |
+| `artifact_digest` | Raw artifact digest. Always required. |
 | `base_digest` | The digest of the pinned base; present **exactly when** the revision pins a base (catalog `digest`, or BYO `image_digest`). |
-| `wasmtime_version` | Wasmtime version that ran the attempt. |
-| `language_profile` | `{name, version}`. |
-| `interface_version` | `falcone:host` interface version. |
+| `wasmtime_version` | Wasmtime version that ran the attempt; a refusal reports the worker's own. Always required. |
+| `language_profile` | `{name, version}`. Always required. |
+| `interface_version` | `falcone:host` interface version; a refusal reports the worker's own. Always required. |
 
-For `runtime_mode` `wasm`, every field but `base_digest` is required, and each must equal
-the projection's value. For `oci`, OCI-04 defines the remaining fields. A refusal never
+The same fields are required for every result, refusals and `oci` results included; OCI-04
+adds further fields additively. Each must equal the projection's value, except that a
+refusal's `wasmtime_version` and `interface_version` are the worker's own. A refusal never
 reports `wasm`. A result whose `base_digest` is missing for a pinned base, present with no
-base, or different from the pinned digest does not describe its attempt.
+base, or different from the pinned digest does not describe its attempt, on every path.
 
 ## Legacy envelope and invocation identity
 

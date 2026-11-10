@@ -13,23 +13,23 @@ impl ContractError {
         Self(message.into())
     }
 
-    /// Reports a serde failure without echoing any input value. Field-shape messages
-    /// and this module's own messages are safe; type and value mismatches quote the
-    /// input and are replaced.
+    /// Reports a serde failure without echoing any input value. Serde's own messages for
+    /// unknown fields and variants and for type and value mismatches quote the input, so
+    /// they are replaced by fixed text. `missing field` names a field of this schema, and
+    /// `v1: ` messages are this module's own; both are kept.
     pub fn from_serde(error: &serde_json::Error) -> Self {
         let text = error.to_string();
         let text = text.split(" at line ").next().unwrap_or_default();
-        if error.is_data()
-            && (text.starts_with("missing field")
-                || text.starts_with("unknown field")
-                || text.starts_with("unknown variant")
-                || text.starts_with("v1: "))
-        {
-            Self(text.to_owned())
-        } else if error.is_data() {
-            Self::new("v1: value does not match the schema")
-        } else {
+        if !error.is_data() {
             Self::new("v1: not valid JSON")
+        } else if text.starts_with("missing field") || text.starts_with("v1: ") {
+            Self(text.to_owned())
+        } else if text.starts_with("unknown field") {
+            Self::new("v1: unknown field")
+        } else if text.starts_with("unknown variant") {
+            Self::new("v1: unknown variant")
+        } else {
+            Self::new("v1: value does not match the schema")
         }
     }
 }
