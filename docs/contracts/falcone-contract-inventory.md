@@ -1,6 +1,6 @@
 # Frozen Falcone contract inventory
 
-Contract version: v1.1
+Contract version: v1.2
 
 This freezes the v1 compatibility surfaces and evidence levels for MIG-01, not
 deployed acceptance or an enumeration of every live endpoint. No live deployment
@@ -195,3 +195,20 @@ WAS-03; migration enforcement to MIG-02; OCI execution to EP-OCI/EP-CAT.
 Additive corrections require a minor contract version; removing or renaming
 rows, statuses, verdicts or conditions requires v2 and an updated gate in the
 same change. Until such a reviewed change, the cargo test freezes the v1 shape.
+
+## Serverless chart values
+
+Revision v1.2 adds `ctr-serverless-chart-values` v1 (OPS-01.t1). The frozen v1
+sections and the v1.1 legacy envelope contract remain unchanged. The schema
+requires digest-pinned Docker Hub images, namespace-only configuration and OCI
+off by default. Consumers pin v1; breaking changes require v2. This is a
+published input contract, not Helm rendering or runtime enablement evidence.
+
+| Contract | Version | Schema | sha256 |
+| --- | --- | --- | --- |
+| ctr-serverless-chart-values | v1 | docs/contracts/serverless-chart-values/chart-values.v1.schema.json | a47207c988884432b53eb998bc6bd8ba108c97546c581142d9b3a39ccb53283e |
+
+Field descriptions, provisional replica/pool bounds, OCI requirements and
+synthetic valid/invalid fixtures are in
+[serverless-chart-values/README.md](serverless-chart-values/README.md). The
+inventory test recomputes the lowercase sha256 of the schema bytes.

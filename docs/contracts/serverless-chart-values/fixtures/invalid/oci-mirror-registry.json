@@ -1,0 +1,40 @@
+{
+  "controller": {
+    "image": {
+      "repository": "docker.io/fs-test/controller",
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "replicas": 1
+  },
+  "worker": {
+    "image": {
+      "repository": "docker.io/fs-test/worker",
+      "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    "replicas": 0
+  },
+  "compiler": {
+    "image": {
+      "repository": "docker.io/fs-test/compiler",
+      "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    "replicas": 0
+  },
+  "watchedPoolNamespaces": [
+    "fs-test-pool-a"
+  ],
+  "controllerNamespace": "fs-test-controller",
+  "poolLimits": {
+    "maxPools": 1,
+    "maxReplicasPerPool": 1
+  },
+  "oci": {
+    "enabled": true,
+    "intakeMirrorRepository": "quay.io/fs-test/intake"
+  },
+  "watchedOCINamespaces": [
+    "fs-test-oci-a",
+    "fs-test-oci-b"
+  ],
+  "platformRegistryPullSecretName": "fs-test-platform-registry-pull"
+}
