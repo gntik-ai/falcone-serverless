@@ -106,16 +106,12 @@ impl ExecuteAttempt {
             return Err(ContractError::new("v1: identity names another revision"));
         }
         let refusal = result.is_refusal();
-        match identity.runtime_mode {
-            Some(mode) if mode != projection.runtime_mode => {
-                return Err(ContractError::new(
-                    "v1: identity runtime_mode differs from the projection",
-                ));
-            }
-            None if !refusal => {
-                return Err(ContractError::new("v1: identity runtime_mode is required"));
-            }
-            _ => {}
+        // The attempt parsed, so its mode is a known one and the identity must name it. Only
+        // a refusal of an unrecognised mode, which never becomes an attempt, omits it.
+        if identity.runtime_mode != Some(projection.runtime_mode) {
+            return Err(ContractError::new(
+                "v1: identity runtime_mode is required and must equal the projection",
+            ));
         }
         if identity.base_digest.as_ref() != projection.base.as_ref().map(|base| base.digest()) {
             return Err(ContractError::new(
@@ -193,7 +189,11 @@ pub struct ExecutionUpdate {
 
 impl ExecutionUpdate {
     pub fn from_value(value: &Value) -> Result<Self, ContractError> {
-        parse(value)
+        let update: Self = parse(value)?;
+        if update.sequence == 0 {
+            return Err(ContractError::new("v1: sequence starts at 1"));
+        }
+        Ok(update)
     }
 }
 

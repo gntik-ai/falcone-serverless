@@ -849,6 +849,11 @@ fn refusal_identity_never_claims_wasm() {
     let oci = attempt("byo-base");
     oci.check_result(&result("refusal-non-wasm"))
         .expect("refusal matches the oci request");
+    // A typed attempt knows its mode, so its refusal must name it.
+    let mut unnamed = fixture("result/refusal-non-wasm.json");
+    remove(&mut unnamed, "/identity/runtime_mode");
+    let unnamed = ExecutionResult::from_value(&unnamed).expect("an unknown-mode refusal is valid");
+    assert!(oci.check_result(&unnamed).is_err());
     let mut wrong = fixture("result/refusal-non-wasm.json");
     set(
         &mut wrong,
@@ -1282,6 +1287,7 @@ fn execution_updates_round_trip() {
         ("/update/percent", json!(101)),
         ("/update/type", json!("log")),
         ("/sequence", json!(-1)),
+        ("/sequence", json!(0)),
         ("/update/message", json!("")),
     ] {
         let mut value = base.clone();
