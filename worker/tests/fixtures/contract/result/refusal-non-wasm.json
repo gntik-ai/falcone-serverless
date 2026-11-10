@@ -1,0 +1,17 @@
+{
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "status": "failure",
+  "logs": [],
+  "failure": {
+    "code": "runtime_mode_not_wasm",
+    "class": "non_retryable",
+    "message": "runtime_mode is not wasm"
+  },
+  "identity": {
+    "function_revision": "rev-synthetic-0001",
+    "runtime_mode": "oci",
+    "wasmtime_version": "49.0.5",
+    "interface_version": "0.2.0"
+  }
+}

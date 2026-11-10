@@ -1,0 +1,15 @@
+{
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "status": "success",
+  "result": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "ok": true
+    }
+  },
+  "logs": []
+}
