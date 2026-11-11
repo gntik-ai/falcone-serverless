@@ -9,6 +9,20 @@ import (
 	"strings"
 )
 
+const (
+	imageKind      = "image"
+	repositoryKind = "repository"
+	resultPass     = "pass"
+	resultFail     = "fail"
+	digestRuleID   = "image-digest-pinned"
+	originRuleID   = "image-trusted-origin"
+)
+
+const (
+	digestRuleIndex = iota
+	originRuleIndex
+)
+
 // Table transcribes image and repository paths from a pinned chart contract.
 type Table struct {
 	ContractVersion string  `json:"contractVersion"`
@@ -44,20 +58,20 @@ type RuleReport struct {
 
 // Evaluate checks only table paths. It does not validate the complete schema.
 func Evaluate(values any, table Table, policy Policy) Report {
-	report := Report{Result: "pass", Rules: []RuleReport{
-		{ID: "image-digest-pinned", Result: "pass", Violations: []string{}},
-		{ID: "image-trusted-origin", Result: "pass", Violations: []string{}},
+	report := Report{Result: resultPass, Rules: []RuleReport{
+		{ID: digestRuleID, Result: resultPass, Violations: []string{}},
+		{ID: originRuleID, Result: resultPass, Violations: []string{}},
 	}}
 	if err := table.Validate(); err != nil {
-		report.Rules[0].Violations = append(report.Rules[0].Violations, err.Error())
+		report.Rules[digestRuleIndex].Violations = append(report.Rules[digestRuleIndex].Violations, err.Error())
 	} else {
 		enabledValue, _ := lookup(values, table.OCIEnablePath)
 		enabled, _ := enabledValue.(bool)
 		for _, entry := range table.Entries {
 			value, present := lookup(values, entry.Path)
-			ruleIndex := 0
-			if entry.Kind == "repository" {
-				ruleIndex = 1
+			ruleIndex := digestRuleIndex
+			if entry.Kind == repositoryKind {
+				ruleIndex = originRuleIndex
 			}
 			if !present {
 				if !entry.OCI || enabled {
@@ -65,17 +79,17 @@ func Evaluate(values any, table Table, policy Policy) Report {
 				}
 				continue
 			}
-			if entry.Kind == "image" && !pinnedImage(value) {
-				report.Rules[0].Violations = append(report.Rules[0].Violations, entry.Path+": expected repository and sha256 digest without a tag")
+			if entry.Kind == imageKind && !pinnedImage(value) {
+				report.Rules[digestRuleIndex].Violations = append(report.Rules[digestRuleIndex].Violations, entry.Path+": expected repository and sha256 digest without a tag")
 			}
 			repositoryValue := value
-			if entry.Kind == "image" {
+			if entry.Kind == imageKind {
 				image, _ := value.(map[string]any)
 				repositoryValue = image["repository"]
 			}
 			repository, _ := repositoryValue.(string)
-			if !trustedRepository(repository, entry.Kind == "image", policy) {
-				report.Rules[1].Violations = append(report.Rules[1].Violations, entry.Path+": untrusted repository")
+			if !trustedRepository(repository, entry.Kind == imageKind, policy) {
+				report.Rules[originRuleIndex].Violations = append(report.Rules[originRuleIndex].Violations, entry.Path+": untrusted repository")
 			}
 		}
 	}
@@ -83,8 +97,8 @@ func Evaluate(values any, table Table, policy Policy) Report {
 		rule := &report.Rules[i]
 		sort.Strings(rule.Violations)
 		if len(rule.Violations) != 0 {
-			rule.Result = "fail"
-			report.Result = "fail"
+			rule.Result = resultFail
+			report.Result = resultFail
 		}
 	}
 	return report
@@ -175,9 +189,9 @@ func (t Table) Validate() error {
 		}
 		seen[entry.Path] = true
 		switch entry.Kind {
-		case "image":
+		case imageKind:
 			images[entry.Component] = true
-		case "repository":
+		case repositoryKind:
 		default:
 			return errors.New("table: unknown kind")
 		}

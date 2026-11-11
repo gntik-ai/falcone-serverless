@@ -411,16 +411,18 @@ func deploymentFiles(t *testing.T) ([]byte, []byte, []byte) {
 func TestDeploymentRejectsValueMutations(t *testing.T) {
 	values, source, prefixes := deploymentFiles(t)
 	for _, tc := range []struct {
-		name string
-		edit func(map[string]any)
+		name   string
+		edit   func(map[string]any)
+		digest []string
+		origin []string
 	}{
 		{"tag-only", func(v map[string]any) {
 			v["worker"].(map[string]any)["image"] = map[string]any{"repository": "docker.io/fs-test/worker", "tag": "latest"}
-		}},
+		}, []string{"worker.image: expected repository and sha256 digest without a tag"}, []string{}},
 		{"untrusted", func(v map[string]any) {
 			v["worker"].(map[string]any)["image"].(map[string]any)["repository"] = "quay.io/fs-test/worker"
-		}},
-		{"deleted", func(v map[string]any) { delete(v["worker"].(map[string]any), "image") }},
+		}, []string{}, []string{"worker.image: untrusted repository"}},
+		{"deleted", func(v map[string]any) { delete(v["worker"].(map[string]any), "image") }, []string{"worker.image: missing"}, []string{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var v map[string]any
@@ -432,6 +434,20 @@ func TestDeploymentRejectsValueMutations(t *testing.T) {
 			err := checkDeployment(mutated, source, prefixes, loadTable(t))
 			if err == nil || !strings.Contains(err.Error(), "worker.image:") {
 				t.Fatalf("mutation did not fail on worker.image: %v", err)
+			}
+			data, ok := strings.CutPrefix(err.Error(), "deployment values: ")
+			if !ok {
+				t.Fatalf("mutation did not produce a policy report: %v", err)
+			}
+			var report supplychain.Report
+			if err := json.Unmarshal([]byte(data), &report); err != nil {
+				t.Fatal(err)
+			}
+			if report.Result != "fail" || len(report.Rules) != 2 ||
+				report.Rules[0].ID != "image-digest-pinned" || report.Rules[1].ID != "image-trusted-origin" ||
+				!reflect.DeepEqual(report.Rules[0].Violations, tc.digest) ||
+				!reflect.DeepEqual(report.Rules[1].Violations, tc.origin) {
+				t.Fatalf("mutation reported under the wrong rule: %+v", report)
 			}
 		})
 	}
@@ -484,7 +500,9 @@ func TestDeploymentRejectsPrefixAndSourceMutations(t *testing.T) {
 		}
 	}
 	var synthetic map[string]any
-	json.Unmarshal(source, &synthetic)
+	if err := json.Unmarshal(source, &synthetic); err != nil {
+		t.Fatal(err)
+	}
 	synthetic["sha256"] = strings.Repeat("0", 64)
 	stale, _ := json.Marshal(synthetic)
 	if err := checkDeployment(values, stale, prefixes, loadTable(t)); err == nil {
@@ -497,7 +515,7 @@ func TestPolicyDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, term := range append([]string{"image-digest-pinned", "image-trusted-origin", "ctr-serverless-chart-values", "v1", "policy.trustedRepositoryPrefixes"}, tablePaths(loadTable(t))...) {
+	for _, term := range append([]string{"image-digest-pinned", "image-trusted-origin", "ctr-serverless-chart-values v1", "policy.trustedRepositoryPrefixes"}, tablePaths(loadTable(t))...) {
 		if !strings.Contains(string(data), term) {
 			t.Errorf("policy documentation missing %s", term)
 		}

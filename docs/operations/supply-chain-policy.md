@@ -4,6 +4,9 @@ The offline Go test gate consumes **ctr-serverless-chart-values v1**. It guards
 trusted platform image references, with no controller runtime import, network,
 cluster access or Helm rendering. Run `go -C controller test ./...` to enforce it.
 This R3 policy requires an independent second reviewer and operator approval.
+The evaluator lives in `controller/internal/supplychain/policy_gate_test.go`;
+Go compiles it only for tests, so it cannot be imported by the runtime controller
+or included in its image build.
 
 ## Rules and normalization
 
