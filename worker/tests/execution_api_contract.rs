@@ -1882,3 +1882,22 @@ fn oversized_messages_are_rejected_before_parsing() {
     ));
     assert_eq!(parse_cancel(&huge), Err(Malformed::TooLarge));
 }
+
+#[test]
+fn results_with_the_maximum_published_logs_are_read_and_oversized_ones_are_not() {
+    let request = request_for("request/valid/wasm-catalog-base.json");
+    let (_, mut template) = fixture("result/valid/success-catalog.json");
+    // 1000 log lines of 4096 characters, the most the published schema allows.
+    template["logs"] = json!(vec!["x".repeat(4096); 1000]);
+    let full = bytes(&template);
+    assert!(full.len() > api::MAX_MESSAGE_BYTES, "{}", full.len());
+    assert!(parse_result(&full, &request).is_ok());
+    // Worst case: every character escaped as a surrogate pair of 12 JSON bytes.
+    let escaped = "\\ud83d\\ude00".repeat(4096);
+    let mut text = String::from_utf8(full).unwrap();
+    text = text.replace(&"x".repeat(4096), &escaped);
+    assert!(text.len() <= api::MAX_RESULT_BYTES, "{}", text.len());
+    assert!(parse_result(text.as_bytes(), &request).is_ok());
+    let huge = vec![b' '; api::MAX_RESULT_BYTES + 1];
+    assert_eq!(parse_result(&huge, &request), Err(Malformed::TooLarge));
+}

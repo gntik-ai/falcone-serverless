@@ -2,8 +2,9 @@
 //! its class and code, and the activation runtime identity block every result carries.
 
 use super::{
+    MAX_RESULT_BYTES,
     error::{ErrorBody, Malformed, Reason},
-    from_bytes,
+    from_bytes_within,
     legacy::LegacyResponse,
     request::ExecuteRequest,
     types::{
@@ -219,7 +220,7 @@ pub fn parse_result<A: Answered + ?Sized>(
     bytes: &[u8],
     answered: &A,
 ) -> Result<ExecutionResult, Malformed> {
-    let result: ExecutionResult = from_bytes(bytes)?;
+    let result: ExecutionResult = from_bytes_within(bytes, MAX_RESULT_BYTES)?;
     result.check(answered)?;
     Ok(result)
 }

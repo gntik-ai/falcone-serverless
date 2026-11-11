@@ -93,7 +93,8 @@ identity}`. It carries the legacy `status`, `result`, `logs` envelope:
   and `error` is absent.
 - `status: "failure"`: `error` is `{status, code, message, detail: {reason}, retryable, class}` and
   `result` is absent.
-- `logs` is an array of at most 1000 strings of at most 4096 characters.
+- `logs` is an array of at most 1000 strings of at most 4096 characters. A result of up to 51249152 bytes
+  is read (the logs at 12 JSON bytes per character plus 2097152 bytes); a request, update or cancel is read up to 2097152 bytes.
 
 A member the contract says is absent must be absent. An explicit `null` is not absence: it is
 rejected for `result`, `error`, `headers`, `body`, `identity.base_digest` and every other optional

@@ -163,16 +163,51 @@ const ARTIFACT_LOAD_APIS: [&str; 6] = [
     "deserialize_open",
 ];
 
+/// Identifiers `worker/src/api/` must never use: Wasmtime itself (also through `extern crate`
+/// or a `use ... as` alias, which still has to name the crate or its types) and the types that
+/// load or run code. The api module only parses JSON, so it has no use for any of them.
+const API_FORBIDDEN_TOKENS: [&str; 7] = [
+    "Module",
+    "Component",
+    "Engine",
+    "Linker",
+    "Instance",
+    "Store",
+    "extern",
+];
+
+/// True when an `api/` source names Wasmtime or a type that could load precompiled code,
+/// however it is spelled: identifiers are compared as whole tokens, and the loading API
+/// names are also matched after whitespace is removed so a rustfmt line break between
+/// `Module` and `::deserialize` cannot hide them.
+fn api_touches_wasmtime(source: &str) -> bool {
+    let squashed = source
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    ARTIFACT_LOAD_APIS
+        .iter()
+        .any(|name| squashed.contains(name))
+        || source
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .any(|token| {
+                API_FORBIDDEN_TOKENS.contains(&token)
+                    || (token.starts_with("wasmtime") && token != "wasmtime_version")
+            })
+}
+
 /// The hard rule is that a tenant-supplied precompiled artifact is never deserialized. The
 /// guard therefore rejects the word `deserialize` in every source except `cache/load.rs`,
 /// with one narrow allowance: `worker/src/api/` parses JSON requests with serde, so serde
 /// deserialization (`Deserialize`, a hand-written `fn deserialize`, `deserialize_with`) is
-/// allowed there. Every file, `worker/src/api/` included, still fails if it names a Wasmtime
-/// artifact-loading API, and the `wasmtime::` boundary below keeps Wasmtime out of the module.
+/// allowed there, and nothing else. A file under `worker/src/api/` still fails if it names a
+/// Wasmtime artifact-loading API or, through an alias or otherwise, Wasmtime or the types that
+/// load code (see `api_touches_wasmtime`), and the `wasmtime::` boundary below keeps Wasmtime
+/// out of the module.
 fn deserialize_allowed(path: &Path, source: &str) -> bool {
     let load = path == Path::new("cache/load.rs");
     let api = path.starts_with("api");
-    load || (api && !ARTIFACT_LOAD_APIS.iter().any(|name| source.contains(name)))
+    load || (api && !api_touches_wasmtime(source))
 }
 
 fn source_valid(path: &Path, source: &str) -> bool {
@@ -194,7 +229,8 @@ fn source_valid(path: &Path, source: &str) -> bool {
     .any(|allowed| path == Path::new(allowed));
     (!source.contains("deserialize") || deserialize_allowed(path, source))
         && (path == Path::new("cache/load.rs")
-            || !ARTIFACT_LOAD_APIS.iter().any(|name| source.contains(name)))
+            || (!ARTIFACT_LOAD_APIS.iter().any(|name| source.contains(name))
+                && !(path.starts_with("api") && api_touches_wasmtime(source))))
         && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin || capability)
         && (!source.contains("Status::Passed") || outcome)
@@ -286,6 +322,12 @@ fn api_may_parse_json_with_serde_but_never_load_artifacts() {
         "engine.deserialize_raw(bytes)",
         "wasmtime::Module::new(&engine, bytes)",
         "Module::deserialize_open_file(&engine, file)",
+        "use crate::Module as M; M::deserialize(&e, b)",
+        "use wasmtime as w;\nw::Module::deserialize(&e, b)",
+        "extern crate wasmtime as w;",
+        "type M = crate::Component;\nM::deserialize_file(&e, p)",
+        "Module\n    ::deserialize(&engine, bytes)",
+        "use wasmtime_wasi::X;",
     ] {
         assert!(
             !source_valid(Path::new("api/request.rs"), denied),

@@ -17,8 +17,14 @@ pub mod update;
 /// The only contract version this worker speaks.
 pub const CONTRACT_VERSION: &str = "1";
 
-/// Largest message the parsers read: the 1 MiB parameter limit plus envelope headroom.
+/// Largest request, update, cancel or legacy message the parsers read: the 1 MiB parameter
+/// limit plus envelope headroom.
 pub const MAX_MESSAGE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Largest result the parser reads. The contract allows 1000 log lines of 4096 characters, and
+/// one character takes at most 12 JSON bytes (an escaped surrogate pair), so the logs alone can
+/// reach 49152000 bytes. The rest of the result gets the `MAX_MESSAGE_BYTES` headroom.
+pub const MAX_RESULT_BYTES: usize = 1000 * 4096 * 12 + MAX_MESSAGE_BYTES;
 
 /// The vendored capability grants (credential claims) and the worker request grants differ.
 pub const CREDENTIAL_GRANT_VERSION: &str = "0.1.0";
@@ -27,7 +33,14 @@ pub const REQUEST_GRANT_VERSION: &str = "0.2.0";
 use error::Malformed;
 
 fn from_bytes<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Malformed> {
-    if bytes.len() > MAX_MESSAGE_BYTES {
+    from_bytes_within(bytes, MAX_MESSAGE_BYTES)
+}
+
+fn from_bytes_within<T: serde::de::DeserializeOwned>(
+    bytes: &[u8],
+    limit: usize,
+) -> Result<T, Malformed> {
+    if bytes.len() > limit {
         return Err(Malformed::TooLarge);
     }
     // serde_json error text quotes the offending input, so only its category is kept.
