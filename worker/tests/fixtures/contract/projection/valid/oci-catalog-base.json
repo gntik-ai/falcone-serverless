@@ -1,0 +1,53 @@
+{
+  "revision": "rev-synthetic-0003",
+  "runtime_mode": "oci",
+  "artifact_digest": "sha256:f1ddc5e62e3a9cab94e751a7e89ff4c5e02c1cee8aac0e31e91bcdfaa6eb5a25",
+  "component_digest": "sha256:69582f0b2bf1674b1e5d4c6bbb2dbe3690b47b28e8d45108b5d0aa395c4e7782",
+  "language_profile": {
+    "name": "javascript-profile-synthetic",
+    "version": "2026.11.0"
+  },
+  "engine_version": "49.0.5",
+  "wasi_version": "0.2.6",
+  "interface_version": "0.2.0",
+  "imports": [
+    "falcone:host/http@0.2.0",
+    "falcone:host/storage@0.2.0"
+  ],
+  "budgets": {
+    "fuel": 10000000,
+    "memory_bytes": 67108864,
+    "timeout_ms": 30000,
+    "max_host_calls": 1000
+  },
+  "grants": [
+    {
+      "family": "http",
+      "interface": "falcone:host/http@0.2.0",
+      "scope": {
+        "hosts": [
+          "api.example.test"
+        ]
+      }
+    },
+    {
+      "family": "storage",
+      "interface": "falcone:host/storage@0.2.0",
+      "scope": {
+        "prefixes": [
+          "tenants/synthetic/"
+        ]
+      },
+      "secretRef": {
+        "name": "storage-binding-synthetic",
+        "version": "3"
+      }
+    }
+  ],
+  "base": {
+    "kind": "catalog",
+    "id": "javascript-base",
+    "version": "1.4.2",
+    "digest": "sha256:3ec69693ed196174ad0a2a95a2354f12ed1cb19d1deec30562d5f41f3d6acb1a"
+  }
+}

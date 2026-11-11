@@ -1,0 +1,22 @@
+{
+  "pinned": "projection/valid/wasm-catalog-base",
+  "result": {
+    "version": "1",
+    "type": "result",
+    "activation_id": "act-synthetic-0001",
+    "attempt_id": "att-synthetic-0001",
+    "attempt_number": 1,
+    "status": "success",
+    "result": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"openapi\":\"3.0.3\"}"
+    },
+    "logs": [
+      "handler started",
+      "handler finished"
+    ]
+  }
+}

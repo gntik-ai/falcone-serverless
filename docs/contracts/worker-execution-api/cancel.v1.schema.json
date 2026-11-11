@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:cancel",
+  "title": "ctr-worker-execution-api v1: cancel",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "type",
+    "activation_id",
+    "attempt_id",
+    "cancel"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/version"
+    },
+    "type": {
+      "const": "cancel"
+    },
+    "activation_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "cancel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state"
+      ],
+      "properties": {
+        "state": {
+          "enum": [
+            "requested",
+            "acknowledged",
+            "uncertain"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,421 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:common",
+  "title": "ctr-worker-execution-api v1: shared definitions",
+  "$defs": {
+    "version": {
+      "const": "1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,127}$"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,9})?Z$"
+    },
+    "positive": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "runtime_mode": {
+      "enum": [
+        "wasm",
+        "oci"
+      ]
+    },
+    "class": {
+      "enum": [
+        "retryable",
+        "non_retryable",
+        "uncertain"
+      ]
+    },
+    "language_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+        },
+        "version": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+        }
+      }
+    },
+    "interface_version": {
+      "const": "0.2.0"
+    },
+    "base": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id",
+            "version",
+            "digest"
+          ],
+          "properties": {
+            "kind": {
+              "const": "catalog"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+            },
+            "version": {
+              "type": "string",
+              "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+            },
+            "digest": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "image_digest",
+            "signer_identity",
+            "attestation_ref"
+          ],
+          "properties": {
+            "kind": {
+              "const": "byo"
+            },
+            "image_digest": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+            },
+            "signer_identity": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+            },
+            "attestation_ref": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+            }
+          }
+        }
+      ]
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "function_revision",
+        "runtime_mode",
+        "artifact_digest",
+        "wasmtime_version",
+        "language_profile",
+        "interface_version"
+      ],
+      "properties": {
+        "function_revision": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+        },
+        "runtime_mode": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/runtime_mode"
+        },
+        "artifact_digest": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+        },
+        "base_digest": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+        },
+        "wasmtime_version": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+        },
+        "language_profile": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/language_profile"
+        },
+        "interface_version": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/interface_version"
+        }
+      }
+    },
+    "handler_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "statusCode"
+      ],
+      "properties": {
+        "statusCode": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "body": {
+          "not": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "code",
+        "message",
+        "detail",
+        "retryable"
+      ],
+      "properties": {
+        "status": {
+          "type": "integer",
+          "minimum": 400,
+          "maximum": 599
+        },
+        "code": {
+          "enum": [
+            "GW_OCI_NOT_AUTHORIZED",
+            "GW_BASE_DISABLED",
+            "GW_BASE_MISMATCH",
+            "runtime_mode_not_supported",
+            "invalid_request",
+            "request_too_large"
+          ]
+        },
+        "message": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+        },
+        "detail": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason"
+          ],
+          "properties": {
+            "reason": {
+              "enum": [
+                "base_disabled",
+                "base_mismatch",
+                "body_too_large",
+                "missing_path",
+                "non_json_body",
+                "oci_not_authorized",
+                "runtime_mode_not_wasm"
+              ]
+            }
+          }
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "GW_OCI_NOT_AUTHORIZED"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 403
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "oci_not_authorized"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "GW_BASE_DISABLED"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 409
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "base_disabled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "GW_BASE_MISMATCH"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 409
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "base_mismatch"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "runtime_mode_not_supported"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 409
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "runtime_mode_not_wasm"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_request"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 400
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "missing_path",
+                      "non_json_body"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "request_too_large"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 413
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "body_too_large"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

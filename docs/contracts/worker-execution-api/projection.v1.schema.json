@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:projection",
+  "title": "ctr-worker-execution-api v1: revision projection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "revision",
+    "runtime_mode",
+    "artifact_digest",
+    "component_digest",
+    "language_profile",
+    "engine_version",
+    "wasi_version",
+    "interface_version",
+    "imports",
+    "budgets",
+    "grants"
+  ],
+  "properties": {
+    "revision": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "runtime_mode": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/runtime_mode"
+    },
+    "base": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/base"
+    },
+    "artifact_digest": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+    },
+    "component_digest": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/digest"
+    },
+    "language_profile": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/language_profile"
+    },
+    "engine_version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+    },
+    "wasi_version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+    },
+    "interface_version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/interface_version"
+    },
+    "imports": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fuel",
+        "memory_bytes",
+        "timeout_ms",
+        "max_host_calls"
+      ],
+      "properties": {
+        "fuel": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+        },
+        "memory_bytes": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+        },
+        "timeout_ms": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+        },
+        "max_host_calls": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+        }
+      }
+    },
+    "grants": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:falcone:contracts:revision-runtime-manifest:1#/$defs/grant"
+      }
+    }
+  }
+}
