@@ -1,0 +1,7 @@
+{
+  "kind": "checkpoint",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "sequence": 9,
+  "checkpoint_ref": "checkpoint-synthetic-0001"
+}

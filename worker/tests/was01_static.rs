@@ -152,6 +152,46 @@ fn embedded_fixtures_are_exact_and_import_free() {
     }
 }
 
+/// The keyword for unchecked code, spelled indirectly so this file stays free of it.
+const UNSAFE: &str = concat!("un", "safe");
+
+/// Wasmtime artifact loading: `Module`/`Component` `deserialize*`, `deserialize_file`,
+/// `deserialize_open_file`, `deserialize_raw`, or any path into the engine crate. Whitespace
+/// is removed first so spacing cannot hide a path such as `Module :: deserialize`.
+fn loads_precompiled_code(source: &str) -> bool {
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    [
+        "Module::deserialize",
+        "Component::deserialize",
+        "deserialize_file",
+        "deserialize_open_file",
+        "deserialize_raw",
+        "wasmtime::",
+        "::wasmtime",
+        "usewasmtime",
+        "externcratewasmtime",
+        UNSAFE,
+    ]
+    .iter()
+    .any(|token| compact.contains(token))
+}
+
+/// The no-deserialize rule: a tenant-supplied precompiled artifact is never deserialized, so
+/// no worker source may mention `deserialize` except `cache/load.rs`, the one place that loads
+/// trusted compiler output. `api/` only parses JSON requests with serde (`Deserialize`, a serde
+/// `fn deserialize`, `deserialize_with`), so it may use that word, but it still fails on every
+/// Wasmtime loading API, on any path into the engine crate and on the keyword for unchecked code, which loading
+/// needs. Every other file, `api/` included, keeps the full ban on engine artifact loading.
+fn deserialize_valid(path: &Path, source: &str) -> bool {
+    if path == Path::new("cache/load.rs") {
+        return true;
+    }
+    if path.starts_with("api") && path.components().count() > 1 {
+        return !loads_precompiled_code(source);
+    }
+    !source.contains("deserialize")
+}
+
 fn source_valid(path: &Path, source: &str) -> bool {
     let engine = path == Path::new("qualification/engine.rs");
     let bin = path == Path::new("bin/qualification_runner.rs");
@@ -169,7 +209,7 @@ fn source_valid(path: &Path, source: &str) -> bool {
     ]
     .iter()
     .any(|allowed| path == Path::new(allowed));
-    (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
+    deserialize_valid(path, source)
         && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin || capability)
         && (!source.contains("Status::Passed") || outcome)
@@ -247,4 +287,74 @@ fn native_load_exception_is_exactly_one_source_path() {
             "{sibling}"
         );
     }
+}
+
+#[test]
+fn api_may_use_serde_but_never_wasmtime_artifact_loading() {
+    // worker/src/api parses JSON requests only, so serde Deserialize, a serde
+    // `fn deserialize` and `deserialize_with` are allowed there (RUN-01.t1).
+    let serde_code = "use serde::{Deserialize, Deserializer};\n\
+        fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {\n\
+            T::deserialize(d).map(Some)\n\
+        }\n\
+        struct S { #[serde(default, deserialize_with = \"present\")] x: Option<u8> }\n\
+        impl<'de> Deserialize<'de> for T { fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> { todo!() } }";
+    assert!(source_valid(Path::new("api/x.rs"), serde_code));
+    assert!(source_valid(Path::new("api/nested/x.rs"), serde_code));
+    // The same serde code anywhere else still fails, so does a lookalike directory.
+    for path in [
+        "host/x.rs",
+        "config.rs",
+        "api.rs",
+        "apix/x.rs",
+        "cache/other.rs",
+        "xapi/x.rs",
+    ] {
+        assert!(!source_valid(Path::new(path), serde_code), "{path}");
+    }
+    // Wasmtime precompiled loading fails in api/ in every spelling the guard knows.
+    for loader in [
+        "Module::deserialize(&engine, bytes);",
+        "Module :: deserialize ( &engine , bytes );",
+        "wasmtime::Module::deserialize(&engine, bytes);",
+        "Component::deserialize(&engine, bytes);",
+        "Component::deserialize_file(&engine, path);",
+        "Module::deserialize_file(&engine, path);",
+        "Module::deserialize_open_file(&engine, file);",
+        "Component::deserialize_raw(&engine, ptr);",
+        "Module::deserialize_raw(&engine, ptr);",
+        "use wasmtime::Module as M; fn f() { M::deserialize(); }",
+        "use ::wasmtime as w;",
+        "extern crate wasmtime as w;",
+        "fn deserialize_raw() {}",
+    ] {
+        let source = format!("{serde_code}\n{loader}\n");
+        assert!(!source_valid(Path::new("api/x.rs"), &source), "{loader}");
+        assert!(!source_valid(Path::new("host/x.rs"), &source), "{loader}");
+    }
+    // The keyword for unchecked code fails in api/ too: engine artifact loading needs it.
+    let keyword = format!("fn f() {{ {UNSAFE} {{}} }}");
+    assert!(!source_valid(Path::new("api/x.rs"), &keyword));
+    // Identifiers that merely contain the engine name stay legal (`wasmtime_version`).
+    assert!(source_valid(
+        Path::new("api/x.rs"),
+        "struct Identity { wasmtime_version: String }\n"
+    ));
+}
+
+#[test]
+fn api_exception_does_not_widen_the_native_load_exception() {
+    // cache/load.rs keeps its exception unchanged, and nothing else gains it.
+    assert!(source_valid(
+        Path::new("cache/load.rs"),
+        "Module::deserialize(&engine, bytes);"
+    ));
+    assert!(!source_valid(
+        Path::new("api/load.rs"),
+        "Module::deserialize(&engine, bytes);"
+    ));
+    assert!(!source_valid(
+        Path::new("cache/api/load.rs"),
+        "fn deserialize() {}"
+    ));
 }

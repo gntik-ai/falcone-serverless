@@ -1,0 +1,86 @@
+{
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "attempt_number": 1,
+  "deadline_ms": 1767225900000,
+  "invocation": {
+    "invocation-key": "inv-synthetic-0001",
+    "attempt-id": "attempt-synthetic-0001",
+    "idempotency-key": "idem-legacy-0001"
+  },
+  "credential": {
+    "claims": {
+      "iss": "falcone-dispatcher-synthetic",
+      "aud": "worker-pool-synthetic",
+      "tenant": "tenant-synthetic-0001",
+      "workspace": "ws-synthetic-0001",
+      "pool_profile": "profile-synthetic-0001",
+      "revision": "rev-synthetic-0001",
+      "activation": "act-synthetic-0001",
+      "attempt": "attempt-synthetic-0001",
+      "iat": 1767225000,
+      "exp": 1767225900,
+      "allowed_capabilities": [
+        {
+          "family": "http",
+          "interface": "falcone:host/http@0.2.0",
+          "scope": {
+            "hosts": [
+              "api.example.test"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "projection": {
+    "revision": "rev-synthetic-0001",
+    "runtime_mode": "wasm",
+    "base": {
+      "kind": "catalog",
+      "id": "js-base",
+      "version": "latest",
+      "digest": "sha256:3e490accb4fc9a865e25d8f11753992884247caae627bf19ae8bf7a14bc54083"
+    },
+    "artifact_digest": "sha256:3441f2f4bcfd8a3708fbef2d976a260de4867c899dcb6c5e0f21e0369c30643c",
+    "component_digest": "sha256:53655409a18460a2ee2bbf402132e5f9a1a6a1ade64ecd7d6996860ac733e088",
+    "language_profile": {
+      "name": "javascript",
+      "version": "1.0.0"
+    },
+    "engine_version": "49.0.5",
+    "wasi_version": "0.2.0",
+    "interface_version": "0.2.0",
+    "imports": [
+      "falcone:host/http@0.2.0"
+    ],
+    "budgets": {
+      "fuel": 10000000,
+      "memory_bytes": 67108864,
+      "timeout_ms": 30000,
+      "max_host_calls": 100
+    },
+    "capabilities": [
+      {
+        "family": "http",
+        "interface": "falcone:host/http@0.2.0",
+        "scope": {
+          "hosts": [
+            "api.example.test"
+          ]
+        }
+      }
+    ]
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+    "__ow_query": {
+      "format": "json"
+    }
+  }
+}

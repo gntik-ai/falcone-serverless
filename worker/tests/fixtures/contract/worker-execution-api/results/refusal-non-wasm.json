@@ -1,0 +1,22 @@
+{
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "status": "error",
+  "logs": [],
+  "failure": {
+    "class": "non_retryable",
+    "code": "runtime_mode_unsupported"
+  },
+  "identity": {
+    "function_revision": "rev-synthetic-0001",
+    "runtime_mode": "oci",
+    "artifact_digest": "sha256:3441f2f4bcfd8a3708fbef2d976a260de4867c899dcb6c5e0f21e0369c30643c",
+    "base_digest": "sha256:3e490accb4fc9a865e25d8f11753992884247caae627bf19ae8bf7a14bc54083",
+    "wasmtime_version": "49.0.5",
+    "language_profile": {
+      "name": "javascript",
+      "version": "1.0.0"
+    },
+    "interface_version": "0.2.0"
+  }
+}

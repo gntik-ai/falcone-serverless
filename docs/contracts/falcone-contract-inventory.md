@@ -212,3 +212,26 @@ Field descriptions, provisional replica/pool bounds, OCI requirements and
 synthetic valid/invalid fixtures are in
 [serverless-chart-values/README.md](serverless-chart-values/README.md). The
 inventory test recomputes the lowercase sha256 of the schema bytes.
+
+## Worker execution API
+
+Records the pinned sources and fixtures of `ctr-worker-execution-api` v1 (RUN-01.t1,
+[spec](worker-execution-api/v1.md)). It is additive: it changes no frozen v1 section, the
+legacy envelope fixtures above or the chart values contract. The legacy envelope and
+invocation-identity fixtures are consumed in place from the table above, byte for byte.
+
+The sources are in gntik-ai/falcone at `a19f40ab9e160cd522c110efd50c30b2f5e0d708`. Each sha256
+is of the file at that revision.
+
+| Source | sha256 | Role |
+| --- | --- | --- |
+| docs/contracts/serverless/functions-api/openapi.v1.yaml | 03121286b0c7ec716304d51a41b866477f4fc21671d95ebeafb8bf9da70e8960 | ctr-functions-api v1; names of the OCI and base failure codes |
+| docs/contracts/serverless/execution-credential/execution-credential.v1.claims.schema.json | 9c98ba16548e724004fbf17c38d3d689fd7183d25b386c83e61b13ff8b31ecf0 | ctr-execution-credential v1 claims |
+
+Pinned copies of the ctr-functions-api v1 error fixtures; the tests verify these bytes.
+
+| Fixture | sha256 | Falcone source | Revision |
+| --- | --- | --- | --- |
+| worker/tests/fixtures/contract/functions-api-errors/base_disabled.json | 9ed46a38dca56af8f9b9fdc16a413fec45f48a4b1324de2d9a400ed31c49c7d8 | tests/contracts/functions-api/fixtures/errors/base_disabled.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+| worker/tests/fixtures/contract/functions-api-errors/base_mismatch.json | 2ac0fa4c05c628d6a251657de9918564652d32af9473502de510eaedfdcfa92c | tests/contracts/functions-api/fixtures/errors/base_mismatch.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |
+| worker/tests/fixtures/contract/functions-api-errors/oci_not_authorized.json | ef0763c3f590a7e5fb31b59073e240d5320681b0f70f13757327cdb7bb26d740 | tests/contracts/functions-api/fixtures/errors/oci_not_authorized.json | a19f40ab9e160cd522c110efd50c30b2f5e0d708 |

@@ -7,6 +7,10 @@ mod checkpoint;
 
 mod config;
 
+// No caller yet: the dispatcher issue that first calls `api` removes this allowance.
+#[cfg_attr(not(test), allow(dead_code))]
+mod api;
+
 #[cfg(test)]
 mod runtime_metrics;
 
