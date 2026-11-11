@@ -1,0 +1,27 @@
+{
+  "controller": {
+    "image": {
+      "repository": "docker.io/fs-test/controller",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "worker": {
+    "image": {
+      "repository": "docker.io/fs-test/worker",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "compiler": {
+    "image": {
+      "repository": "docker.io/fs-test/compiler",
+      "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "watchedPoolNamespaces": [
+    "fs-test-supply-chain-pools"
+  ],
+  "controllerNamespace": "fs-test-supply-chain-controller",
+  "oci": {
+    "enabled": false
+  }
+}

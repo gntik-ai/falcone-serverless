@@ -1,0 +1,500 @@
+[
+  {
+    "name": "pass",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "pass",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "pass-oci-enabled",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "oci": {
+        "enabled": true,
+        "intakeMirrorRepository": "docker.io/fs-test/mirror"
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "pass",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "tag-only",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "tag": "latest"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "fail",
+          "violations": [
+            "worker.image: expected repository and sha256 digest without a tag"
+          ]
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "tag-and-digest",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "tag": "latest"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "fail",
+          "violations": [
+            "worker.image: expected repository and sha256 digest without a tag"
+          ]
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "bad-digest",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:bad"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "fail",
+          "violations": [
+            "worker.image: expected repository and sha256 digest without a tag"
+          ]
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "missing-required",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {},
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "fail",
+          "violations": [
+            "worker.image: missing"
+          ]
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "pass",
+          "violations": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "untrusted-origin",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "quay.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "fail",
+          "violations": [
+            "worker.image: untrusted repository"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "prefix-boundary",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-x/w",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/fs/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "fail",
+          "violations": [
+            "worker.image: untrusted repository"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "oci-disabled-unpinned",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "oci": {
+        "enabled": false,
+        "intakeMirrorRepository": "quay.io/fs-test/mirror"
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "fail",
+          "violations": [
+            "oci.intakeMirrorRepository: untrusted repository"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "oci-enabled-missing",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "oci": {
+        "enabled": true
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": [
+        "docker.io/"
+      ]
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "fail",
+          "violations": [
+            "oci.intakeMirrorRepository: missing"
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "empty-prefixes",
+    "values": {
+      "controller": {
+        "image": {
+          "repository": "docker.io/fs-test/controller",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "worker": {
+        "image": {
+          "repository": "docker.io/fs-test/worker",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      },
+      "compiler": {
+        "image": {
+          "repository": "docker.io/fs-test/compiler",
+          "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    "policy": {
+      "trustedRepositoryPrefixes": []
+    },
+    "expected": {
+      "result": "fail",
+      "rules": [
+        {
+          "id": "image-digest-pinned",
+          "result": "pass",
+          "violations": []
+        },
+        {
+          "id": "image-trusted-origin",
+          "result": "fail",
+          "violations": [
+            "compiler.image: untrusted repository",
+            "controller.image: untrusted repository",
+            "worker.image: untrusted repository"
+          ]
+        }
+      ]
+    }
+  }
+]

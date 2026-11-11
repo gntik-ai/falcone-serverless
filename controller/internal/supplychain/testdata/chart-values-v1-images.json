@@ -1,0 +1,10 @@
+{
+  "contractVersion": "v1",
+  "ociEnablePath": "oci.enabled",
+  "entries": [
+    {"path": "controller.image", "component": "controller", "kind": "image", "oci": false},
+    {"path": "worker.image", "component": "worker", "kind": "image", "oci": false},
+    {"path": "compiler.image", "component": "compiler", "kind": "image", "oci": false},
+    {"path": "oci.intakeMirrorRepository", "component": "intake", "kind": "repository", "oci": true}
+  ]
+}
