@@ -4,7 +4,6 @@
 //! registered under their `$id`). JSON Schema evaluation is test-only; the runtime parsers
 //! use serde types and explicit checks.
 
-#[allow(dead_code)]
 #[path = "../src/api/mod.rs"]
 mod api;
 
@@ -184,9 +183,14 @@ fn outcome_name(text: &str) -> Outcome {
     }
 }
 
-/// The parser accepts exactly what the schema accepts, except that a schema-valid request for
-/// a runtime mode other than `wasm` is refused (the worker serves only `wasm`).
+/// The parser accepts exactly what the schema accepts, except that a schema-valid request is
+/// refused when it is for a runtime mode other than `wasm` (the worker serves only `wasm`) or
+/// when its `params` are a legacy input rejected before invocation.
 fn expected_outcome(schema_valid: bool, value: &Value) -> Outcome {
+    let rejected_params = value
+        .get("params")
+        .and_then(Value::as_object)
+        .is_some_and(|params| admit_legacy(params, |_| ()).is_err());
     match (
         schema_valid,
         value
@@ -195,6 +199,7 @@ fn expected_outcome(schema_valid: bool, value: &Value) -> Outcome {
     ) {
         (false, _) => Outcome::Malformed,
         (true, Some("oci")) => Outcome::Refuse,
+        (true, _) if rejected_params => Outcome::Refuse,
         (true, _) => Outcome::Accept,
     }
 }
@@ -238,6 +243,11 @@ fn every_fixture_matches_its_schema_verdict_and_the_runtime_parser() {
             );
         }
     }
+}
+
+/// A JSON number written the way a producer might: `1.0`, `1e0`.
+fn number(text: &str) -> Value {
+    serde_json::from_str(text).unwrap()
 }
 
 fn set(value: &mut Value, pointer: &str, new: Value) {
@@ -321,6 +331,30 @@ fn request_parser_matches_the_schema_on_mutations() {
         ("attempt_number -1", "/attempt_number", json!(-1)),
         ("attempt_number string", "/attempt_number", json!("1")),
         ("attempt_number 7", "/attempt_number", json!(7)),
+        ("attempt_number 1.0", "/attempt_number", json!(1.0)),
+        ("attempt_number 1e0", "/attempt_number", number("1e0")),
+        ("attempt_number 1.5", "/attempt_number", json!(1.5)),
+        ("attempt_number 0.0", "/attempt_number", json!(0.0)),
+        (
+            "attempt_number max",
+            "/attempt_number",
+            json!(4_294_967_295u64),
+        ),
+        (
+            "attempt_number max.0",
+            "/attempt_number",
+            json!(4_294_967_295.0),
+        ),
+        (
+            "attempt_number max+1",
+            "/attempt_number",
+            json!(4_294_967_296u64),
+        ),
+        (
+            "attempt_number max+1.0",
+            "/attempt_number",
+            json!(4_294_967_296.0),
+        ),
         ("empty activation", "/activation_id", json!("")),
         ("long activation", "/activation_id", json!(long)),
         (
@@ -387,6 +421,43 @@ fn request_parser_matches_the_schema_on_mutations() {
         ),
         ("future member", "/projection/future", json!({"a": 1})),
         ("budget zero", "/projection/budgets/fuel", json!(0)),
+        ("budget 1.0", "/projection/budgets/fuel", json!(1.0)),
+        ("budget 0.5", "/projection/budgets/fuel", json!(0.5)),
+        (
+            "budget 2e3",
+            "/projection/budgets/timeout_ms",
+            number("2e3"),
+        ),
+        (
+            "budget safe max",
+            "/projection/budgets/fuel",
+            json!(9_007_199_254_740_991u64),
+        ),
+        (
+            "budget safe max.0",
+            "/projection/budgets/fuel",
+            json!(9_007_199_254_740_991.0),
+        ),
+        (
+            "budget over",
+            "/projection/budgets/fuel",
+            json!(9_007_199_254_740_992u64),
+        ),
+        (
+            "budget over.0",
+            "/projection/budgets/memory_bytes",
+            json!(9_007_199_254_740_992.0),
+        ),
+        (
+            "budget u64 max",
+            "/projection/budgets/fuel",
+            json!(u64::MAX),
+        ),
+        (
+            "budget 1e30",
+            "/projection/budgets/max_host_calls",
+            number("1e30"),
+        ),
         ("budget string", "/projection/budgets/fuel", json!("1")),
         ("budget extra", "/projection/budgets/extra", json!(1)),
         (
@@ -623,6 +694,30 @@ fn result_parser_matches_the_schema_on_mutations() {
             json!(["x".repeat(4097)]),
         ),
         (
+            "result status 200.0",
+            success.clone(),
+            "/result/statusCode",
+            json!(200.0),
+        ),
+        (
+            "result status 599.0",
+            success.clone(),
+            "/result/statusCode",
+            json!(599.0),
+        ),
+        (
+            "result status 600.0",
+            success.clone(),
+            "/result/statusCode",
+            json!(600.0),
+        ),
+        (
+            "result status 200.5",
+            success.clone(),
+            "/result/statusCode",
+            json!(200.5),
+        ),
+        (
             "result status 99",
             success.clone(),
             "/result/statusCode",
@@ -837,6 +932,46 @@ fn update_and_cancel_parsers_match_the_schema_on_mutations() {
         (
             "sequence 0",
             with(json!({"sequence": 0, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence 1.0",
+            with(json!({"sequence": 1.0, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence 1.5",
+            with(json!({"sequence": 1.5, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence safe max",
+            with(json!({"sequence": 9_007_199_254_740_991u64, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence over",
+            with(json!({"sequence": 9_007_199_254_740_992u64, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence over.0",
+            with(json!({"sequence": 9_007_199_254_740_992.0, "kind": "heartbeat"})),
+        ),
+        (
+            "sequence 1e30",
+            with(json!({"sequence": number("1e30"), "kind": "heartbeat"})),
+        ),
+        (
+            "progress 100.0",
+            with(json!({"sequence": 1, "kind": "progress", "percent": 100.0})),
+        ),
+        (
+            "progress 100.5",
+            with(json!({"sequence": 1, "kind": "progress", "percent": 100.5})),
+        ),
+        (
+            "progress -0.0",
+            with(json!({"sequence": 1, "kind": "progress", "percent": -0.0})),
+        ),
+        (
+            "progress 1e2",
+            with(json!({"sequence": 1, "kind": "progress", "percent": number("1e2")})),
         ),
         ("sequence missing", with(json!({"kind": "heartbeat"}))),
         ("kind unknown", with(json!({"sequence": 1, "kind": "log"}))),
@@ -1290,6 +1425,57 @@ fn invalid_legacy_inputs_are_rejected_with_their_code_and_never_invoked() {
     let body = case.params.get()["__ow_body"].as_str().unwrap();
     assert_eq!(body.len(), LEGACY_BODY_LIMIT_BYTES + 1);
     assert!(serde_json::from_str::<Value>(body).is_ok());
+}
+
+#[test]
+fn execute_requests_apply_the_legacy_rejections_before_any_invocation() {
+    let (_, base) = fixture("request/valid/wasm-catalog-base.json");
+    let schemas = Schemas::load();
+    let requests = schemas.validator("execute-request.v1.schema.json");
+    let results = schemas.validator("execution-result.v1.schema.json");
+    for (name, code, status, reason) in [
+        ("missing-path", "invalid_request", 400, "missing_path"),
+        ("non-JSON-body", "invalid_request", 400, "non_json_body"),
+        ("oversized-body", "request_too_large", 413, "body_too_large"),
+    ] {
+        let path = repo().join(format!(
+            "docs/contracts/fixtures/legacy-envelope/invalid/{name}.json"
+        ));
+        let case = parse_legacy_invalid(&read(&path)).unwrap();
+        let mut value = base.clone();
+        value["params"] = case.params.get().clone();
+        // The schema takes any params object: the refusal is the parser's.
+        assert!(requests.is_valid(&value), "{name}");
+        let Err(ApiError::Refused(refusal)) = parse_request(&bytes(&value)) else {
+            panic!("{name}: the execute parser accepted a rejected legacy input");
+        };
+        assert_eq!(refusal.code().as_str(), code, "{name}");
+        let result = serde_json::to_value(refusal.result()).unwrap();
+        assert_eq!(result["status"], "failure", "{name}");
+        assert_eq!(result["error"]["code"], code, "{name}");
+        assert_eq!(result["error"]["status"], status, "{name}");
+        assert_eq!(result["error"]["detail"]["reason"], reason, "{name}");
+        assert_eq!(result["error"]["retryable"], false, "{name}");
+        assert_eq!(result["error"]["class"], "non_retryable", "{name}");
+        assert!(results.is_valid(&result), "{name}");
+        assert!(
+            result.get("result").is_none(),
+            "{name}: nothing was invoked"
+        );
+        // A non-wasm revision is refused for its runtime mode, whatever its params.
+        value["projection"]["runtime_mode"] = json!("oci");
+        let Err(ApiError::Refused(refusal)) = parse_request(&bytes(&value)) else {
+            panic!("{name}: expected a refusal");
+        };
+        assert_eq!(refusal.reason(), Reason::RuntimeModeUnsupported, "{name}");
+    }
+    // Every valid legacy input stays admissible through the same entry point.
+    for path in inventory_hashes().keys().filter(|p| p.contains("/valid/")) {
+        let case = parse_legacy_case(&read(&repo().join(path))).unwrap();
+        let mut value = base.clone();
+        value["params"] = case.params.get().clone();
+        assert!(parse_request(&bytes(&value)).is_ok(), "{path}");
+    }
 }
 
 // ---- result identity ----------------------------------------------------------------------

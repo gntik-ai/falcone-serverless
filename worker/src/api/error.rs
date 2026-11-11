@@ -192,13 +192,15 @@ impl fmt::Display for Malformed {
 
 impl std::error::Error for Malformed {}
 
-/// The worker's refusal of a revision whose runtime mode it does not serve. It keeps what
-/// the serialized result needs; formatting prints only the code and the attempt number.
+/// The worker's refusal of an attempt before anything is invoked: a revision whose runtime
+/// mode it does not serve, or a legacy input the contract rejects. It keeps what the
+/// serialized result needs; formatting prints only the code and the attempt number.
 pub struct Refusal {
     activation_id: Redacted<Name>,
     attempt_id: Redacted<Name>,
     attempt_number: u32,
     identity: Redacted<Identity>,
+    reason: Reason,
 }
 
 impl Refusal {
@@ -207,17 +209,23 @@ impl Refusal {
         attempt_id: Name,
         attempt_number: u32,
         identity: Identity,
+        reason: Reason,
     ) -> Self {
         Self {
             activation_id: Redacted::new(activation_id),
             attempt_id: Redacted::new(attempt_id),
             attempt_number,
             identity: Redacted::new(identity),
+            reason,
         }
     }
 
     pub fn code(&self) -> FailureCode {
-        FailureCode::RuntimeModeUnsupported
+        self.reason.code()
+    }
+
+    pub fn reason(&self) -> Reason {
+        self.reason
     }
 
     /// The non-retryable failure result for this attempt, with every contract field.
@@ -226,7 +234,7 @@ impl Refusal {
             self.activation_id.get().clone(),
             self.attempt_id.get().clone(),
             self.identity.get().clone(),
-            Reason::RuntimeModeUnsupported,
+            self.reason,
         )
     }
 }
@@ -235,6 +243,7 @@ impl fmt::Debug for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Refusal")
             .field("code", &self.code().as_str())
+            .field("reason", &self.reason)
             .field("attempt_number", &self.attempt_number)
             .field("activation_id", &self.activation_id)
             .field("attempt_id", &self.attempt_id)

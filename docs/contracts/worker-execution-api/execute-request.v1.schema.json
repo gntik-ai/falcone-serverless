@@ -26,7 +26,8 @@
     },
     "attempt_number": {
       "type": "integer",
-      "minimum": 1
+      "minimum": 1,
+      "maximum": 4294967295
     },
     "deadline": {
       "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/deadline"
@@ -102,19 +103,23 @@
           "properties": {
             "fuel": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 9007199254740991
             },
             "memory_bytes": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 9007199254740991
             },
             "timeout_ms": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 9007199254740991
             },
             "max_host_calls": {
               "type": "integer",
-              "minimum": 1
+              "minimum": 1,
+              "maximum": 9007199254740991
             }
           }
         },

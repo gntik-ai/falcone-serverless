@@ -3,10 +3,9 @@
 use super::{
     error::Malformed,
     from_bytes,
-    types::{Digest, Name, Presence, V1, present},
+    types::{Count, Digest, Name, Percent, Presence, V1, present},
 };
 use serde::{Deserialize, Serialize};
-use std::num::NonZeroU64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -25,14 +24,14 @@ pub struct Update {
     pub contract_version: V1,
     pub activation_id: Name,
     pub attempt_id: Name,
-    pub sequence: NonZeroU64,
+    pub sequence: Count,
     pub kind: UpdateKind,
     #[serde(
         default = "Presence::absent",
         deserialize_with = "present",
         skip_serializing_if = "Presence::is_absent"
     )]
-    pub percent: Presence<u8>,
+    pub percent: Presence<Percent>,
     #[serde(
         default = "Presence::absent",
         deserialize_with = "present",
@@ -63,9 +62,7 @@ impl Update {
             UpdateKind::Heartbeat => {
                 percent.is_none() && message.is_none() && checkpoint.is_none() && digest.is_none()
             }
-            UpdateKind::Progress => {
-                percent.is_none_or(|p| *p <= 100) && checkpoint.is_none() && digest.is_none()
-            }
+            UpdateKind::Progress => checkpoint.is_none() && digest.is_none(),
             UpdateKind::Checkpoint => {
                 percent.is_none() && message.is_none() && checkpoint.is_some() && digest.is_some()
             }

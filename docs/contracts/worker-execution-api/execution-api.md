@@ -27,7 +27,7 @@ credential, projection, params}`. The object is closed.
 | Member | Meaning |
 | --- | --- |
 | `activation_id`, `attempt_id` | Non-empty strings of at most 256 characters. They identify the activation and this attempt. |
-| `attempt_number` | Integer of at least 1. A retry is a new attempt with a higher number. |
+| `attempt_number` | Integer from 1 to 4294967295. A retry is a new attempt with a higher number. |
 | `deadline` | UTC RFC 3339 timestamp ending in `Z`, a real calendar date. |
 | `credential` | The ctr-execution-credential v1 claims object, not an opaque string. The worker binds the attempt to it and never forwards it to a guest. |
 | `projection` | The pinned revision, below. |
@@ -52,7 +52,7 @@ Members beyond those below are always optional, so later revisions stay additive
 | `engine_version` | yes | The Wasmtime build the revision requires. |
 | `wasi_version`, `interface_version` | yes | The pinned WASI and `falcone:host` interface versions. |
 | `declared_imports` | yes | Import names the artifact declares. |
-| `budgets` | yes | Closed `{fuel, memory_bytes, timeout_ms, max_host_calls}`, positive integers. |
+| `budgets` | yes | Closed `{fuel, memory_bytes, timeout_ms, max_host_calls}`, integers from 1 to 9007199254740991 (2^53 - 1). |
 | `granted_capabilities` | yes | The revision's grants, validated against the revision runtime manifest grant definitions at `@0.2.0`. |
 
 ### Runtime mode
@@ -78,7 +78,7 @@ base without a digest, and an explicit `null` are all malformed.
 ## Updates and cancel
 
 An update is `{contract_version, activation_id, attempt_id, sequence, kind, ...}` with `sequence`
-of at least 1 and `kind` one of `heartbeat` (no other member), `progress` (optional `percent` 0 to
+an integer from 1 to 9007199254740991 and `kind` one of `heartbeat` (no other member), `progress` (optional `percent` 0 to
 100 and `message`, 1 to 256 characters) or `checkpoint` (required `checkpoint_ref` and `digest`).
 A cancel message is `{contract_version, activation_id, attempt_id, state}` with `state`
 `requested` (dispatcher to worker), `acknowledged` (the worker stopped the attempt) or `uncertain`
@@ -148,7 +148,14 @@ Three inputs are rejected before invocation, and nothing is invoked for them:
 | non-JSON-body | the content type is `application/json` and `__ow_body` is not parsable JSON | `invalid_request` | `non_json_body` |
 
 All three are non-retryable. The rejection values in the inventory fixtures are labels, not wire
-codes; this table is their mapping.
+codes; this table is their mapping. The worker applies these rules to the `params` of every
+`wasm` execute request when it parses it: a request whose `params` match a row is refused with that
+row's failure result and its `params` are never handed to a guest. A request for another runtime
+mode is refused for its runtime mode first. The request schema accepts any `params` object, so
+these refusals are parser-only.
+
+An integer member is a JSON integer in the sense of JSON Schema: `1`, `1.0` and `1e0` are the same
+value, and the parser and the schemas accept the same range for each.
 
 ## Capability grant versions
 

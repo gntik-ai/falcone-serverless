@@ -98,7 +98,7 @@ mod tests {
         let success = ExecutionResult::success(
             &request,
             LegacyResponse {
-                status_code: 200,
+                status_code: serde_json::from_value(json!(200)).unwrap(),
                 headers: Presence::Absent,
                 body: Presence::from(Some(json!("ok"))),
             },
@@ -138,6 +138,7 @@ mod tests {
             panic!("expected a refusal");
         };
         assert_eq!(refusal.code(), FailureCode::RuntimeModeUnsupported);
+        assert_eq!(refusal.reason(), Reason::RuntimeModeUnsupported);
         for text in [
             format!("{refusal:?}"),
             format!("{refusal}"),

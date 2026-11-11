@@ -2,7 +2,8 @@
 
 use super::error::Malformed;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::{fmt, num::NonZeroU64};
+use serde_json::Number;
+use std::fmt;
 
 /// A value that never appears in formatted output (payloads, log lines).
 #[derive(Clone, PartialEq, Deserialize, Serialize)]
@@ -100,6 +101,70 @@ impl fmt::Debug for Text {
         f.write_str("<redacted>")
     }
 }
+
+/// The largest integer every JSON implementation reads exactly (2^53 - 1): the `maximum` the
+/// published schemas give every unbounded integer member.
+pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+/// A JSON `integer` the way JSON Schema reads it: `1`, `1.0` and `1e0` are the same integer.
+fn whole(number: &Number) -> Option<u64> {
+    if let Some(value) = number.as_u64() {
+        return Some(value);
+    }
+    let value = number.as_f64()?;
+    (value.fract() == 0.0 && (0.0..=MAX_SAFE_INTEGER as f64).contains(&value))
+        .then_some(value as u64)
+}
+
+macro_rules! bounded_integer {
+    ($(#[$doc:meta])* $name:ident($inner:ty), $min:expr, $max:expr, $error:literal) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+        #[serde(try_from = "Number", into = "u64")]
+        pub struct $name($inner);
+
+        impl $name {
+            pub fn get(self) -> $inner {
+                self.0
+            }
+        }
+
+        impl TryFrom<Number> for $name {
+            type Error = &'static str;
+
+            fn try_from(number: Number) -> Result<Self, Self::Error> {
+                whole(&number)
+                    .filter(|value| ($min..=$max).contains(value))
+                    .and_then(|value| <$inner>::try_from(value).ok())
+                    .map(Self)
+                    .ok_or($error)
+            }
+        }
+
+        impl From<$name> for u64 {
+            fn from(value: $name) -> u64 {
+                u64::from(value.0)
+            }
+        }
+    };
+}
+
+bounded_integer!(
+    /// A positive count (budgets, update sequence): `1..=2^53-1`.
+    Count(u64), 1, MAX_SAFE_INTEGER, "count"
+);
+bounded_integer!(
+    /// The attempt number: `1..=4294967295`.
+    AttemptNumber(u32), 1, u32::MAX as u64, "attempt_number"
+);
+bounded_integer!(
+    /// A progress percentage: `0..=100`.
+    Percent(u8), 0, 100, "percent"
+);
+bounded_integer!(
+    /// An HTTP status code: `100..=599`.
+    StatusCode(u16), 100, 599, "status_code"
+);
 
 /// `sha256:` followed by 64 lowercase hex digits.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
@@ -363,10 +428,10 @@ impl Base {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
-    pub fuel: NonZeroU64,
-    pub memory_bytes: NonZeroU64,
-    pub timeout_ms: NonZeroU64,
-    pub max_host_calls: NonZeroU64,
+    pub fuel: Count,
+    pub memory_bytes: Count,
+    pub timeout_ms: Count,
+    pub max_host_calls: Count,
 }
 
 /// The pinned revision as the worker sees it. Unknown members are ignored so that later

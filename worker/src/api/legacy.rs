@@ -6,7 +6,7 @@ use super::{
     from_bytes,
     request::ExecuteRequest,
     result::ExecutionResult,
-    types::{Presence, Redacted, present},
+    types::{Presence, Redacted, StatusCode, present},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -21,7 +21,7 @@ pub const LEGACY_BODY_LIMIT_BYTES: usize = 1_048_576;
 #[serde(deny_unknown_fields)]
 pub struct LegacyResponse {
     #[serde(rename = "statusCode")]
-    pub status_code: u16,
+    pub status_code: StatusCode,
     #[serde(
         default = "Presence::absent",
         deserialize_with = "present",
@@ -40,11 +40,7 @@ impl LegacyResponse {
     pub(super) fn check(&self) -> Result<(), Malformed> {
         self.headers.value()?;
         self.body.value()?;
-        if (100..=599).contains(&self.status_code) {
-            Ok(())
-        } else {
-            Err(Malformed::Rule("status_code"))
-        }
+        Ok(())
     }
 }
 
