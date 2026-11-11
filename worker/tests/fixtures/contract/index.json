@@ -1,0 +1,376 @@
+[
+  {
+    "kind": "request",
+    "file": "request/valid/wasm-no-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "request",
+    "file": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "request",
+    "file": "request/valid/wasm-byo-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "request",
+    "file": "request/valid/wasm-component-digest.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "request",
+    "file": "request/refused/oci-catalog-base.json",
+    "schema": true,
+    "parser": "refuse"
+  },
+  {
+    "kind": "request",
+    "file": "request/refused/oci-byo-base.json",
+    "schema": true,
+    "parser": "refuse"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/runtime-mode-missing.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/runtime-mode-native.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-null.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-alias-kind.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-alias-version.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-alias-latest.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-catalog-without-digest.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/base-byo-without-signer.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/request-grant-0-1-0.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/request-grant-wildcard-host.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/credential-grant-0-2-0.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/unknown-top-level-member.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "request",
+    "file": "request/invalid/deadline-not-a-date.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/success-no-base.json",
+    "request": "request/valid/wasm-no-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/success-catalog.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/success-byo.json",
+    "request": "request/valid/wasm-byo-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-gw-oci-not-authorized.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-gw-base-disabled.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-gw-base-mismatch.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-invalid-request-missing-path.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-invalid-request-non-json-body.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-request-too-large.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/valid/failure-runtime-mode-unsupported.json",
+    "request": "request/refused/oci-catalog-base.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-digest-missing.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-digest-without-base.json",
+    "request": "request/valid/wasm-no-base.json",
+    "schema": true,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-digest-null-with-base.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-digest-null-no-base.json",
+    "request": "request/valid/wasm-no-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-digest-mismatch.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/identity-missing.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/oci-not-authorized-retryable.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/base-disabled-uncertain.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/result-and-error.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/error-null-on-success.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/result-null-on-failure.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/headers-null.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/body-null.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/error-wrong-status.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/error-wrong-reason.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "result",
+    "file": "result/invalid/activation-mismatch.json",
+    "request": "request/valid/wasm-catalog-base.json",
+    "schema": true,
+    "parser": "malformed"
+  },
+  {
+    "kind": "update",
+    "file": "update/valid/heartbeat.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "update",
+    "file": "update/valid/progress.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "update",
+    "file": "update/valid/checkpoint.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "update",
+    "file": "update/invalid/heartbeat-with-percent.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "update",
+    "file": "update/invalid/progress-percent-null.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "update",
+    "file": "update/invalid/progress-percent-101.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "update",
+    "file": "update/invalid/checkpoint-without-digest.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "update",
+    "file": "update/invalid/sequence-zero.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "cancel",
+    "file": "cancel/valid/requested.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "cancel",
+    "file": "cancel/valid/acknowledged.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "cancel",
+    "file": "cancel/valid/uncertain.json",
+    "schema": true,
+    "parser": "accept"
+  },
+  {
+    "kind": "cancel",
+    "file": "cancel/invalid/unknown-state.json",
+    "schema": false,
+    "parser": "malformed"
+  },
+  {
+    "kind": "cancel",
+    "file": "cancel/invalid/missing-attempt.json",
+    "schema": false,
+    "parser": "malformed"
+  }
+]

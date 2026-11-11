@@ -5,6 +5,11 @@
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
+// Execution API v1 (RUN-01.t1) has no caller yet. The dispatcher issue that first calls
+// `api` removes this allowance; nothing else in the module is exempt from dead-code checks.
+#[cfg_attr(not(test), allow(dead_code))]
+mod api;
+
 mod config;
 
 #[cfg(test)]

@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/execution-update",
+  "title": "Worker execution update v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "activation_id",
+        "attempt_id",
+        "sequence",
+        "kind"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/contractVersion"
+        },
+        "activation_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "attempt_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "const": "heartbeat"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "activation_id",
+        "attempt_id",
+        "sequence",
+        "kind"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/contractVersion"
+        },
+        "activation_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "attempt_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "const": "progress"
+        },
+        "percent": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "activation_id",
+        "attempt_id",
+        "sequence",
+        "kind",
+        "checkpoint_ref",
+        "digest"
+      ],
+      "properties": {
+        "contract_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/contractVersion"
+        },
+        "activation_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "attempt_id": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "kind": {
+          "const": "checkpoint"
+        },
+        "checkpoint_ref": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "digest": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/digest"
+        }
+      }
+    }
+  ]
+}

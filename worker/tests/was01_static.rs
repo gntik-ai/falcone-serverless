@@ -152,6 +152,29 @@ fn embedded_fixtures_are_exact_and_import_free() {
     }
 }
 
+/// Wasmtime entry points that load precompiled native code. No file under `worker/src` may
+/// name one, except `cache/load.rs`, the single trusted-cache loader.
+const ARTIFACT_LOAD_APIS: [&str; 6] = [
+    "Module::deserialize",
+    "Component::deserialize",
+    "deserialize_file",
+    "deserialize_raw",
+    "deserialize_open_file",
+    "deserialize_open",
+];
+
+/// The hard rule is that a tenant-supplied precompiled artifact is never deserialized. The
+/// guard therefore rejects the word `deserialize` in every source except `cache/load.rs`,
+/// with one narrow allowance: `worker/src/api/` parses JSON requests with serde, so serde
+/// deserialization (`Deserialize`, a hand-written `fn deserialize`, `deserialize_with`) is
+/// allowed there. Every file, `worker/src/api/` included, still fails if it names a Wasmtime
+/// artifact-loading API, and the `wasmtime::` boundary below keeps Wasmtime out of the module.
+fn deserialize_allowed(path: &Path, source: &str) -> bool {
+    let load = path == Path::new("cache/load.rs");
+    let api = path.starts_with("api");
+    load || (api && !ARTIFACT_LOAD_APIS.iter().any(|name| source.contains(name)))
+}
+
 fn source_valid(path: &Path, source: &str) -> bool {
     let engine = path == Path::new("qualification/engine.rs");
     let bin = path == Path::new("bin/qualification_runner.rs");
@@ -169,7 +192,9 @@ fn source_valid(path: &Path, source: &str) -> bool {
     ]
     .iter()
     .any(|allowed| path == Path::new(allowed));
-    (!source.contains("deserialize") || path == Path::new("cache/load.rs"))
+    (!source.contains("deserialize") || deserialize_allowed(path, source))
+        && (path == Path::new("cache/load.rs")
+            || !ARTIFACT_LOAD_APIS.iter().any(|name| source.contains(name)))
         && !source.contains("tests/")
         && (!source.contains("wasmtime::") || engine || bin || capability)
         && (!source.contains("Status::Passed") || outcome)
@@ -245,6 +270,59 @@ fn native_load_exception_is_exactly_one_source_path() {
         assert!(
             !source_valid(Path::new(sibling), "deserialize"),
             "{sibling}"
+        );
+    }
+}
+
+#[test]
+fn api_may_parse_json_with_serde_but_never_load_artifacts() {
+    let serde_code = "fn deserialize<'de, D: Deserializer<'de>>(d: D) {} #[serde(deserialize_with = \"present\")]";
+    for allowed in ["api/mod.rs", "api/request.rs", "api/nested/deep.rs"] {
+        assert!(source_valid(Path::new(allowed), serde_code), "{allowed}");
+    }
+    for denied in [
+        "Module::deserialize(&engine, bytes)",
+        "Component::deserialize_file(&engine, path)",
+        "engine.deserialize_raw(bytes)",
+        "wasmtime::Module::new(&engine, bytes)",
+        "Module::deserialize_open_file(&engine, file)",
+    ] {
+        assert!(
+            !source_valid(Path::new("api/request.rs"), denied),
+            "{denied}"
+        );
+        assert!(
+            !source_valid(Path::new("api/nested/deep.rs"), denied),
+            "{denied}"
+        );
+    }
+    // The same serde code anywhere else, `cache/load.rs` aside, still fails.
+    for elsewhere in [
+        "config.rs",
+        "api.rs",
+        "api_extra/mod.rs",
+        "cache/other.rs",
+        "host/runtime.rs",
+        "checkpoint.rs",
+    ] {
+        assert!(
+            !source_valid(Path::new(elsewhere), serde_code),
+            "{elsewhere}"
+        );
+    }
+    // The trusted loader keeps its exception, and only it may name the loading APIs.
+    assert!(source_valid(
+        Path::new("cache/load.rs"),
+        "Module::deserialize(&e, b)"
+    ));
+    for path in [
+        "host/runtime.rs",
+        "qualification/engine.rs",
+        "cache/other.rs",
+    ] {
+        assert!(
+            !source_valid(Path::new(path), "Module::deserialize_file(&e, p)"),
+            "{path}"
         );
     }
 }

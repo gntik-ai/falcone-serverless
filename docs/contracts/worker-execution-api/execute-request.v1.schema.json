@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/execute-request",
+  "title": "Worker execute request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "activation_id",
+    "attempt_id",
+    "attempt_number",
+    "deadline",
+    "credential",
+    "projection",
+    "params"
+  ],
+  "properties": {
+    "contract_version": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/contractVersion"
+    },
+    "activation_id": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+    },
+    "attempt_id": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+    },
+    "attempt_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "deadline": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/deadline"
+    },
+    "credential": {
+      "$ref": "https://falcone.dev/contracts/serverless/execution-credential/v1/claims"
+    },
+    "projection": {
+      "$ref": "#/$defs/projection"
+    },
+    "params": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "projection": {
+      "type": "object",
+      "required": [
+        "revision",
+        "runtime_mode",
+        "artifact_digest",
+        "language_profile",
+        "engine_version",
+        "wasi_version",
+        "interface_version",
+        "declared_imports",
+        "budgets",
+        "granted_capabilities"
+      ],
+      "properties": {
+        "revision": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "runtime_mode": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/runtimeMode"
+        },
+        "base": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/base"
+        },
+        "artifact_digest": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/digest"
+        },
+        "language_profile": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/languageProfile"
+        },
+        "component_digest": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/digest"
+        },
+        "engine_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "wasi_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "interface_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "declared_imports": {
+          "type": "array",
+          "items": {
+            "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+          }
+        },
+        "budgets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "fuel",
+            "memory_bytes",
+            "timeout_ms",
+            "max_host_calls"
+          ],
+          "properties": {
+            "fuel": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "memory_bytes": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "timeout_ms": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_host_calls": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "granted_capabilities": {
+          "type": "array",
+          "items": {
+            "$ref": "urn:falcone:contracts:revision-runtime-manifest:1#/$defs/grant"
+          }
+        }
+      }
+    }
+  }
+}

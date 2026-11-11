@@ -1,0 +1,17 @@
+{
+  "contract_version": "1",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "status": "success",
+  "result": {
+    "statusCode": 200,
+    "headers": {
+      "Content-Type": "application/json",
+      "ETag": "\"sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32\"",
+      "X-Spec-Version": "1.0.0",
+      "Cache-Control": "max-age=60, must-revalidate"
+    },
+    "body": "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"Synthetic workspace API\",\"version\":\"1.0.0\"},\"paths\":{}}"
+  },
+  "logs": []
+}

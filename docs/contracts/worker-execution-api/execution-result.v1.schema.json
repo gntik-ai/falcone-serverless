@@ -1,0 +1,410 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/execution-result",
+  "title": "Worker execution result v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "activation_id",
+    "attempt_id",
+    "status",
+    "logs",
+    "identity"
+  ],
+  "properties": {
+    "contract_version": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/contractVersion"
+    },
+    "activation_id": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+    },
+    "attempt_id": {
+      "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "failure"
+      ]
+    },
+    "result": {
+      "$ref": "#/$defs/legacyResult"
+    },
+    "error": {
+      "$ref": "#/$defs/error"
+    },
+    "logs": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "string",
+        "maxLength": 4096
+      }
+    },
+    "identity": {
+      "$ref": "#/$defs/identity"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "status": {
+          "const": "success"
+        }
+      },
+      "required": [
+        "result"
+      ],
+      "not": {
+        "required": [
+          "error"
+        ]
+      }
+    },
+    {
+      "properties": {
+        "status": {
+          "const": "failure"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "not": {
+        "required": [
+          "result"
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "function_revision",
+        "runtime_mode",
+        "artifact_digest",
+        "wasmtime_version",
+        "language_profile",
+        "interface_version"
+      ],
+      "properties": {
+        "function_revision": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "runtime_mode": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/runtimeMode"
+        },
+        "artifact_digest": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/digest"
+        },
+        "base_digest": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/digest"
+        },
+        "wasmtime_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        },
+        "language_profile": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/languageProfile"
+        },
+        "interface_version": {
+          "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "legacyResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "statusCode"
+      ],
+      "properties": {
+        "statusCode": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "body": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "object",
+            "array"
+          ]
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 403
+            },
+            "code": {
+              "const": "GW_OCI_NOT_AUTHORIZED"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "oci_not_authorized"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 409
+            },
+            "code": {
+              "const": "GW_BASE_DISABLED"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "base_disabled"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 409
+            },
+            "code": {
+              "const": "GW_BASE_MISMATCH"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "base_mismatch"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 409
+            },
+            "code": {
+              "const": "runtime_mode_unsupported"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "runtime_mode_unsupported"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 400
+            },
+            "code": {
+              "const": "invalid_request"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "missing_path",
+                    "non_json_body"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "status",
+            "code",
+            "message",
+            "detail",
+            "retryable",
+            "class"
+          ],
+          "properties": {
+            "status": {
+              "const": 413
+            },
+            "code": {
+              "const": "request_too_large"
+            },
+            "message": {
+              "$ref": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common#/$defs/nonEmptyString"
+            },
+            "detail": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "enum": [
+                    "body_too_large"
+                  ]
+                }
+              }
+            },
+            "retryable": {
+              "const": false
+            },
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

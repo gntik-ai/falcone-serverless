@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcone.dev/contracts/serverless/worker-execution-api/v1/common",
+  "title": "Worker execution API v1 common definitions",
+  "$defs": {
+    "contractVersion": {
+      "const": "1"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "runtimeMode": {
+      "enum": [
+        "wasm",
+        "oci"
+      ]
+    },
+    "deadline": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]{1,9})?Z$"
+    },
+    "languageProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "version": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "catalogBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "id",
+        "version",
+        "digest"
+      ],
+      "properties": {
+        "kind": {
+          "const": "catalog"
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9][0-9A-Za-z.+_-]{0,63}$"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "byoBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "image_digest",
+        "signer_identity",
+        "attestation_ref"
+      ],
+      "properties": {
+        "kind": {
+          "const": "byo"
+        },
+        "image_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "signer_identity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "attestation_ref": {
+          "$ref": "#/$defs/nonEmptyString"
+        }
+      }
+    },
+    "base": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/catalogBase"
+        },
+        {
+          "$ref": "#/$defs/byoBase"
+        }
+      ]
+    }
+  }
+}

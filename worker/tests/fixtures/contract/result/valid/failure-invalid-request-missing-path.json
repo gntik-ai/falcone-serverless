@@ -1,0 +1,29 @@
+{
+  "contract_version": "1",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "attempt-synthetic-0001",
+  "status": "failure",
+  "error": {
+    "status": 400,
+    "code": "invalid_request",
+    "message": "The invocation request is malformed.",
+    "detail": {
+      "reason": "missing_path"
+    },
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  "logs": [],
+  "identity": {
+    "function_revision": "rev-synthetic-0001",
+    "runtime_mode": "wasm",
+    "artifact_digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "base_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "wasmtime_version": "49.0.5",
+    "language_profile": {
+      "name": "javascript",
+      "version": "1.0.0"
+    },
+    "interface_version": "0.2.0"
+  }
+}
