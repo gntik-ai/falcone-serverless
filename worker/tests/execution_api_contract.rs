@@ -822,6 +822,36 @@ fn result_parser_matches_the_schema_on_mutations() {
             json!(""),
         ),
         ("error extra", failure.clone(), "/error/extra", json!(1)),
+        (
+            "error status 403.0",
+            failure.clone(),
+            "/error/status",
+            json!(403.0),
+        ),
+        (
+            "error status 4.03e2",
+            failure.clone(),
+            "/error/status",
+            number("4.03e2"),
+        ),
+        (
+            "error status 403.5",
+            failure.clone(),
+            "/error/status",
+            json!(403.5),
+        ),
+        (
+            "error status 404.0",
+            failure.clone(),
+            "/error/status",
+            json!(404.0),
+        ),
+        (
+            "error status text",
+            failure.clone(),
+            "/error/status",
+            json!("403"),
+        ),
     ];
     for (name, base, pointer, new) in edits {
         let mut value = base;

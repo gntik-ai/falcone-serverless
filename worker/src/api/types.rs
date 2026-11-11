@@ -107,7 +107,7 @@ impl fmt::Debug for Text {
 pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 /// A JSON `integer` the way JSON Schema reads it: `1`, `1.0` and `1e0` are the same integer.
-fn whole(number: &Number) -> Option<u64> {
+pub(super) fn whole(number: &Number) -> Option<u64> {
     if let Some(value) = number.as_u64() {
         return Some(value);
     }

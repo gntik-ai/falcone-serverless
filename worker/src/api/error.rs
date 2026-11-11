@@ -3,9 +3,10 @@
 
 use super::{
     result::{ExecutionResult, Identity},
-    types::{Name, Redacted},
+    types::{Name, Redacted, whole},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use serde_json::Number;
 use std::fmt;
 
 /// How a caller may react. Every v1 code is `NonRetryable`; `Retryable` and `Uncertain`
@@ -130,10 +131,19 @@ pub struct Detail {
     pub reason: Reason,
 }
 
+/// The failure `status` is a JSON `integer`: `403`, `403.0` and `4.03e2` are the same value.
+fn whole_status<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let number = Number::deserialize(deserializer)?;
+    whole(&number)
+        .and_then(|value| u16::try_from(value).ok())
+        .ok_or_else(|| D::Error::custom("status"))
+}
+
 /// The failure object of a result: `retryable` is `class == Retryable`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ErrorBody {
+    #[serde(deserialize_with = "whole_status")]
     pub status: u16,
     pub code: FailureCode,
     pub message: Name,
