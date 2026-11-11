@@ -102,20 +102,34 @@ fn exact_version(value: &str) -> bool {
         Some(at) => value.split_at(at),
         None => (value, ""),
     };
-    let numbers: Vec<_> = core.split('.').collect();
-    let numeric = |part: &&str| {
+    let numeric = |part: &str| {
         !part.is_empty()
             && part.bytes().all(|b| b.is_ascii_digit())
             && (part.len() == 1 || !part.starts_with('0'))
     };
-    let tail = rest.trim_start_matches(['-', '+']);
+    let (pre, build) = match rest.strip_prefix('-') {
+        Some(tail) => match tail.split_once('+') {
+            Some((pre, build)) => (Some(pre), Some(build)),
+            None => (Some(tail), None),
+        },
+        None => (None, rest.strip_prefix('+')),
+    };
+    // Dot-separated, non-empty identifiers of `[0-9A-Za-z-]`; a numeric prerelease one has no
+    // leading zero. A second `+`, or an empty identifier, is not a version.
+    let identifiers = |part: &str| {
+        part.split('.')
+            .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    };
+    let numbers: Vec<_> = core.split('.').collect();
     numbers.len() == 3
-        && numbers.iter().all(numeric)
-        && (rest.is_empty()
-            || (!tail.is_empty()
-                && tail
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))))
+        && numbers.iter().all(|part| numeric(part))
+        && pre.is_none_or(|pre| {
+            identifiers(pre)
+                && pre
+                    .split('.')
+                    .all(|id| !id.bytes().all(|b| b.is_ascii_digit()) || numeric(id))
+        })
+        && build.is_none_or(identifiers)
 }
 
 object_type!(

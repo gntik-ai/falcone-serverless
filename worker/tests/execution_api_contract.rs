@@ -326,6 +326,49 @@ fn unresolved_default_aliases_are_malformed() {
     }
 }
 
+#[test]
+fn catalog_version_follows_the_semver_suffix_grammar() {
+    let catalog = request_json("catalog");
+    let with_version = |version: &str| {
+        let mut value = catalog.clone();
+        value["projection"]["base"]["version"] = json!(version);
+        parse_request(&bytes(&value))
+    };
+    for good in [
+        "1.4.2",
+        "1.4.2-rc.1",
+        "1.4.2-rc-1",
+        "1.4.2+build.5",
+        "1.4.2-0.3.7+001",
+        "1.4.2-alpha+build-1.x",
+        "1.4.2-0",
+    ] {
+        assert!(with_version(good).is_ok(), "{good}");
+    }
+    for bad in [
+        "1.4.2+build+again",
+        "1.4.2-...",
+        "1.4.2-",
+        "1.4.2+",
+        "1.4.2-+build",
+        "1.4.2-rc..1",
+        "1.4.2-rc.",
+        "1.4.2-.rc",
+        "1.4.2+build.",
+        "1.4.2+a..b",
+        "1.4.2--+",
+        "1.4.2-01",
+        "1.4.2-rc.01",
+        "1.4.2-rc_1",
+        "1.4.2+build_1",
+        "1.4.2+bu ild",
+        "1.4.2-rc+build-+x",
+    ] {
+        let error = rejected(with_version(bad));
+        assert!(is_malformed(&error), "{bad}: {error}");
+    }
+}
+
 // ---- failure codes and classes ---------------------------------------------------------
 
 const CLASS_TABLE: [(&str, FailureCode, &str); 4] = [

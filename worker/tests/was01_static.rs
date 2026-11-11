@@ -76,10 +76,13 @@ fn pinned_versions_and_inventory() {
     let path = versions["contract_inventory_path"].as_str().unwrap();
     let digest = versions["contract_inventory_sha256"].as_str().unwrap();
     assert!(inventory_valid(root(), path, digest));
-    // The v1 inventory digest is retired: the pin follows the v1.2 inventory (OPS-01.t1).
+    // The v1 inventory digest is retired: the pin follows the v1.3 inventory (RUN-01.t1).
     let v1_digest = "c9c4921595cfe5e0662e082d1af860453e4c40e49e473f4baa213fa11f871973";
     assert_ne!(digest, v1_digest);
     assert!(!inventory_valid(root(), path, v1_digest));
+    let v1_2_digest = "764c449c4e326345d03e4d3bac258c1d40d7613b59b2fd433ed4276cbed1ed6b";
+    assert_ne!(digest, v1_2_digest);
+    assert!(!inventory_valid(root(), path, v1_2_digest));
     assert!(!inventory_valid(root(), path, &"0".repeat(64)));
     assert!(!inventory_valid(root(), "missing-was01-inventory", digest));
     assert!(!inventory_valid(root(), "docs/contracts", digest));
@@ -155,33 +158,138 @@ fn embedded_fixtures_are_exact_and_import_free() {
 /// The keyword for unchecked code, spelled indirectly so this file stays free of it.
 const UNSAFE: &str = concat!("un", "safe");
 
-/// Wasmtime artifact loading: `Module`/`Component` `deserialize*`, `deserialize_file`,
-/// `deserialize_open_file`, `deserialize_raw`, or any path into the engine crate. Whitespace
-/// is removed first so spacing cannot hide a path such as `Module :: deserialize`.
+/// Splits Rust source into tokens: comments and whitespace vanish, so a comment between tokens
+/// cannot hide a path, and each string or character literal becomes one `"` token, so its text
+/// is never mistaken for code. Identifiers keep their text (a raw `r#name` keeps `name`), `::`
+/// is one token and any other character is its own token.
+fn tokens(source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c == '/' && at(i + 1) == '/' {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && at(i + 1) == '*' {
+            let mut depth = 1;
+            i += 2;
+            while i < chars.len() && depth > 0 {
+                if chars[i] == '/' && at(i + 1) == '*' {
+                    depth += 1;
+                    i += 2;
+                } else if chars[i] == '*' && at(i + 1) == '/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if c == '"' || c == '\'' && is_char_literal(&chars, i) {
+            i = skip_quoted(&chars, i);
+            out.push("\"".into());
+        } else if c == '\'' {
+            i += 1; // a lifetime tick
+        } else if c.is_alphabetic() || c == '_' {
+            let start = i;
+            while at(i).is_alphanumeric() || at(i) == '_' {
+                i += 1;
+            }
+            let word: String = chars[start..i].iter().collect();
+            let hashes = (i..chars.len()).take_while(|&k| chars[k] == '#').count();
+            let raw_prefix = matches!(word.as_str(), "r" | "br" | "cr");
+            let plain_prefix = matches!(word.as_str(), "b" | "c");
+            if raw_prefix && at(i + hashes) == '"' {
+                i = skip_raw(&chars, i + hashes, hashes);
+                out.push("\"".into());
+            } else if plain_prefix && at(i) == '"' || word == "b" && at(i) == '\'' {
+                i = skip_quoted(&chars, i);
+                out.push("\"".into());
+            } else if word == "r" && hashes == 1 && (at(i + 1).is_alphabetic() || at(i + 1) == '_')
+            {
+                i += 1;
+                let start = i;
+                while at(i).is_alphanumeric() || at(i) == '_' {
+                    i += 1;
+                }
+                out.push(chars[start..i].iter().collect());
+            } else {
+                out.push(word);
+            }
+        } else if c == ':' && at(i + 1) == ':' {
+            out.push("::".into());
+            i += 2;
+        } else {
+            out.push(c.to_string());
+            i += 1;
+        }
+    }
+    out
+}
+
+/// A `'` starts a character literal, not a lifetime, when it closes within the next characters.
+fn is_char_literal(chars: &[char], i: usize) -> bool {
+    let at = |k: usize| chars.get(k).copied().unwrap_or('\0');
+    at(i + 1) == '\\' || at(i + 2) == '\''
+}
+
+/// Skips a `"` or `'` literal that starts at `i` (escapes honoured); returns the index after it.
+fn skip_quoted(chars: &[char], i: usize) -> usize {
+    let quote = chars[i];
+    let mut k = i + 1;
+    while k < chars.len() && chars[k] != quote {
+        k += if chars[k] == '\\' { 2 } else { 1 };
+    }
+    k + 1
+}
+
+/// Skips a raw string whose opening quote is at `quote`, closed by `"` and `hashes` hashes.
+fn skip_raw(chars: &[char], quote: usize, hashes: usize) -> usize {
+    let mut k = quote + 1;
+    while k < chars.len() {
+        if chars[k] == '"' && (1..=hashes).all(|n| chars.get(k + n) == Some(&'#')) {
+            return k + 1 + hashes;
+        }
+        k += 1;
+    }
+    k
+}
+
+/// Wasmtime artifact loading, judged on tokens so comments and spacing cannot hide it:
+/// `Module`/`Component` `::` `deserialize*`, the loaders `deserialize_file`,
+/// `deserialize_open_file` and `deserialize_raw`, any mention of the engine crate, or the
+/// keyword for unchecked code, which loading needs.
 fn loads_precompiled_code(source: &str) -> bool {
-    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
-    [
-        "Module::deserialize",
-        "Component::deserialize",
-        "deserialize_file",
-        "deserialize_open_file",
-        "deserialize_raw",
-        "wasmtime::",
-        "::wasmtime",
-        "usewasmtime",
-        "externcratewasmtime",
-        UNSAFE,
-    ]
-    .iter()
-    .any(|token| compact.contains(token))
+    let tokens = tokens(source);
+    let loader = tokens.windows(3).any(|w| {
+        matches!(w[0].as_str(), "Module" | "Component")
+            && w[1] == "::"
+            && w[2].starts_with("deserialize")
+    });
+    loader
+        || tokens.iter().any(|token| {
+            matches!(
+                token.as_str(),
+                "deserialize_file"
+                    | "deserialize_open_file"
+                    | "deserialize_raw"
+                    | "wasmtime"
+                    | UNSAFE
+            )
+        })
 }
 
 /// The no-deserialize rule: a tenant-supplied precompiled artifact is never deserialized, so
 /// no worker source may mention `deserialize` except `cache/load.rs`, the one place that loads
 /// trusted compiler output. `api/` only parses JSON requests with serde (`Deserialize`, a serde
 /// `fn deserialize`, `deserialize_with`), so it may use that word, but it still fails on every
-/// Wasmtime loading API, on any path into the engine crate and on the keyword for unchecked code, which loading
-/// needs. Every other file, `api/` included, keeps the full ban on engine artifact loading.
+/// Wasmtime loading API, on any path into the engine crate and on the keyword for unchecked
+/// code, which loading needs, judged on tokens. Every other file, `api/` included, keeps the
+/// full ban on engine artifact loading.
 fn deserialize_valid(path: &Path, source: &str) -> bool {
     if path == Path::new("cache/load.rs") {
         return true;
@@ -327,10 +435,37 @@ fn api_may_use_serde_but_never_wasmtime_artifact_loading() {
         "use ::wasmtime as w;",
         "extern crate wasmtime as w;",
         "fn deserialize_raw() {}",
+        "Module /* hidden */ :: deserialize(&engine, bytes);",
+        "Module::/* hidden */deserialize(&engine, bytes);",
+        "Component /* a /* nested */ b */ :: deserialize_file(&engine, path);",
+        "Module // line comment\n :: deserialize(&engine, bytes);",
+        "use wasmtime/* hidden */::Module;",
+        "use /**/ ::wasmtime::Module as M;",
+        "extern crate /* hidden */ wasmtime;",
+        "fn f() { /* hidden */ Module::deserialize_open_file(&engine, file) }",
+        "fn f() { r#deserialize_raw(); }",
+        "// Module::deserialize in a comment\nfn f() { Module::deserialize(&e, b); }",
+        "fn f() { Module::deserialize(&e, b); } /* trailing */",
     ] {
         let source = format!("{serde_code}\n{loader}\n");
         assert!(!source_valid(Path::new("api/x.rs"), &source), "{loader}");
         assert!(!source_valid(Path::new("host/x.rs"), &source), "{loader}");
+    }
+    // Text in comments and literals is not code: a doc comment or a message may name the
+    // loaders. (`source_valid` has further plain-text rules, so this judges the deserialize rule.)
+    for harmless in [
+        "// Module::deserialize is forbidden here\nfn f() {}",
+        "/* Component::deserialize_file, wasmtime::Engine and the loaders */ fn f() {}",
+        "/// Never call `Module::deserialize`.\nfn f() {}",
+        "fn f() -> &'static str { \"Module::deserialize wasmtime::Engine\" }",
+        "fn f() -> &'static str { r#\"Module::deserialize \"wasmtime\" \"# }",
+        "fn f<'a>(x: &'a str, c: char) -> bool { c == '\"' && x.is_empty() }",
+        "struct Identity { wasmtime_version: String, module: u8 }",
+    ] {
+        assert!(
+            deserialize_valid(Path::new("api/x.rs"), harmless),
+            "{harmless}"
+        );
     }
     // The keyword for unchecked code fails in api/ too: engine artifact loading needs it.
     let keyword = format!("fn f() {{ {UNSAFE} {{}} }}");

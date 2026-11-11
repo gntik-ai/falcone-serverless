@@ -1,6 +1,6 @@
 # Frozen Falcone contract inventory
 
-Contract version: v1.2
+Contract version: v1.3
 
 This freezes the v1 compatibility surfaces and evidence levels for MIG-01, not
 deployed acceptance or an enumeration of every live endpoint. No live deployment
@@ -215,8 +215,8 @@ inventory test recomputes the lowercase sha256 of the schema bytes.
 
 ## Worker execution API
 
-Records the pinned sources and fixtures of `ctr-worker-execution-api` v1 (RUN-01.t1,
-[spec](worker-execution-api/v1.md)). It is additive: it changes no frozen v1 section, the
+Revision v1.3 adds `ctr-worker-execution-api` v1 (RUN-01.t1,
+[spec](worker-execution-api/v1.md)) and records its pinned sources and fixtures. It is additive: it changes no frozen v1 section, the
 legacy envelope fixtures above or the chart values contract. The legacy envelope and
 invocation-identity fixtures are consumed in place from the table above, byte for byte.
 

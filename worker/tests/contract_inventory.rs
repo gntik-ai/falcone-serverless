@@ -209,9 +209,9 @@ fn validate(
 ) -> Result<(), String> {
     if !inventory
         .lines()
-        .any(|line| line == "Contract version: v1.2")
+        .any(|line| line == "Contract version: v1.3")
     {
-        return Err("missing Contract version: v1.2".into());
+        return Err("missing Contract version: v1.3".into());
     }
     let rows = table(
         section(inventory, "Contract surfaces")?,
@@ -333,7 +333,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// The frozen v1 sections must keep their published bytes; v1.2 is additive.
+/// The frozen v1 sections must keep their published bytes; v1.3 is additive.
 fn frozen_v1_unchanged(inventory: &str) -> Result<(), String> {
     for (heading, digest) in FROZEN_V1_SECTIONS {
         if sha256_hex(section(inventory, heading)?.as_bytes()) != digest {
@@ -1286,8 +1286,9 @@ fn altered_frozen_v1_row_is_rejected() {
 
 #[test]
 fn v1_version_line_is_rejected() {
-    rejects_replacement("Contract version: v1.2", "Contract version: v1");
-    rejects_replacement("Contract version: v1.2", "Contract version: v1.1");
+    rejects_replacement("Contract version: v1.3", "Contract version: v1");
+    rejects_replacement("Contract version: v1.3", "Contract version: v1.1");
+    rejects_replacement("Contract version: v1.3", "Contract version: v1.2");
 }
 
 #[test]
@@ -1691,11 +1692,11 @@ fn reference_decisions_follow_the_pinned_order() {
 }
 
 #[test]
-fn readme_describes_inventory_as_v1_2() {
+fn readme_describes_inventory_as_v1_3() {
     let docs = Documents::load();
     assert!(
         docs.readme
-            .contains("frozen Falcone contract inventory v1.2")
+            .contains("frozen Falcone contract inventory v1.3")
     );
 }
 
