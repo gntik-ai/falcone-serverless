@@ -166,10 +166,17 @@ bounded_integer!(
     StatusCode(u16), 100, 599, "status_code"
 );
 
-/// `sha256:` followed by 64 lowercase hex digits.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+/// `sha256:` followed by 64 lowercase hex digits. Its `Debug` output is redacted because a
+/// request-controlled digest can carry a credential-shaped value.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Digest(String);
+
+impl fmt::Debug for Digest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
 
 impl Digest {
     pub fn as_str(&self) -> &str {

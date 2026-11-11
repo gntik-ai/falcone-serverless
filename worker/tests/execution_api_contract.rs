@@ -1871,6 +1871,63 @@ fn credential_like_request_strings_never_appear_in_error_output() {
     }
 }
 
+#[test]
+fn digest_shaped_credential_never_appears_in_formatted_output() {
+    // A well-formed digest is accepted, so it reaches the refusal's identity block.
+    const DIGEST_HEX: &str = "9f3a7c219f3a7c219f3a7c219f3a7c219f3a7c219f3a7c219f3a7c219f3a7c21";
+    let marker = format!("sha256:{DIGEST_HEX}");
+    for (file, pointers) in [
+        (
+            "request/valid/wasm-catalog-base.json",
+            vec!["/projection/artifact_digest", "/projection/base/digest"],
+        ),
+        (
+            "request/valid/wasm-byo-base.json",
+            vec![
+                "/projection/artifact_digest",
+                "/projection/base/image_digest",
+            ],
+        ),
+        (
+            "request/valid/wasm-component-digest.json",
+            vec!["/projection/component_digest"],
+        ),
+    ] {
+        for pointer in pointers {
+            let (_, mut value) = fixture(file);
+            set(&mut value, pointer, json!(marker));
+            let mut oci = value.clone();
+            oci["projection"]["runtime_mode"] = json!("oci");
+            let request = parse_request(&bytes(&value))
+                .unwrap_or_else(|error| panic!("{file} {pointer}: {error}"));
+            let result = ExecutionResult::failure(&request, Reason::BaseDisabled);
+            for text in [
+                format!("{request:?}"),
+                format!("{request:#?}"),
+                format!("{result:?}"),
+                format!("{result:#?}"),
+            ] {
+                assert!(!text.contains(DIGEST_HEX), "{file} {pointer}: {text}");
+            }
+            let Err(ApiError::Refused(refusal)) = parse_request(&bytes(&oci)) else {
+                panic!("{file} {pointer}: oci request was not refused");
+            };
+            for text in [
+                format!("{refusal:?}"),
+                format!("{refusal:#?}"),
+                format!("{refusal}"),
+                format!("{:?}", refusal.result()),
+                format!("{:#?}", refusal.result()),
+            ] {
+                assert!(!text.contains(DIGEST_HEX), "{file} {pointer}: {text}");
+            }
+            // The serialized refusal still carries the contract fields.
+            let serialized = serde_json::to_value(refusal.result()).unwrap();
+            assert!(serialized["identity"].is_object());
+        }
+    }
+}
+
 // ---- size bound -------------------------------------------------------------------------
 
 #[test]
