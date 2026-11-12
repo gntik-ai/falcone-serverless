@@ -19,7 +19,7 @@ use falcone_serverless_worker::limits::{CALL_CAP_MS, Field, GUEST_MEMORY_BYTES, 
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -191,7 +191,7 @@ fn undeclared(import: &str) -> Reply {
 fn component(
     state: &State,
     request: &ExecuteRequest,
-    cancelled: &std::sync::atomic::AtomicBool,
+    cancelled: &AtomicBool,
 ) -> Result<Arc<Entry>, Reply> {
     let hex = request
         .projection()
@@ -283,7 +283,16 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
     let Some(_slot) = Slot::acquire(&state.running, state.settings.concurrency) else {
         return fail(503, "busy");
     };
+    // Cancellable from here on: the flag is registered before any admission work.
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let running = Arc::new(Running::new(Arc::clone(&cancelled)));
+    let Some(registered) = Registered::new(state, &request, Arc::clone(&running)) else {
+        return fail(409, "duplicate_attempt");
+    };
     let scopes = request.scopes();
+    if cancelled.load(Ordering::Acquire) {
+        return finished_cancelled(&registered);
+    }
     let collector = Arc::new(Collector {
         lines: Mutex::new(Vec::new()),
     });
@@ -303,12 +312,8 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
         },
         collector.clone(),
         limits(state, &request),
-    );
-    let cancelled = host.cancellation();
-    let running = Arc::new(Running::new(Arc::clone(&cancelled)));
-    let Some(registered) = Registered::new(state, &request, Arc::clone(&running)) else {
-        return fail(409, "duplicate_attempt");
-    };
+    )
+    .with_cancellation(Arc::clone(&cancelled));
     let entry = match component(state, &request, &cancelled) {
         Ok(entry) => entry,
         Err(reply) => return reply,
@@ -343,6 +348,13 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
         ],
     );
     finished(&request, &registered, collector, execution)
+}
+
+/// A cancel arrived while the request was still being admitted: nothing ran, so the cancel is
+/// acknowledged and the request answers 409 `cancelled`.
+fn finished_cancelled(registered: &Registered<'_>) -> Reply {
+    registered.running.finish(Finish::Acknowledged);
+    fail(409, "cancelled")
 }
 
 /// Tells a waiting cancel how the execution ended, then builds the response.

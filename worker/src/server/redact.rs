@@ -2,7 +2,9 @@
 //!
 //! The work is linear and has a fixed budget. Each line is truncated to 8192 characters first;
 //! then one leftmost-longest multi-pattern matcher, built once per execution, replaces every
-//! credential string in one pass over each line. If the pattern bytes plus the line bytes exceed
+//! credential string in one pass over each line. A credential string longer than any line can
+//! be (`MAX_LOG_CHARS` characters, at most four bytes each) can never match and is skipped, so
+//! it costs no matcher and no budget. If the pattern bytes plus the line bytes exceed
 //! `WORK_BUDGET`, or the matcher cannot be built, the logs are dropped and a single marker line
 //! is returned: the failure mode never returns unredacted text.
 
@@ -14,6 +16,9 @@ pub const REDACTED: &str = "<redacted>";
 /// The fixed redaction budget of one execution: credential-string bytes plus log-line bytes
 /// (12 MiB). A request near the 8 MiB ceiling with 1000 maximum-length lines can exceed it.
 pub const WORK_BUDGET: usize = 12 * 1024 * 1024;
+
+/// The longest credential string that can occur in a truncated line, in bytes.
+const MAX_PATTERN_BYTES: usize = MAX_LOG_CHARS * 4;
 
 fn truncate(line: &mut String, chars: usize) {
     if let Some((end, _)) = line.char_indices().nth(chars) {
@@ -41,7 +46,7 @@ pub fn redact_with_budget(
     let patterns: Vec<&str> = secrets
         .iter()
         .map(String::as_str)
-        .filter(|secret| !secret.is_empty())
+        .filter(|secret| !secret.is_empty() && secret.len() <= MAX_PATTERN_BYTES)
         .collect();
     let work = patterns
         .iter()
@@ -189,6 +194,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_string_longer_than_any_log_line_is_neither_built_nor_counted() {
+        // 2 MiB of credential string can never occur in a line of at most 8192 characters, so
+        // it must not cost a matcher or count against the budget: short lines stay as they are,
+        // and the work stays far below what a 2 MiB trie would take.
+        let start = Instant::now();
+        let out = redact_logs(&["s".repeat(2 * 1024 * 1024)], lines(&["plain line"]));
+        assert_eq!(out, ["plain line"]);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        // The same string next to a line-sized one: the short one is still redacted.
+        let out = redact_logs(
+            &["s".repeat(2 * 1024 * 1024), "tok".to_owned()],
+            lines(&["a tok b"]),
+        );
+        assert_eq!(out, ["a <redacted> b"]);
+        // It also does not push an otherwise in-budget execution over the budget.
+        let huge = ["h".repeat(WORK_BUDGET)];
+        assert_eq!(redact_logs(&huge, lines(&["ok"])), ["ok"]);
+    }
+
     /// Distinct credential strings of `count` entries, each `width` bytes.
     fn distinct(count: usize, width: usize) -> Vec<String> {
         (0..count).map(|n| format!("{n:0>width$}")).collect()
@@ -224,14 +249,15 @@ mod tests {
 
     #[test]
     fn the_largest_request_exceeds_the_budget_and_fails_closed_quickly() {
-        let secrets = distinct(1000, 8);
-        // 1000 maximum-length lines plus enough pattern bytes to pass the budget.
-        let padding = vec!["p".repeat(5 * 1024 * 1024)];
-        let all: Vec<String> = secrets.into_iter().chain(padding).collect();
+        // 1000 maximum-length lines plus enough pattern bytes, in strings that each fit in a
+        // line, to pass the budget: 200 distinct strings of 30,000 bytes (6 MB).
+        let all: Vec<String> = (0..200)
+            .map(|n| format!("{n:0>8}{}", "p".repeat(30_000 - 8)))
+            .collect();
         let lines = vec!["y".repeat(MAX_LOG_CHARS); MAX_LOG_LINES];
         let start = Instant::now();
         let out = redact_logs(&all, lines);
-        assert_eq!(out, [REDACTED]);
+        assert!(out == [REDACTED], "only the marker line is returned");
         assert!(start.elapsed() < Duration::from_secs(1));
     }
 }

@@ -23,6 +23,7 @@ const ECHO: &[u8] = include_bytes!("execute_fixtures/handler.wasm");
 const BLOCK: &[u8] = include_bytes!("execute_fixtures/api-block.wasm");
 const CONTEXT: &[u8] = include_bytes!("execute_fixtures/api-context.wasm");
 const LOGGER: &[u8] = include_bytes!("execute_fixtures/api-log.wasm");
+const LOG_MANY: &[u8] = include_bytes!("execute_fixtures/api-log-many.wasm");
 const WASI: &[u8] = include_bytes!("execute_fixtures/wasi-import.wasm");
 
 const CONTEXT_IMPORT: &str = "falcone:host/invocation-context@0.2.0";
@@ -111,7 +112,7 @@ impl Worker {
         ));
         let artifacts = root.join("cache/artifacts");
         std::fs::create_dir_all(&artifacts).map_err(|e| format!("scratch: {}", e.kind()))?;
-        for component in [ECHO, BLOCK, CONTEXT, LOGGER, WASI] {
+        for component in [ECHO, BLOCK, CONTEXT, LOGGER, LOG_MANY, WASI] {
             let hex = digest(component).replace("sha256:", "");
             std::fs::write(artifacts.join(format!("{hex}.wasm")), component)
                 .map_err(|e| format!("stage: {}", e.kind()))?;
@@ -767,6 +768,106 @@ fn credential_boundary(binary: &Path) -> Check {
 }
 
 // ---------------------------------------------------------------------------------------------
+// AC5 end to end: bounded redaction inside the execution lifecycle
+
+/// Distinct credential strings and the wall-clock bound for the whole request. The release
+/// figures are the documented maximum (400,000 strings, redaction under one second; the bound
+/// also covers parsing an ~5 MB request). The debug worker `cargo test` starts is an order of
+/// magnitude slower and runs a smaller set under a larger bound. A quadratic or unbounded
+/// implementation misses either bound by orders of magnitude.
+fn redaction_scale() -> (usize, Duration) {
+    if cfg!(debug_assertions) {
+        (10_000, Duration::from_secs(30))
+    } else {
+        (400_000, Duration::from_secs(10))
+    }
+}
+
+/// A request whose credential holds `entries` as storage prefixes (the projection grants
+/// none, so nothing is authorized) and whose guest logs its params 1000 times.
+fn many_credential_strings(name: &str, entries: Vec<String>, note: &str) -> Value {
+    let mut request = request(
+        name,
+        LOG_MANY,
+        &[LOGGING_IMPORT],
+        json!({ "__ow_path": "/m", "note": note }),
+    );
+    request["credential"]["allowed_capabilities"] = json!([{
+        "family": "storage",
+        "interface": "falcone:host/storage@0.1.0",
+        "scope": { "prefixes": entries }
+    }]);
+    request
+}
+
+fn redaction_load(binary: &Path) -> Check {
+    // One execution slot: a slot leaked by either request below fails the next execute with 503.
+    let worker = Worker::start(binary, &Config::default())?;
+    // Many distinct credential strings, maximum log volume: 1000 lines of 8192 characters each,
+    // every one repeating credential strings. Pattern bytes plus line bytes stay under the
+    // budget, so the lines come back redacted, not dropped.
+    let (count, bound) = redaction_scale();
+    let entries: Vec<String> = (0..count).map(|n| format!("c{n:08}")).collect();
+    let mut note = String::new();
+    for n in [0, 42, count - 1] {
+        note.push_str(&format!("c{n:08} "));
+    }
+    note.push_str(&"filler ".repeat(1400));
+    let started = Instant::now();
+    let response = worker.execute(&many_credential_strings("redact-many", entries, &note))?;
+    let took = started.elapsed();
+    ensure(response.status == 200, "the logging guest runs")?;
+    ensure(
+        took < bound,
+        "redaction under load finishes within its bound",
+    )?;
+    let result = response.json()?;
+    let lines = result["logs"].as_array().ok_or("logs is an array")?;
+    ensure(lines.len() == 1000, "1000 log lines are kept")?;
+    for line in lines {
+        let line = line.as_str().ok_or("log line is text")?;
+        ensure(line.contains("<redacted>"), "every line is redacted")?;
+        ensure(
+            !line.contains("c0000"),
+            "no credential string survives in the logs",
+        )?;
+    }
+    worker.recovered("redact-many")?;
+    // Over the fixed work budget: 200 distinct credential strings of 30,000 bytes (each fits in a
+    // line) plus the maximum log volume exceed 12 MiB. Fail closed: the only line returned is the
+    // marker, and none of the text.
+    let heavy: Vec<String> = (0..200)
+        .map(|n| format!("c{n:08}{}", "p".repeat(30_000 - 9)))
+        .collect();
+    let started = Instant::now();
+    let response = worker.execute(&many_credential_strings("redact-budget", heavy, &note))?;
+    ensure(response.status == 200, "the over-budget request still runs")?;
+    ensure(
+        started.elapsed() < bound,
+        "the fail-closed path finishes within its bound",
+    )?;
+    ensure(
+        response.json()?["logs"] == json!(["<redacted>"]),
+        "over budget, only the marker line is returned",
+    )?;
+    worker.recovered("redact-budget")?;
+    // One credential string of 5 MiB can never occur in a log line: it costs no matcher, so the
+    // request finishes within the bound instead of building a multi-million-state automaton.
+    let started = Instant::now();
+    let response = worker.execute(&many_credential_strings(
+        "redact-huge",
+        vec!["x".repeat(5 * 1024 * 1024)],
+        &note,
+    ))?;
+    ensure(response.status == 200, "the huge-string request runs")?;
+    ensure(
+        started.elapsed() < bound,
+        "a string longer than any line costs no redaction work",
+    )?;
+    worker.recovered("redact-huge")
+}
+
+// ---------------------------------------------------------------------------------------------
 // AC4: declared imports
 
 fn undeclared(response: &Response, import: &str) -> Check {
@@ -1180,6 +1281,7 @@ pub const CASES: &[Case] = &[
     ("runtime-mode", runtime_mode),
     ("credential", credential_boundary),
     ("imports", declared_imports),
+    ("redaction-load", redaction_load),
     ("saturation", saturation),
     ("control-stall", control_stall),
     ("cross-listener", cross_listener),

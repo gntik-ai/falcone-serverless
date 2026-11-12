@@ -61,6 +61,7 @@ cluster_cases! {
     runtime_mode => "runtime-mode",
     credential => "credential",
     imports => "imports",
+    redaction_load => "redaction-load",
     saturation => "saturation",
     control_stall => "control-stall",
     cross_listener => "cross-listener",

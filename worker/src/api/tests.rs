@@ -183,3 +183,34 @@ fn a_parsed_message_prints_no_value() {
         assert!(!printed.contains(value));
     }
 }
+
+#[test]
+fn scope_intersection_of_large_distinct_lists_is_linear() {
+    // Disjoint-but-large lists: a quadratic membership scan needs billions of comparisons;
+    // bounded set membership finishes in milliseconds. The bound is far above the linear cost.
+    const ENTRIES: usize = 60_000;
+    let names = |prefix: &str| -> Vec<String> {
+        (0..ENTRIES).map(|n| format!("{prefix}-{n:08}")).collect()
+    };
+    let mut value = request("wasm", Some(catalog()));
+    value["projection"]["grants"] = json!([{
+        "family": "storage",
+        "interface": "falcone:host/storage@0.2.0",
+        "scope": {"prefixes": names("p")}
+    }]);
+    let mut shared = names("p");
+    shared.reverse();
+    shared.extend(names("q"));
+    value["credential"]["allowed_capabilities"] = json!([{
+        "family": "storage",
+        "interface": "falcone:host/storage@0.1.0",
+        "scope": {"prefixes": shared}
+    }]);
+    let request = parse_request(&bytes(&value)).unwrap();
+    let started = std::time::Instant::now();
+    let scopes = request.scopes();
+    let elapsed = started.elapsed();
+    assert_eq!(scopes.prefixes.len(), ENTRIES);
+    assert_eq!(scopes.prefixes[0], "p-00000000");
+    assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+}

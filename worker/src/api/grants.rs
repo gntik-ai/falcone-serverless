@@ -5,6 +5,7 @@
 use super::types::NonEmpty;
 use super::wire::{present, redacted, unit_debug};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
+use std::collections::HashSet;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GrantVersion {
@@ -168,12 +169,17 @@ fn entries_of(grants: &[Grant], family: Family) -> Vec<&String> {
 }
 
 /// The entries of `family` granted by both lists, in the revision's order, without repeats.
+/// Membership uses hash sets, so the work is linear in the size of the lists.
 pub(crate) fn intersect(projection: &[Grant], credential: &[Grant]) -> Scopes {
     let allowed = |family| {
-        let granted = entries_of(credential, family);
+        let granted: HashSet<&str> = entries_of(credential, family)
+            .into_iter()
+            .map(String::as_str)
+            .collect();
+        let mut seen: HashSet<&str> = HashSet::new();
         let mut kept: Vec<String> = Vec::new();
         for entry in entries_of(projection, family) {
-            if granted.contains(&entry) && !kept.contains(entry) {
+            if granted.contains(entry.as_str()) && seen.insert(entry.as_str()) {
                 kept.push(entry.clone());
             }
         }

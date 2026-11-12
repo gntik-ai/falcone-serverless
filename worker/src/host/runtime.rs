@@ -366,6 +366,13 @@ impl Host {
         self.cancelled.clone()
     }
 
+    /// Uses `flag` as this host's cancellation flag, so a caller that registered the flag
+    /// before building the host (to stay cancellable during admission) keeps one flag.
+    pub fn with_cancellation(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancelled = flag;
+        self
+    }
+
     pub fn uncertain_host_call(&self) -> bool {
         self.uncertain.load(Ordering::Acquire)
     }

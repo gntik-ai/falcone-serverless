@@ -236,13 +236,19 @@ an earlier step answers:
 3. `projection.engine_version` must be the pinned Wasmtime (`49.0.5`): otherwise
    `409 engine_version_mismatch`.
 4. An execution slot: otherwise `503 busy`. A second execute for the same activation and attempt
-   while one runs: `409 duplicate_attempt`.
+   while one runs: `409 duplicate_attempt`. From here the execution is registered for cancel, so a
+   cancel arriving while the request is still being admitted (scope intersection, compile) takes
+   effect: the execute answers `409 cancelled`. Scope intersection uses hash sets, so its work is
+   linear in the size of the grant lists.
 5. The component. The worker reads the validated component the platform staged at
    `<cache_path>/artifacts/<hex>.wasm`, where `<hex>` is the digest of `projection.component_digest`
    and its bytes must hash to it (`424 artifact_unavailable`, `424 artifact_digest_mismatch`).
    How artifacts reach that directory (a fetch from `falcone_api_endpoint`) is not part of this
    task. A tenant-supplied precompiled artifact is never deserialized: the component is validated
-   (`worker/src/artifact/validate.rs`) and compiled only by the trusted compiler.
+   (`worker/src/artifact/validate.rs`) and compiled only by the trusted compiler, the
+   `artifact-compile-child` binary the worker resolves beside its own executable. The production
+   worker image (`worker/Containerfile`) therefore ships both binaries in `/usr/local/bin`; the
+   offline test `worker/tests/production_image.rs` fails if it does not.
 6. **Declared imports**, before anything is compiled or instantiated. Every import of the
    component must be in `projection.imports` **and** in `ALLOWED_IMPORTS`; an empty `imports`
    means none. Otherwise `422 {"error":"undeclared_import","import":"<name>"}` and no guest code
@@ -300,7 +306,8 @@ references; one-character ones included) with `<redacted>` using one leftmost-lo
 multi-pattern matcher (Aho-Corasick) built once per execution, so the work is linear in the
 pattern bytes plus the line bytes; then truncate to 8192 characters again, because replacements
 can lengthen a line. The work has a fixed budget of 12 MiB (credential-string bytes plus line
-bytes). Over the budget, or if the matcher cannot be built, the logs are dropped and the result
+bytes). A credential string longer than any line can be (4 x 8192 bytes) cannot occur in a line and
+is skipped: it costs no matcher and no budget. Over the budget, or if the matcher cannot be built, the logs are dropped and the result
 carries the single line `<redacted>`: the failure mode never returns unredacted text. In a
 release build, redacting 400,000 distinct strings against 1000 maximum-length lines takes under
 one second.
@@ -311,7 +318,9 @@ one second.
 loopback TCP; the same cases (`worker/src/qualification/execution_api.rs`) run in the restricted
 `fs-test-run01-*` pod through `worker/tests/cluster_execute_api.rs` (gated by `FS_TEST_CLUSTER`).
 The cases, by acceptance criterion: `envelope` (identity), `runtime-mode`, `credential`,
-`imports`, `saturation` and `control-stall` (capacity, cancel under load, recovery),
+`imports`, `redaction-load` (many credential strings and maximum log volume through the whole
+request lifecycle, the fail-closed path, and a slot that is released),
+`saturation` and `control-stall` (capacity, cancel under load, recovery),
 `cross-listener`, and `headers`, `request`, `action-body`, `silent`, `drip`, `stalled-body`
 (every size ceiling and deadline, each followed by a successful execute and a successful
 cancel). Cases synchronize on the worker's events and on responses.

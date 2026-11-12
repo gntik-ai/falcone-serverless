@@ -27,6 +27,7 @@ cases! {
     runtime_mode_is_refused_first_and_refusals_pass_through => "runtime-mode",
     credential_is_absent_from_the_guest_and_redacted_from_logs => "credential",
     imports_must_be_declared_and_allowed => "imports",
+    redaction_under_load_is_bounded_and_releases_the_slot => "redaction-load",
     saturated_execute_listener_still_cancels_and_answers_busy => "saturation",
     stalled_control_connections_leave_executions_unaffected => "control-stall",
     each_listener_refuses_the_others_operations => "cross-listener",
