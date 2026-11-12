@@ -1004,6 +1004,46 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// Whether the peer closed `stream`: EOF or a terminal connection error. A read that times out or
+/// would block means the socket is still open; any reply bytes are drained first.
+fn peer_closed(stream: &TcpStream) -> bool {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(20)))
+        .unwrap();
+    let mut probe = [0u8; 256];
+    loop {
+        match (&*stream).read(&mut probe) {
+            Ok(0) => return true,
+            Ok(_) => continue,
+            Err(error) => {
+                return !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_live_silent_connection_is_not_reported_closed() {
+    let fixture = Fixture::start(1, HttpLimits::default());
+    let mut live = connect(fixture.addr());
+    // Headers sent, body pending: the worker keeps the socket open and sends nothing.
+    live.write_all(b"POST /v1/cancel HTTP/1.1\r\nContent-Length: 10\r\n\r\n")
+        .unwrap();
+    assert!(!peer_closed(&live));
+    // The same predicate does see an actual close.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    assert!(!peer_closed(&client));
+    drop(peer);
+    assert!(peer_closed(&client));
+}
+
 #[test]
 fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
     let concurrency = 2;
@@ -1045,14 +1085,10 @@ fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
         stalled.push(stream);
     }
     wait_for("an old stalled body was not replaced", || {
-        stalled[..reserve + 2].iter().all(|stream| {
-            stream
-                .set_read_timeout(Some(Duration::from_millis(20)))
-                .unwrap();
-            let mut probe = [0u8; 1];
-            matches!((&*stream).read(&mut probe), Ok(0) | Err(_))
-                && fixture.running().overflow() <= reserve
-        }) && fixture.running().overflow() == reserve
+        stalled[..reserve + 2]
+            .iter()
+            .all(|stream| peer_closed(stream) && fixture.running().overflow() <= reserve)
+            && fixture.running().overflow() == reserve
     });
     // No connection is held for them: the count is the running guests alone, so every control
     // slot is free, and cancels are accepted within the deadline.

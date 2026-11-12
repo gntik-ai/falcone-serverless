@@ -578,11 +578,25 @@ fn wait_for(deadline: Duration, reason: &str, mut done: impl FnMut() -> bool) ->
     Ok(())
 }
 
-/// Whether the peer closed `stream` (or it failed), without waiting for a reply.
+/// Whether the peer closed `stream` (EOF or a terminal connection error). A read that merely times
+/// out or would block means the socket is still open; any reply bytes are drained first.
 fn closed(stream: &TcpStream) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
-    let mut probe = [0u8; 1];
-    matches!((&*stream).read(&mut probe), Ok(0) | Err(_))
+    let mut probe = [0u8; 256];
+    loop {
+        match (&*stream).read(&mut probe) {
+            Ok(0) => return true,
+            Ok(_) => continue,
+            Err(error) => {
+                return !matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                );
+            }
+        }
+    }
 }
 
 /// Excess execute requests that send valid headers and then stall their bodies cannot take a
@@ -893,5 +907,22 @@ pub fn run(name: &str) -> ExitCode {
             );
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn closed_tells_a_live_socket_from_a_closed_one() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (peer, _) = listener.accept().unwrap();
+        // Negative control: an open, silent socket times out its read and is not closed.
+        assert!(!closed(&client));
+        drop(peer);
+        assert!(closed(&client));
     }
 }
