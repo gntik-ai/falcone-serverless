@@ -1531,7 +1531,7 @@ fn no_refusal_or_error_prints_a_request_value() {
         ));
     }
     // Credential-like values in every identifier a refusal carries.
-    let secret = "sk_live_9f8e7d6c5b4a3210";
+    let secret = "canary_9f8e7d6c5b4a3210";
     let mut leaked = fixture("request/refused/oci-mode");
     leaked["activation_id"] = json!(secret);
     leaked["credential"]["activation"] = json!(secret);
@@ -1550,7 +1550,7 @@ fn no_refusal_or_error_prints_a_request_value() {
             inner.refusal, inner.refusal, inner.attribution
         );
         assert_no_value(&printed, &document, &label);
-        assert!(!printed.contains("sk_live"), "{label}");
+        assert!(!printed.contains("canary_"), "{label}");
         // The serialized refusal keeps its contract fields and carries no request value.
         let serialized = serde_json::to_string(&inner.refusal).unwrap();
         assert_no_value(&serialized, &document, &label);
@@ -1563,26 +1563,26 @@ fn no_refusal_or_error_prints_a_request_value() {
     }
     // Malformed input never echoes a value, a field name or a serde message.
     let mut bad = fixture("request/valid/wasm-no-base");
-    bad["activation_id"] = json!("sk_live secret value");
-    bad["sk_live_unknown_field"] = json!("sk_live_9f8e7d6c5b4a3210");
+    bad["activation_id"] = json!("canary_ secret value");
+    bad["canary_unknown_field"] = json!("canary_9f8e7d6c5b4a3210");
     bad["credential"]["iss"] = json!(12345);
-    for document in [bad, json!({"sk_live_9f8e7d6c5b4a3210": 1})] {
+    for document in [bad, json!({"canary_9f8e7d6c5b4a3210": 1})] {
         let error = parse_request(&bytes(&document)).unwrap_err();
         let printed = format!("{error:?}|{error}");
-        assert!(!printed.contains("sk_live"), "{printed}");
+        assert!(!printed.contains("canary_"), "{printed}");
     }
-    let garbage = parse_request(b"{\"sk_live_9f8e7d6c5b4a3210\": nope").unwrap_err();
-    assert!(!format!("{garbage:?}|{garbage}").contains("sk_live"));
-    let Err(error) = parse_update(b"{\"sk_live_9f8e7d6c5b4a3210\": 1}") else {
+    let garbage = parse_request(b"{\"canary_9f8e7d6c5b4a3210\": nope").unwrap_err();
+    assert!(!format!("{garbage:?}|{garbage}").contains("canary_"));
+    let Err(error) = parse_update(b"{\"canary_9f8e7d6c5b4a3210\": 1}") else {
         panic!()
     };
-    assert!(!format!("{error:?}|{error}").contains("sk_live"));
+    assert!(!format!("{error:?}|{error}").contains("canary_"));
     // Results: a credential-like revision never shows in a rejected or accepted result.
     let (mut document, pinned) = unwrap_result(&fixture("result/cross/wrong-revision"));
     document["identity"]["function_revision"] = json!(secret);
     let projection = parse_projection(&bytes(&fixture(pinned.as_str().unwrap()))).unwrap();
     let error = parse_result(&bytes(&document), &projection).unwrap_err();
-    assert!(!format!("{error:?}|{error}").contains("sk_live"));
+    assert!(!format!("{error:?}|{error}").contains("canary_"));
 }
 
 // --- static checks of worker/src/api -------------------------------------------------------

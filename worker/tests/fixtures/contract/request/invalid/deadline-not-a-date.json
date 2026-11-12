@@ -6,8 +6,8 @@
   "attempt_number": 1,
   "deadline": "2026-02-30T12:00:00Z",
   "invocation": {
-    "invocation_key": "inv-synthetic-0007",
-    "idempotency_key": "idem-synthetic-0007",
+    "invocation_key": "inv-0000007",
+    "idempotency_key": "idem-0000007",
     "correlation_id": "corr-synthetic-0007"
   },
   "credential": {
