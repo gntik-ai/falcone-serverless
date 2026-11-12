@@ -1,0 +1,10 @@
+{
+  "version": "1",
+  "type": "update",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "att-synthetic-0001",
+  "sequence": 1,
+  "update": {
+    "kind": "log"
+  }
+}

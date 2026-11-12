@@ -2,6 +2,11 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
+// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
+// calls `api` removes this allowance.
+#[cfg_attr(not(test), allow(dead_code))]
+mod api;
+
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 

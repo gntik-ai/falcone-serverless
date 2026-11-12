@@ -1,0 +1,100 @@
+{
+  "version": "1",
+  "type": "execute",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "att-synthetic-0001",
+  "attempt_number": 1,
+  "deadline": "2026-11-11T12:00:30.250Z",
+  "invocation": {
+    "invocation_key": "inv-0000007",
+    "idempotency_key": "idem-0000007",
+    "correlation_id": "corr-synthetic-0007"
+  },
+  "credential": {
+    "iss": "dispatcher.synthetic.example",
+    "aud": "worker-pool.synthetic.example",
+    "tenant": "tenant-synthetic-0001",
+    "workspace": "ws-synthetic-0001",
+    "pool_profile": "profile-synthetic-small",
+    "revision": "rev-synthetic-0003",
+    "activation": "act-synthetic-0001",
+    "attempt": "att-synthetic-0001",
+    "iat": 1794398400,
+    "exp": 1794398460,
+    "allowed_capabilities": [
+      {
+        "family": "http",
+        "interface": "falcone:host/http@0.1.0",
+        "scope": {
+          "hosts": [
+            "api.example.test"
+          ]
+        }
+      },
+      {
+        "family": "storage",
+        "interface": "falcone:host/storage@0.1.0",
+        "scope": {
+          "prefixes": [
+            "tenants/synthetic/"
+          ]
+        }
+      }
+    ]
+  },
+  "projection": {
+    "revision": "rev-synthetic-0003",
+    "artifact_digest": "sha256:f1ddc5e62e3a9cab94e751a7e89ff4c5e02c1cee8aac0e31e91bcdfaa6eb5a25",
+    "component_digest": "sha256:69582f0b2bf1674b1e5d4c6bbb2dbe3690b47b28e8d45108b5d0aa395c4e7782",
+    "language_profile": {
+      "name": "javascript-profile-synthetic",
+      "version": "2026.11.0"
+    },
+    "engine_version": "49.0.5",
+    "wasi_version": "0.2.6",
+    "interface_version": "0.2.0",
+    "imports": [
+      "falcone:host/http@0.2.0",
+      "falcone:host/storage@0.2.0"
+    ],
+    "budgets": {
+      "fuel": 10000000,
+      "memory_bytes": 67108864,
+      "timeout_ms": 30000,
+      "max_host_calls": 1000
+    },
+    "grants": [
+      {
+        "family": "http",
+        "interface": "falcone:host/http@0.2.0",
+        "scope": {
+          "hosts": [
+            "api.example.test"
+          ]
+        }
+      },
+      {
+        "family": "storage",
+        "interface": "falcone:host/storage@0.2.0",
+        "scope": {
+          "prefixes": [
+            "tenants/synthetic/"
+          ]
+        },
+        "secretRef": {
+          "name": "storage-binding-synthetic",
+          "version": "3"
+        }
+      }
+    ]
+  },
+  "params": {
+    "__ow_method": "get",
+    "__ow_headers": {
+      "x-auth-tenant-id": "tenant-synthetic-0001",
+      "x-auth-user-id": "user-synthetic-0001"
+    },
+    "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+    "__ow_query": {}
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "version": "1",
+  "type": "cancel",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "att-synthetic-0001",
+  "cancel": {
+    "state": "requested",
+    "side_effects_reversed": true
+  }
+}

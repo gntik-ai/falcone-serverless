@@ -1,0 +1,34 @@
+{
+  "pinned": "projection/valid/wasm-catalog-base",
+  "result": {
+    "version": "1",
+    "type": "result",
+    "activation_id": "act-synthetic-0001",
+    "attempt_id": "att-synthetic-0001",
+    "attempt_number": 1,
+    "status": "success",
+    "result": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"openapi\":\"3.0.3\"}"
+    },
+    "logs": [
+      "handler started",
+      "handler finished"
+    ],
+    "identity": {
+      "function_revision": "rev-synthetic-0003",
+      "runtime_mode": "wasm",
+      "artifact_digest": "sha256:f1ddc5e62e3a9cab94e751a7e89ff4c5e02c1cee8aac0e31e91bcdfaa6eb5a25",
+      "wasmtime_version": "49.0.5",
+      "language_profile": {
+        "name": "javascript-profile-synthetic",
+        "version": "2026.11.0"
+      },
+      "interface_version": "0.2.0",
+      "base_digest": null
+    }
+  }
+}

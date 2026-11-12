@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:result",
+  "title": "ctr-worker-execution-api v1: result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "type",
+    "activation_id",
+    "attempt_id",
+    "attempt_number",
+    "status",
+    "result",
+    "logs",
+    "identity"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/version"
+    },
+    "type": {
+      "const": "result"
+    },
+    "activation_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_number": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+    },
+    "status": {
+      "enum": [
+        "success",
+        "failure"
+      ]
+    },
+    "result": {
+      "type": "object"
+    },
+    "class": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/class"
+    },
+    "logs": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {
+        "type": "string",
+        "maxLength": 8192
+      }
+    },
+    "identity": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/identity"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "success"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "result": {
+            "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/handler_result"
+          }
+        },
+        "not": {
+          "required": [
+            "class"
+          ]
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "class"
+        ],
+        "properties": {
+          "result": {
+            "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/failure"
+          },
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:execute",
+  "title": "ctr-worker-execution-api v1: execute attempt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "type",
+    "activation_id",
+    "attempt_id",
+    "attempt_number",
+    "deadline",
+    "invocation",
+    "credential",
+    "projection",
+    "params"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/version"
+    },
+    "type": {
+      "const": "execute"
+    },
+    "activation_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_number": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+    },
+    "deadline": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/timestamp"
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "invocation_key"
+      ],
+      "properties": {
+        "invocation_key": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+        },
+        "idempotency_key": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+        },
+        "correlation_id": {
+          "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+        }
+      }
+    },
+    "credential": {
+      "$ref": "https://falcone.dev/contracts/serverless/execution-credential/v1/claims"
+    },
+    "projection": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:projection"
+    },
+    "params": {
+      "type": "object",
+      "properties": {
+        "__ow_method": {
+          "type": "string"
+        },
+        "__ow_path": {
+          "type": "string"
+        },
+        "__ow_headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "__ow_query": {
+          "type": "object"
+        },
+        "__ow_body": {
+          "type": "string",
+          "maxLength": 1048576
+        }
+      },
+      "required": [
+        "__ow_path"
+      ]
+    }
+  }
+}

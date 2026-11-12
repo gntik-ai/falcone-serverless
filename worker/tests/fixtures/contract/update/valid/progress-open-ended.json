@@ -1,0 +1,11 @@
+{
+  "version": "1",
+  "type": "update",
+  "activation_id": "act-synthetic-0001",
+  "attempt_id": "att-synthetic-0001",
+  "sequence": 3,
+  "update": {
+    "kind": "progress",
+    "completed": 3
+  }
+}

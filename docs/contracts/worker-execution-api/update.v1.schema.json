@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:falcone:contracts:worker-execution-api:1:update",
+  "title": "ctr-worker-execution-api v1: execution update",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "type",
+    "activation_id",
+    "attempt_id",
+    "sequence",
+    "update"
+  ],
+  "properties": {
+    "version": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/version"
+    },
+    "type": {
+      "const": "update"
+    },
+    "activation_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "attempt_id": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/id"
+    },
+    "sequence": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+    },
+    "update": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind"
+          ],
+          "properties": {
+            "kind": {
+              "const": "heartbeat"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "completed"
+          ],
+          "properties": {
+            "kind": {
+              "const": "progress"
+            },
+            "completed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "total": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "checkpoint_ref"
+          ],
+          "properties": {
+            "kind": {
+              "const": "checkpoint"
+            },
+            "checkpoint_ref": {
+              "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/text"
+            }
+          }
+        }
+      ]
+    }
+  }
+}
