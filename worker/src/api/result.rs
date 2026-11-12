@@ -176,3 +176,35 @@ impl Identity {
         }
     }
 }
+
+/// Build a successful activation envelope from the handler's legacy JSON result.
+/// The runtime identity comes from the pin and the worker's compiled-in engine version.
+pub fn build_result(
+    request: &ExecuteRequest,
+    handler: &[u8],
+    logs: Vec<String>,
+) -> Result<ExecutionResult, Malformed> {
+    let projection = &request.projection;
+    let result = ExecutionResult {
+        version: Version::Only,
+        message: ResultType::Only,
+        activation_id: request.activation_id().clone(),
+        attempt_id: request.attempt_id().clone(),
+        attempt_number: request.attempt_number(),
+        status: Status::Success,
+        result: Outcome::Handler(serde_json::from_slice(handler)?),
+        class: None,
+        logs: Logs::new(request.redact_logs(logs))?,
+        identity: Identity {
+            function_revision: projection.revision.clone(),
+            runtime_mode: projection.runtime_mode,
+            artifact_digest: projection.artifact_digest.clone(),
+            base_digest: projection.base_digest().cloned(),
+            wasmtime_version: Text::fixed(crate::artifact::cache_key::ENGINE_VERSION),
+            language_profile: projection.language_profile.clone(),
+            interface_version: projection.interface_version,
+        },
+    };
+    result.check(request)?;
+    Ok(result)
+}

@@ -74,3 +74,34 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+impl CancelMessage {
+    pub(crate) fn is_requested(&self) -> bool {
+        matches!(self.cancel, Cancel::Requested {})
+    }
+    pub(crate) fn reply(mut self, acknowledged: bool) -> Self {
+        self.cancel = if acknowledged {
+            Cancel::Acknowledged {}
+        } else {
+            Cancel::Uncertain {}
+        };
+        self
+    }
+}
+
+impl CancelMessage {
+    pub(crate) fn key(&self) -> (String, String) {
+        (
+            self.activation_id.as_str().to_owned(),
+            self.attempt_id.as_str().to_owned(),
+        )
+    }
+}
+impl UpdateMessage {
+    pub(crate) fn key(&self) -> (String, String) {
+        (
+            self.activation_id.as_str().to_owned(),
+            self.attempt_id.as_str().to_owned(),
+        )
+    }
+}

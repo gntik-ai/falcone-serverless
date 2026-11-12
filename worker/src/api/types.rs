@@ -272,3 +272,30 @@ impl<'de> Deserialize<'de> for Logs {
     }
 }
 redacted!(Logs);
+
+impl Digest {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+impl Text {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Logs {
+    pub(crate) fn new(lines: Vec<String>) -> Result<Self, super::Malformed> {
+        if lines.len() <= 1000 && lines.iter().all(|line| line.chars().count() <= 8192) {
+            Ok(Self(lines))
+        } else {
+            Err(super::constraint("result.logs"))
+        }
+    }
+}
+
+impl Id {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}

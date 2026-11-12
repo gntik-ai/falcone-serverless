@@ -5,7 +5,7 @@ use super::projection::Projection;
 use super::refusal::{Code, Reason, Refusal};
 use super::types::{Deadline, Id, NonEmpty, Positive, RuntimeMode, Seconds, Version};
 use super::wire::{constant, present, redacted};
-use super::{Attribution, Refused, Rejection, constraint};
+use super::{Attribution, Malformed, Refused, Rejection, constraint};
 use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -182,5 +182,65 @@ impl ExecuteRequest {
             .check()
             .map_err(|refusal| refuse(&self, refusal))?;
         Ok(self)
+    }
+}
+
+impl ExecuteRequest {
+    pub(crate) fn key(&self) -> (String, String) {
+        (
+            self.activation_id.as_str().to_owned(),
+            self.attempt_id.as_str().to_owned(),
+        )
+    }
+    /// Only params and the explicitly guest-visible invocation identity cross the host boundary.
+    /// Credential claims are deliberately not part of this adapter.
+    pub(crate) fn params_bytes(&self) -> Result<Vec<u8>, Malformed> {
+        serde_json::to_vec(&self.params).map_err(Into::into)
+    }
+    pub(crate) fn invocation_identity(&self) -> (String, String, String) {
+        (
+            self.invocation.invocation_key.as_str().to_owned(),
+            self.attempt_id.as_str().to_owned(),
+            self.invocation
+                .idempotency_key
+                .as_ref()
+                .map(|key| key.as_str().to_owned())
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl ExecuteRequest {
+    pub(super) fn redact_logs(&self, logs: Vec<String>) -> Vec<String> {
+        fn strings(value: &Value, found: &mut Vec<String>) {
+            match value {
+                Value::String(value) if !value.is_empty() => {
+                    found.push(value.clone());
+                    // Bindings format structured logs as JSON. Scrub the encoded form
+                    // too, so quotes, backslashes and control characters cannot bypass it.
+                    if let Ok(encoded) = serde_json::to_string(value) {
+                        found.push(encoded[1..encoded.len() - 1].to_owned());
+                    }
+                }
+                Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
+                Value::Object(values) => values.values().for_each(|value| strings(value, found)),
+                _ => {}
+            }
+        }
+        let Ok(claims) = serde_json::to_value(&self.credential) else {
+            return vec!["<redacted>".into()];
+        };
+        let mut secrets = Vec::new();
+        strings(&claims, &mut secrets);
+        secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        logs.into_iter()
+            .take(1000)
+            .map(|mut line| {
+                for secret in &secrets {
+                    line = line.replace(secret, "<redacted>");
+                }
+                line.chars().take(8192).collect()
+            })
+            .collect()
     }
 }

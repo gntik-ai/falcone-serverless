@@ -4,9 +4,9 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
+`ctr-worker-execution-api` under ADR 0010 D1. `worker/src/api` defines the messages and parsers;
+`worker/src/server` serves them through the pod-local HTTP transport described below. The
+dispatcher adopts this transport in INV-01. The
 [OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
@@ -124,6 +124,83 @@ pinned base without `base_digest`, a `base_digest` without a pinned base, and a 
 `null` in either case are all rejected. The base digest is `digest` of a catalog base and
 `image_digest` of a BYO base. A result parsed against a request must also repeat its
 `activation_id`, `attempt_id` and `attempt_number`.
+
+## Pod-local HTTP transport (RUN-01)
+
+Start the worker with `falcone-serverless-worker serve CONFIG`, where CONFIG is the versioned
+[RuntimeConfig TOML](../worker-runtime-config.md). It listens on `listen_port` inside the pod.
+The existing version, configuration-check and explicit execute commands retain their behavior.
+This is an HTTP/1.1 JSON POST transport: one request per connection, `Content-Length` required,
+`Content-Type: application/json`, no transfer encoding, at most 16 KiB of headers and 8 MiB of
+encoded request data. Connections close after the response. Socket reads and writes have a
+5 second inactivity allowance; these transport bounds do not replace the legacy body checks.
+
+| Path | Operation |
+| --- | --- |
+| `/v1/execute` | Parse/admit an execute message, validate the component and declared imports, compile through the trusted child, then create a fresh instance. A successful response is HTTP 200 with the result envelope above. |
+| `/v1/update` | Validate an update for an active activation/attempt and acknowledge its transport with the unchanged update message: HTTP 202 during setup, HTTP 200 after the handler is prepared. An unknown attempt receives HTTP 400. This endpoint makes no durable activation-state claim; Falcone owns persistence and dispatch. |
+| `/v1/cancel` | Parse a requested cancel and reply with the same activation/attempt and state acknowledged or uncertain. Unknown/already-finished attempts return uncertain. Other input states are rejected. |
+
+The trusted embedding/intake stages raw components in
+`cache_path/components/<component_digest hex>.wasm`; the request selects a file only through its
+validated digest. The worker checks the actual digest and component type. It checks every import
+against **both** `ALLOWED_IMPORTS` and `projection.imports`, after validation and before opening
+the native cache, spawning a compiler or instantiating. Empty declarations admit no imports.
+An import rejected by either check receives HTTP 422 `undeclared_import`; a declared allowed
+component proceeds. This check runs again for each request, including native-cache hits.
+The native cache is process-owned under `cache_path/native`; native code comes only from the
+trusted `artifact-compile-child` beside the worker executable, never from a request-supplied path
+or tenant precompiled artifact. The engine pin must equal the worker's compiled-in Wasmtime
+version. Identity fields come from the projection, with that compiled-in engine version.
+
+At most `concurrency` execute requests are admitted (zero is invalid in serve mode). Running
+execute requests retain their own capacity through completion. **Four fixed control slots** are
+reserved for parsing/control connections; this reserve is not operator-configurable. The total
+connection limit is `concurrency + 4`, including when concurrency is 64 or greater. An execute
+over capacity receives HTTP 503 `busy` immediately after its headers, without waiting for its
+body, compiling or retaining a connection while waiting for an execution slot. Socket timeouts
+bound incomplete control requests.
+
+Cancellation never waits for the compiler lock or an execution slot. Its processing deadline is
+`RuntimeConfig.cancel_reserve_ms` (default **5000 ms**), measured after the cancel is parsed; socket
+transfer time is separate. The worker signals the attempt's cancellation flag and waits at most
+that interval for completion. A completed interruption without an uncertain host outcome reports
+`acknowledged`; otherwise it reports `uncertain` by that deadline. Cancellation interrupts guest
+code through the existing epoch mechanism; it never claims external side effects were undone.
+Host-call deadlines and full drain/probe/limit policy remain RUN-02 work. Existing host safety
+ceilings remain enforced.
+
+Admission refusals use the exact envelopes, statuses and reasons in the tables below. Malformed
+messages return HTTP 400 `invalid_request`. Component/compile/handler failures use the existing
+worker diagnostic code (for example HTTP 422 `undeclared_import` or `cancelled`) as a transport
+error object; they do not invent a new failure envelope code or change the v1 schemas.
+
+The execution credential remains in host-side request state. Only action params and the explicit
+invocation identity enter the guest; no credential is placed in store context, WASI environment,
+preopens or the guest log binding. Guest log fields retain the host's redaction and returned logs
+also redact credential claim values. Structured worker diagnostics contain fixed events/statuses,
+and the serve panic hook never formats panic payloads. No request/error values are logged.
+
+Dispatcher-to-worker authentication and credential verification for platform capabilities remain
+undefined on this Wasm path (finding for `gntik-ai/falcone`, INV-01). Platform bindings therefore
+fail closed; this service grants no storage, HTTP, event, workflow or secret authority from an
+unverified claim. ADR 0006 remains Proposed. Pools stay at zero until restricted RUN-01
+qualification, the R3 second review (explicitly checking imports and control capacity), and
+operator approval. This change does not authorize deployment.
+
+`worker/tests/execute_api_local.rs` exercises HTTP framing/admission with an in-memory transport,
+import preflight, identity construction, credential redaction and capacity at 1 and 65 without
+executing guests. `worker/tests/cluster_execute_api.rs` uses the existing namespace harness with
+`fs-test-run01-<run-id>` and the `--execution-api` qualification runner. It covers live HTTP,
+identity/base pins, all import refusals plus declared/allowed success, forbidden environment/files
+imports, a guest memory scan with a positive canary control, guest/worker logs, and blocked-guest
+saturation/cancel at 1 and 65. Claims are synthetic fixtures; no real credential is retrieved.
+The harness enforces restricted PSS, arbitrary non-root UID, RuntimeDefault seccomp, read-only
+root filesystem and owned namespace cleanup on success/failure; shared mode retains its existing
+run-label ownership checks. Run with `FS_TEST_CLUSTER=1`, a digest-pinned `FS_TEST_WAS02_IMAGE`
+and the existing kubeconfig/namespace-mode settings, using
+`cargo test --locked -p falcone-serverless-worker --test cluster_execute_api -- --include-ignored`.
+An unset gate visibly skips live qualification.
 
 ## Failure codes and classes
 

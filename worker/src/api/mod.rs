@@ -22,7 +22,7 @@ pub use messages::{CancelMessage, UpdateMessage};
 pub use projection::Projection;
 pub use refusal::Refusal;
 pub use request::ExecuteRequest;
-pub use result::{ExecutionResult, Pinned};
+pub use result::{ExecutionResult, Pinned, build_result};
 
 use refusal::{Code, Reason};
 use serde::Deserialize;

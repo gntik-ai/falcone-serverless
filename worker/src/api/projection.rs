@@ -91,3 +91,27 @@ impl Projection {
         self.base.as_ref().map(Base::digest)
     }
 }
+
+impl Projection {
+    pub(crate) fn component_digest(&self) -> &str {
+        self.component_digest.as_str()
+    }
+    /// Check validated component import names against this revision's declarations.
+    /// Global import/type validation must precede this per-projection admission check.
+    pub fn check_imports(&self, imports: &[String]) -> Result<(), Malformed> {
+        if imports
+            .iter()
+            .all(|name| self.imports.iter().any(|import| import.as_str() == name))
+        {
+            Ok(())
+        } else {
+            Err(constraint("projection.imports"))
+        }
+    }
+}
+
+impl Projection {
+    pub(crate) fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+}

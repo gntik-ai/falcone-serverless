@@ -1,16 +1,14 @@
 //! Falcone serverless execution worker.
 //!
-//! Explicit local handler execution; no runtime adapter or platform routing.
+//! Pod-local execution API and explicit handler execution; Falcone owns platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
+use falcone_serverless_worker::{config, server};
+
+#[cfg(test)]
+mod config_cli_tests;
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
-
-mod config;
 
 #[cfg(test)]
 mod runtime_metrics;
@@ -25,11 +23,7 @@ pub fn version() -> &'static str {
 
 /// Run CLI arguments excluding the executable name, including explicit execution.
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
-    run_with_io(
-        args,
-        &mut std::io::stdout().lock(),
-        &mut std::io::stderr().lock(),
-    )
+    run_with_io(args, &mut std::io::stdout(), &mut std::io::stderr())
 }
 
 /// CLI I/O boundary, also usable in-process without redirecting global streams.
@@ -58,6 +52,13 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let config = config::load_from_str(&input)?;
             serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
         }
+        [mode, path] if mode == "serve" => {
+            // The default panic hook formats arbitrary payloads. Service diagnostics never do.
+            std::panic::set_hook(Box::new(|_| eprintln!("{{\"event\":\"worker_panic\"}}")));
+            let input = std::fs::read_to_string(path).map_err(|_| "config_unavailable")?;
+            let config = config::load_from_str(&input).map_err(|_| "invalid_config")?;
+            return server::serve(config).map_err(str::to_owned);
+        }
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
         }
@@ -66,7 +67,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve CONFIG | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
