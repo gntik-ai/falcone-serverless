@@ -367,6 +367,14 @@ impl Cluster for RealCluster {
                 .and_then(|status| status.phase)
                 .unwrap_or_default();
             if phase == "Failed" {
+                // Keep what the pod recorded before the namespace is torn down; the pod's
+                // failure is the result either way.
+                if let Ok(logs) = self
+                    .runtime
+                    .block_on(pods.logs(name, &LogParams::default()))
+                {
+                    let _ = retain_evidence(&logs);
+                }
                 return Err("WAS-02 qualification pod failed".into());
             }
             if phase == "Succeeded" {
@@ -374,6 +382,7 @@ impl Cluster for RealCluster {
                     .runtime
                     .block_on(pods.logs(name, &LogParams::default()))
                     .map_err(api_error)?;
+                retain_evidence(&logs)?;
                 return if logs.lines().any(|line| {
                     serde_json::from_str::<serde_json::Value>(line).is_ok_and(|record| {
                         record == serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})
@@ -390,6 +399,71 @@ impl Cluster for RealCluster {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
+}
+
+/// The case records of a qualification pod's log, reduced to the fields that are safe to keep:
+/// `case`, `group`, `status`, `elapsed_ms` and a short `reason` token. Nothing else of the log
+/// (which could carry request data) is retained.
+fn evidence_records(logs: &str) -> Vec<serde_json::Value> {
+    logs.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|record| record["case"].is_string())
+        .map(|record| {
+            let mut kept = serde_json::Map::new();
+            for field in ["case", "group", "status"] {
+                if let Some(text) = record[field].as_str() {
+                    let text: String = text
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                        .take(64)
+                        .collect();
+                    kept.insert(field.into(), text.into());
+                }
+            }
+            if let Some(reason) = record["reason"].as_str() {
+                let reason: String = reason
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+                    .take(64)
+                    .collect();
+                kept.insert("reason".into(), reason.into());
+            }
+            if let Some(elapsed) = record["elapsed_ms"].as_u64() {
+                kept.insert("elapsed_ms".into(), elapsed.into());
+            }
+            serde_json::Value::Object(kept)
+        })
+        .collect()
+}
+
+/// Where the sanitized case records are kept: `FS_TEST_EVIDENCE_DIR`, else the cargo target's
+/// scratch directory for these tests.
+fn evidence_path() -> std::path::PathBuf {
+    let directory = std::env::var_os("FS_TEST_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+    directory.join(format!("{QUALIFICATION_CHECK}-evidence.jsonl"))
+}
+
+/// Prints the case records and appends them to the evidence file, before the pod and its
+/// namespace are deleted. A log without case records writes nothing.
+fn retain_evidence(logs: &str) -> Result<(), String> {
+    use std::io::Write;
+    let records = evidence_records(logs);
+    if records.is_empty() {
+        return Ok(());
+    }
+    let path = evidence_path();
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|_| "qualification evidence file not writable")?;
+    for record in &records {
+        println!("{record}");
+        writeln!(file, "{record}").map_err(|_| "qualification evidence not retained")?;
+    }
+    Ok(())
 }
 
 #[test]

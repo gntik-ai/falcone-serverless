@@ -37,6 +37,7 @@ pub const CASES: &[Case] = &[
     ("imports", "api", imports),
     ("saturation", "saturation", saturation),
     ("saturation-stalled", "saturation", saturation_stalled),
+    ("saturation-headers", "saturation", saturation_headers),
     ("http-headers", "http", http_headers),
     ("http-request", "http", http_request),
     ("http-action-body", "http", http_action_body),
@@ -265,7 +266,10 @@ impl Harness {
         let cancel = post(self.addr(), "/v1/cancel", &cancel_body(&request))?;
         check(cancel.status == 200, "cancel_after_case")?;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while self.running.slots() != (0, 0, 0) || self.running.overflow() != 0 {
+        while self.running.slots() != (0, 0, 0)
+            || self.running.overflow() != 0
+            || self.running.heads() != 0
+        {
             check(Instant::now() < deadline, "slot_leaked")?;
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -516,23 +520,7 @@ fn saturation() -> Outcome {
         )?;
     }
     // A cancel is accepted with every execute slot held, and takes effect within its deadline.
-    for (request, handle) in spinners {
-        let started = Instant::now();
-        let cancel = post(harness.addr(), "/v1/cancel", &cancel_body(&request))?;
-        check(
-            cancel.status == 200 && cancel.json()?["cancel"]["state"] == "acknowledged",
-            "cancel_not_acknowledged",
-        )?;
-        check(
-            started.elapsed() < Duration::from_secs(5),
-            "cancel_over_deadline",
-        )?;
-        let ended = handle.join().map_err(|_| "spinner_panicked")??;
-        check(
-            ended.json()?["result"]["detail"]["reason"] == "cancelled",
-            "execution_not_cancelled",
-        )?;
-    }
+    cancel_all(&harness, spinners, "cancel_not_acknowledged")?;
     harness.recovered()
 }
 
@@ -559,63 +547,14 @@ fn spin(harness: &Harness, concurrency: u32) -> Result<Vec<Spinner>, String> {
     Ok(spinners)
 }
 
-/// Excess execute requests that send valid headers and then stall their bodies cannot take a
-/// connection a cancel needs: with every execute slot held by a blocked guest and more stalled
-/// executes than the overflow pool holds, a cancel is still accepted within its deadline, the
-/// executes beyond the pool get `503 busy` at once, and everything recovers.
-fn saturation_stalled() -> Outcome {
-    let concurrency = 2u32;
-    let mut harness = Harness::start(concurrency, HttpLimits::default())?;
-    let spinners = spin(&harness, concurrency)?;
-    let stalled = 2 * CONTROL_RESERVE as usize + 2;
-    // One at a time: the first `CONTROL_RESERVE` fill the pool and wait; each one after that is
-    // answered busy at once, its body unread.
-    let reserve = CONTROL_RESERVE as usize;
-    let mut streams = Vec::new();
-    for n in 0..stalled {
-        let mut stream = connect(harness.addr())?;
-        stream
-            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
-            .map_err(|_| "write")?;
-        if n < reserve {
-            let deadline = Instant::now() + Duration::from_secs(4);
-            while harness.running.overflow() < n + 1 {
-                check(Instant::now() < deadline, "overflow_pool_not_filled")?;
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            streams.push(stream);
-        } else {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .map_err(|_| "timeout")?;
-            let reply = read_reply(&mut stream).ok_or("busy_not_immediate")?;
-            check(
-                reply.status == 503 && reply.json()?["code"] == "busy",
-                "stalled_execute_reply",
-            )?;
-        }
-    }
-    // The stalled executes hold no connection: once those beyond the pool have been answered
-    // busy and closed, only the running guests are counted.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while harness.running.slots().0 != concurrency as usize {
-        check(
-            Instant::now() < deadline,
-            "stalled_execute_held_a_connection",
-        )?;
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    check(
-        harness.running.slots() == (concurrency as usize, concurrency as usize, 0),
-        "stalled_execute_held_a_connection",
-    )?;
-    // Cancels are accepted while the stalled executes are still open, within the deadline.
+/// Cancels each blocked guest and checks it takes effect within the deadline.
+fn cancel_all(harness: &Harness, spinners: Vec<Spinner>, starved: &str) -> Outcome {
     for (request, handle) in spinners {
         let started = Instant::now();
         let cancel = post(harness.addr(), "/v1/cancel", &cancel_body(&request))?;
         check(
             cancel.status == 200 && cancel.json()?["cancel"]["state"] == "acknowledged",
-            "cancel_starved_by_stalled_executes",
+            starved,
         )?;
         check(
             started.elapsed() < Duration::from_secs(5),
@@ -627,12 +566,123 @@ fn saturation_stalled() -> Outcome {
             "execution_not_cancelled",
         )?;
     }
-    drop(streams);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while harness.running.overflow() != 0 {
-        check(Instant::now() < deadline, "overflow_slot_leaked")?;
+    Ok(())
+}
+
+fn wait_for(deadline: Duration, reason: &str, mut done: impl FnMut() -> bool) -> Outcome {
+    let until = Instant::now() + deadline;
+    while !done() {
+        check(Instant::now() < until, reason)?;
         std::thread::sleep(Duration::from_millis(10));
     }
+    Ok(())
+}
+
+/// Whether the peer closed `stream` (or it failed), without waiting for a reply.
+fn closed(stream: &TcpStream) -> bool {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+    let mut probe = [0u8; 1];
+    matches!((&*stream).read(&mut probe), Ok(0) | Err(_))
+}
+
+/// Excess execute requests that send valid headers and then stall their bodies cannot take a
+/// connection a cancel needs: with every execute slot held by a blocked guest and the overflow
+/// pool full of stalled bodies, a complete non-wasm request still gets its non-retryable 409 and a
+/// wasm one `503 busy`, more stalled bodies replace the oldest ones, a cancel is still accepted
+/// within its deadline, and everything recovers.
+fn saturation_stalled() -> Outcome {
+    let concurrency = 2u32;
+    let mut harness = Harness::start(concurrency, HttpLimits::default())?;
+    let spinners = spin(&harness, concurrency)?;
+    let reserve = CONTROL_RESERVE as usize;
+    let stall = |harness: &Harness| -> Result<TcpStream, String> {
+        let mut stream = connect(harness.addr())?;
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
+            .map_err(|_| "write")?;
+        Ok(stream)
+    };
+    // One at a time: each waits in the overflow pool until the pool is full.
+    let mut streams = Vec::new();
+    for n in 0..reserve {
+        streams.push(stall(&harness)?);
+        wait_for(Duration::from_secs(4), "overflow_pool_not_filled", || {
+            harness.running.overflow() == n + 1
+        })?;
+    }
+    // With the pool full, a complete request is still read: the contract refuses a runtime mode
+    // other than wasm first, and a wasm request is answered busy.
+    let mut other = request(61, ECHO, &[], None);
+    other["projection"]["runtime_mode"] = json!("oci");
+    let refused = harness.execute(&other)?;
+    let body = refused.json()?;
+    let envelope = body.get("result").unwrap_or(&body);
+    check(
+        refused.status == 409
+            && envelope["detail"]["reason"] == "runtime_mode_not_wasm"
+            && envelope["retryable"] == false,
+        "non_wasm_with_full_overflow",
+    )?;
+    let busy = harness.execute(&request(62, ECHO, &[], None))?;
+    check(
+        busy.status == 503 && busy.json()?["code"] == "busy",
+        "busy_with_full_overflow",
+    )?;
+    // More stalled bodies than the pool holds replace the oldest instead of queueing behind them.
+    for _ in 0..reserve + 2 {
+        streams.push(stall(&harness)?);
+    }
+    wait_for(
+        Duration::from_secs(4),
+        "old_stalled_body_not_replaced",
+        || streams[..reserve + 2].iter().all(closed) && harness.running.overflow() == reserve,
+    )?;
+    // The stalled executes hold no connection: only the running guests are counted.
+    check(
+        harness.running.slots() == (concurrency as usize, concurrency as usize, 0),
+        "stalled_execute_held_a_connection",
+    )?;
+    // Cancels are accepted while the stalled executes are still open, within the deadline.
+    cancel_all(&harness, spinners, "cancel_starved_by_stalled_executes")?;
+    drop(streams);
+    wait_for(Duration::from_secs(10), "overflow_slot_leaked", || {
+        harness.running.overflow() == 0
+    })?;
+    harness.no_guest_ran_beyond(concurrency as usize)?;
+    harness.recovered()
+}
+
+/// Peers that connect and never finish their request line and headers cannot take the capacity a
+/// cancel needs: with every execute slot held by a blocked guest and more incomplete heads than
+/// the connection limit, a cancel is still accepted within its deadline, whichever route the
+/// stalled heads announce, and everything recovers.
+fn saturation_headers() -> Outcome {
+    let concurrency = 2u32;
+    let mut harness = Harness::start(concurrency, HttpLimits::default())?;
+    let spinners = spin(&harness, concurrency)?;
+    let limit = harness.running.connection_limit();
+    let mut streams = Vec::new();
+    for route in ["execute", "cancel"] {
+        for _ in 0..limit + 3 {
+            let mut stream = connect(harness.addr())?;
+            stream
+                .write_all(format!("POST /v1/{route} HTTP/1.1\r\n").as_bytes())
+                .map_err(|_| "write")?;
+            streams.push(stream);
+        }
+        wait_for(Duration::from_secs(4), "header_pool_not_filled", || {
+            harness.running.heads() >= limit
+        })?;
+        check(
+            harness.running.slots() == (concurrency as usize, concurrency as usize, 0),
+            "stalled_head_held_a_slot",
+        )?;
+    }
+    cancel_all(&harness, spinners, "cancel_starved_by_stalled_heads")?;
+    drop(streams);
+    wait_for(Duration::from_secs(10), "head_slot_leaked", || {
+        harness.running.heads() == 0
+    })?;
     harness.no_guest_ran_beyond(concurrency as usize)?;
     harness.recovered()
 }

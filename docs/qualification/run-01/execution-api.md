@@ -21,6 +21,11 @@ A passing case prints `{"case", "group", "status": "passed", "elapsed_ms"}` and 
 `{"check": "execute_api", "status": "passed"}`; the harness requires the second record. The cases of
 the `saturation` and `http` groups are recorded together.
 
+The cluster test keeps these records before it deletes the pod and its namespace: the sanitized
+`{"case", "group", "status", "elapsed_ms"}` (and a short `reason` token on a failure) of every case are
+printed and appended to `execute_api-evidence.jsonl` in `FS_TEST_EVIDENCE_DIR` (default: the cargo target's
+`tmp` directory). Nothing else of the pod's log is kept.
+
 | Case | Group | Criterion |
 | --- | --- | --- |
 | `identity` | api | AC1: result envelope, activation and attempt fields, every identity field matches the projection, `parse_result` accepts it against the request |
@@ -29,7 +34,8 @@ the `saturation` and `http` groups are recorded together.
 | `credential` | api | AC4: no ambient environment or preopen (declared `wasi:` imports are refused), no credential in the first 4 KiB of guest memory, credential redacted from logs, absent from the worker's environment |
 | `imports` | api | AC5: `undeclared_import` (422) for `imports: []`, for a list missing an import and for a declared import that is not allow-listed, with no compile or instance; a fully declared component runs |
 | `saturation` | saturation | AC6, AC9: `concurrency` guests that have reported progress through the update operation (so are running, not merely admitted) and then block, an extra execute gets `503 busy` at once, a cancel is acknowledged within the deadline while every execute slot is held, then recovery |
-| `saturation-stalled` | saturation | AC6, AC9: with every execute slot held by a blocked guest, more execute requests than the overflow pool holds, sent one at a time send valid headers and stall their bodies; they hold no connection (only the running guests are counted), those beyond the pool get `503 busy` at once, and a cancel is acknowledged within the deadline while the stalled bodies are still open, then recovery |
+| `saturation-stalled` | saturation | AC2, AC6, AC9: with every execute slot held by a blocked guest and the overflow pool full of execute requests that sent valid headers and stalled their bodies, a complete non-wasm request still gets its non-retryable 409 and a wasm one `503 busy`; more stalled bodies replace the oldest ones; they hold no connection (only the running guests are counted); a cancel is acknowledged within the deadline while the stalled bodies are still open, then recovery |
+| `saturation-headers` | saturation | AC6, AC9: with every execute slot held by a blocked guest, more peers than the connection limit send an incomplete request line and headers (announcing execute, then cancel); they hold no execute or control slot, the head pool replaces its oldest member, a cancel is acknowledged within the deadline, then recovery |
 | `http-headers` | http | AC8: headers over `MAX_HEADERS` (16 KiB) get 431 or a close, no guest |
 | `http-request` | http | AC8: a request over `MAX_REQUEST` (8 MiB) gets 413 before its body is read |
 | `http-action-body` | http | AC8: an action body over 1 MiB gets the contract's `413 body_too_large`, no guest, no artifact fetch |

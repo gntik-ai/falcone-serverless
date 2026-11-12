@@ -5,7 +5,9 @@
 //! trusted compile child, never loads a tenant precompiled artifact, and keeps the execution
 //! credential in the host binding layer (`binding`). Capacity is split in `admission`: execute
 //! requests are bounded by `concurrency`, a fixed reserve of control slots serves cancel and
-//! update, and the connection limit is the sum of the two.
+//! update, and the connection limit is the sum of the two. Connections still reading their head,
+//! and excess execute requests still reading their body, wait in small pools outside that count
+//! whose oldest member is closed to make room, so none of them can occupy what a cancel needs.
 //!
 //! Authentication of the dispatcher is not part of this service (INV-01); the pool runs only
 //! behind the network policy of its deployment.
@@ -24,7 +26,7 @@ pub use http::{
 };
 
 use crate::cache::Cache;
-use admission::{Admission, Connection};
+use admission::{Admission, Admit, Connection};
 use execute::Reply;
 use http::{Reject, Route};
 use registry::Registry;
@@ -156,6 +158,11 @@ impl Running {
         self.shared.admission.slots()
     }
 
+    /// Connections still reading their request line and headers; at most the connection limit.
+    pub fn heads(&self) -> usize {
+        self.shared.admission.heads()
+    }
+
     /// Excess execute requests being read outside the connection count; at most the control
     /// reserve.
     pub fn overflow(&self) -> usize {
@@ -199,8 +206,9 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, stop: &AtomicBool) 
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        // At the connection limit the connection is closed before a byte is read.
-        let Some(connection) = shared.admission.connect() else {
+        // A new connection reads its head in the head pool, outside the execute and control
+        // capacity; a full pool makes room by closing its oldest member.
+        let Some(connection) = shared.admission.connect(&stream) else {
             continue;
         };
         let shared = shared.clone();
@@ -217,31 +225,30 @@ fn serve_connection(shared: &Shared, mut stream: TcpStream, mut connection: Conn
         Ok(head) => head,
         Err(reject) => return refuse(&mut stream, reject, limits),
     };
-    // The slot is claimed before the body is read, and execute never claims a control slot. A
-    // control request over capacity is answered `busy` at once. The contract refuses a
-    // `runtime_mode` other than `wasm` before capacity is considered, which needs the body of an
-    // execute request over capacity: it is read outside the connection count, in the bounded
-    // overflow pool, so it never occupies a connection a cancel needs; over the pool it is
-    // answered `busy` at once, body unread.
+    // The route is known, so capacity is claimed before the body is read, and execute never
+    // claims a control slot. The contract refuses a `runtime_mode` other than `wasm` before
+    // capacity is considered, which needs the body of an execute request over capacity: it is read
+    // in the bounded overflow pool, outside the connection count, so it never occupies a
+    // connection a cancel needs, and a stalled one is replaced by the next. A control request
+    // with the whole reserve running is answered `busy` at once.
     let route = head.route;
-    let (admitted, reading) = match route {
-        Route::Execute => {
-            let admitted = connection.take_execute();
-            (admitted, admitted || connection.take_overflow())
-        }
-        Route::Update | Route::Cancel => {
-            let admitted = connection.take_control();
-            (admitted, admitted)
-        }
+    let admit = match route {
+        Route::Execute => connection.route_execute(),
+        Route::Update | Route::Cancel => connection.route_control(),
     };
-    if !reading {
-        return send(&mut stream, &Reply::busy(), limits, true);
+    match admit {
+        Admit::Gone => return,
+        Admit::Busy => return send(&mut stream, &Reply::busy(), limits, true),
+        Admit::Run | Admit::Excess => {}
     }
     let body = match http::read_body(&mut stream, head, limits) {
         Ok(body) => body,
         Err(reject) => return refuse(&mut stream, reject, limits),
     };
-    if !admitted {
+    if !connection.body_read() {
+        return;
+    }
+    if admit == Admit::Excess {
         return send(&mut stream, &execute::over_capacity(&body), limits, false);
     }
     let reply = match route {

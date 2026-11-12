@@ -169,13 +169,18 @@ enforced by RUN-02.
 ### Capacity and cancel
 
 At most `concurrency` execute requests run at once. A fixed reserve of `4` control slots serves
-cancel and update and is never used by execute requests, so the connection limit is `concurrency +
-4`. A connection over the limit is closed before a byte is read. A control request when the
-reserve is in use gets `503` with the bare `busy` envelope (`retryable`, with `Retry-After: 1`) as
-soon as its head is read. An execute request over capacity holds no execute slot: its body is read
-within the same ceilings and deadlines so that the contract's admission can come first, and a
-`runtime_mode` other than `wasm` is answered `409 runtime_mode_not_supported` (non-retryable)
-exactly as when the worker is idle; any other execute request is answered `503 busy` as soon as
+cancel and update and is never used by execute requests, so the connections that hold an execute or a
+control slot number at most `concurrency + 4`. A connection that holds neither is not counted
+against that limit, so it cannot take what a cancel needs; there are three small pools for them, and
+a full pool closes its oldest member to make room for a newer one (a request that is running is never
+closed): a new connection reading its request line and headers (at most `concurrency + 4`), an execute
+request over capacity reading its body (at most `4`), and a control request reading its body. A
+control request when the whole reserve is running gets `503` with the bare `busy` envelope
+(`retryable`, with `Retry-After: 1`) as soon as its head is read. An execute request over capacity
+holds no execute slot: its body is read within the same ceilings and deadlines so that the contract's
+admission can come first, and a `runtime_mode` other than `wasm` is answered
+`409 runtime_mode_not_supported` (non-retryable) exactly as when the worker is idle, even when the
+overflow pool was full of stalled bodies; any other execute request is answered `503 busy` as soon as
 that check has passed, without parsing further, compiling or running anything. The `busy` reply
 has no activation to attribute, so it is the failure envelope itself rather than a result.
 

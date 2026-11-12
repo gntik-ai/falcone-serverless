@@ -19,6 +19,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// The documented bound for redacting the adversarial log set. Debug builds run the
@@ -957,14 +958,16 @@ fn control_slots_survive_full_execute_load_and_an_extra_execute_gets_busy_at_onc
     fixture.recovered();
 }
 
-#[test]
-fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
-    let concurrency = 2;
-    let fixture = Fixture::start(concurrency, HttpLimits::default());
-    let spinners: Vec<_> = (0..concurrency)
+/// `concurrency` blocked guests, each reported as running.
+fn blocked_guests(
+    fixture: &Fixture,
+    concurrency: u32,
+    base: u32,
+) -> Vec<(Value, JoinHandle<Reply>)> {
+    let guests: Vec<_> = (0..concurrency)
         .map(|n| {
             let addr = fixture.addr();
-            let request = request(60 + n, SPIN, &[PROGRESS], None);
+            let request = request(base + n, SPIN, &[PROGRESS], None);
             let handle = std::thread::spawn({
                 let request = request.clone();
                 move || post(addr, "/v1/execute", &serde_json::to_vec(&request).unwrap())
@@ -972,54 +975,15 @@ fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
             (request, handle)
         })
         .collect();
-    for (request, _) in &spinners {
-        wait_until_running(&fixture, request);
+    for (request, _) in &guests {
+        wait_until_running(fixture, request);
     }
-    // More excess executes than the overflow pool holds, each with valid headers and a body that
-    // never completes: the pool fills, the rest are answered busy at once.
-    let reserve = CONTROL_RESERVE as usize;
-    let stalled = 2 * reserve + 2;
-    // One at a time: the first `reserve` fill the pool and wait; each one after that is answered
-    // busy at once, its body unread.
-    let mut streams: Vec<TcpStream> = Vec::new();
-    for n in 0..stalled {
-        let mut stream = connect(fixture.addr());
-        stream
-            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
-            .unwrap();
-        if n < reserve {
-            let deadline = Instant::now() + Duration::from_secs(4);
-            while fixture.running().overflow() < n + 1 {
-                assert!(Instant::now() < deadline, "the overflow pool did not fill");
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            streams.push(stream);
-        } else {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let reply = read_reply(&mut stream).expect("busy at once");
-            assert_eq!(reply.status, 503, "{}", reply.text());
-            assert_eq!(reply.json()["code"], "busy");
-        }
-    }
-    // No connection is held for them: once those beyond the pool have been answered busy and
-    // closed, the count is the running guests alone, so every control slot is free.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while fixture.running().slots().0 != concurrency as usize {
-        assert!(
-            Instant::now() < deadline,
-            "a stalled execute held a connection"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(
-        fixture.running().slots(),
-        (concurrency as usize, concurrency as usize, 0)
-    );
-    // With the pool full of stalled bodies and every execute slot held, cancels are accepted
-    // within the deadline.
-    for (request, handle) in spinners {
+    guests
+}
+
+/// Cancels every blocked guest and checks it takes effect within the deadline.
+fn cancel_all(fixture: &Fixture, guests: Vec<(Value, JoinHandle<Reply>)>) {
+    for (request, handle) in guests {
         let started = Instant::now();
         let cancel = fixture.post("/v1/cancel", &cancel_body(&request, "requested"));
         assert_eq!(cancel.status, 200, "{}", cancel.text());
@@ -1030,7 +994,106 @@ fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
             "cancelled"
         );
     }
-    drop(streams);
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
+    let concurrency = 2;
+    let fixture = Fixture::start(concurrency, HttpLimits::default());
+    let guests = blocked_guests(&fixture, concurrency, 60);
+    // Excess executes with valid headers and a body that never completes fill the overflow pool,
+    // one at a time.
+    let reserve = CONTROL_RESERVE as usize;
+    let mut stalled: Vec<TcpStream> = Vec::new();
+    for n in 0..reserve {
+        let mut stream = connect(fixture.addr());
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
+            .unwrap();
+        wait_for("the overflow pool did not fill", || {
+            fixture.running().overflow() == n + 1
+        });
+        stalled.push(stream);
+    }
+    // With the pool full of stalled bodies, a complete request is still read: a runtime mode
+    // other than wasm keeps its non-retryable 409, and a wasm one is answered busy.
+    let mut other = request(61, ECHO, &[], None);
+    other["projection"]["runtime_mode"] = json!("oci");
+    let refused = fixture.execute(&other);
+    assert_eq!(refused.status, 409, "{}", refused.text());
+    let refusal = refused.json();
+    let envelope = refusal.get("result").unwrap_or(&refusal);
+    assert_eq!(envelope["detail"]["reason"], "runtime_mode_not_wasm");
+    let busy = fixture.execute(&request(62, ECHO, &[], None));
+    assert_eq!(busy.status, 503, "{}", busy.text());
+    assert_eq!(busy.json()["code"], "busy");
+    // More stalled bodies than the pool holds replace the oldest ones rather than queue behind
+    // them: the pool stays at its bound and the replaced connections are closed.
+    for _ in 0..reserve + 2 {
+        let mut stream = connect(fixture.addr());
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
+            .unwrap();
+        stalled.push(stream);
+    }
+    wait_for("an old stalled body was not replaced", || {
+        stalled[..reserve + 2].iter().all(|stream| {
+            stream
+                .set_read_timeout(Some(Duration::from_millis(20)))
+                .unwrap();
+            let mut probe = [0u8; 1];
+            matches!((&*stream).read(&mut probe), Ok(0) | Err(_))
+                && fixture.running().overflow() <= reserve
+        }) && fixture.running().overflow() == reserve
+    });
+    // No connection is held for them: the count is the running guests alone, so every control
+    // slot is free, and cancels are accepted within the deadline.
+    assert_eq!(
+        fixture.running().slots(),
+        (concurrency as usize, concurrency as usize, 0)
+    );
+    cancel_all(&fixture, guests);
+    drop(stalled);
+    fixture.recovered();
+}
+
+#[test]
+fn stalled_header_peers_cannot_starve_a_cancel() {
+    let concurrency = 2;
+    let fixture = Fixture::start(concurrency, HttpLimits::default());
+    let guests = blocked_guests(&fixture, concurrency, 50);
+    // Peers that connect and send an incomplete head, more than the connection limit: none of
+    // them can occupy the capacity a cancel needs.
+    let peers = fixture.running().connection_limit() + 3;
+    let mut stalled: Vec<TcpStream> = Vec::new();
+    for _ in 0..peers {
+        let mut stream = connect(fixture.addr());
+        stream.write_all(b"POST /v1/execute HTTP/1.1\r\n").unwrap();
+        stalled.push(stream);
+    }
+    wait_for("the header pool did not fill", || {
+        fixture.running().heads() >= fixture.running().connection_limit()
+    });
+    assert_eq!(
+        fixture.running().slots(),
+        (concurrency as usize, concurrency as usize, 0)
+    );
+    // The same holds for a stalled head sent over an update or cancel route.
+    for _ in 0..peers {
+        let mut stream = connect(fixture.addr());
+        stream.write_all(b"POST /v1/cancel HTTP/1.1\r\n").unwrap();
+        stalled.push(stream);
+    }
+    cancel_all(&fixture, guests);
+    drop(stalled);
     fixture.recovered();
 }
 
@@ -1424,7 +1487,7 @@ fn serve_with_a_bad_config_or_a_missing_argument_fails_without_listening() {
 
 /// The cases of the restricted-pod qualification, run here as the fast feedback loop: the same
 /// binary, the same service and the same production limits, on loopback outside a pod.
-const POD_CASES: [&str; 15] = [
+const POD_CASES: [&str; 16] = [
     "identity",
     "non-wasm",
     "legacy",
@@ -1432,6 +1495,7 @@ const POD_CASES: [&str; 15] = [
     "imports",
     "saturation",
     "saturation-stalled",
+    "saturation-headers",
     "http-headers",
     "http-request",
     "http-action-body",

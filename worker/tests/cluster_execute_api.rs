@@ -74,6 +74,7 @@ cluster_cases! {
     imports => "imports",
     saturation => "saturation",
     saturation_stalled => "saturation-stalled",
+    saturation_headers => "saturation-headers",
     http_headers => "http-headers",
     http_request => "http-request",
     http_action_body => "http-action-body",
@@ -131,7 +132,31 @@ fn every_runner_case_has_a_cluster_test() {
         "http-body-drip",
         "saturation",
         "saturation-stalled",
+        "saturation-headers",
     ] {
         assert!(cluster.contains(case), "{case}");
     }
+}
+
+/// The pod's case records are kept, sanitized, before the namespace is deleted: only the case,
+/// group, status, reason token and elapsed time survive, and lines without a case are dropped.
+#[test]
+fn case_records_survive_without_anything_else_of_the_log() {
+    let long = "r".repeat(200);
+    let logs = [
+        r#"{"case":"saturation-headers","group":"saturation","status":"passed","elapsed_ms":1234,"extra":"leaked"}"#.to_owned(),
+        format!(r#"{{"case":"http-stall","group":"http","status":"failed","reason":"slot leaked {long}"}}"#),
+        r#"{"check":"execute_api","status":"passed"}"#.to_owned(),
+        "not json leaked".to_owned(),
+    ]
+    .join("\n");
+    let records = evidence_records(&logs);
+    assert_eq!(
+        records[0],
+        serde_json::json!({"case":"saturation-headers","group":"saturation","status":"passed","elapsed_ms":1234})
+    );
+    assert_eq!(records[1]["case"], "http-stall");
+    assert_eq!(records[1]["reason"].as_str().unwrap().len(), 64);
+    assert!(!records[1]["reason"].as_str().unwrap().contains(' '));
+    assert_eq!(records.len(), 2);
 }
