@@ -1531,14 +1531,14 @@ fn no_refusal_or_error_prints_a_request_value() {
         ));
     }
     // Credential-like values in every identifier a refusal carries.
-    let secret = "canary_9f8e7d6c5b4a3210";
+    let marker = "canary_marker_text";
     let mut leaked = fixture("request/refused/oci-mode");
-    leaked["activation_id"] = json!(secret);
-    leaked["credential"]["activation"] = json!(secret);
-    leaked["attempt_id"] = json!(format!("{secret}_attempt"));
-    leaked["credential"]["attempt"] = json!(format!("{secret}_attempt"));
-    leaked["projection"]["revision"] = json!(format!("{secret}_revision"));
-    leaked["credential"]["revision"] = json!(format!("{secret}_revision"));
+    leaked["activation_id"] = json!(marker);
+    leaked["credential"]["activation"] = json!(marker);
+    leaked["attempt_id"] = json!(format!("{marker}_attempt"));
+    leaked["credential"]["attempt"] = json!(format!("{marker}_attempt"));
+    leaked["projection"]["revision"] = json!(format!("{marker}_revision"));
+    leaked["credential"]["revision"] = json!(format!("{marker}_revision"));
     refused.push(("leaked identifiers".into(), leaked));
     for (label, document) in refused {
         let rejection = parse_request(&bytes(&document)).unwrap_err();
@@ -1564,22 +1564,22 @@ fn no_refusal_or_error_prints_a_request_value() {
     // Malformed input never echoes a value, a field name or a serde message.
     let mut bad = fixture("request/valid/wasm-no-base");
     bad["activation_id"] = json!("canary_ secret value");
-    bad["canary_unknown_field"] = json!("canary_9f8e7d6c5b4a3210");
+    bad["canary_unknown_field"] = json!("canary_marker_text");
     bad["credential"]["iss"] = json!(12345);
-    for document in [bad, json!({"canary_9f8e7d6c5b4a3210": 1})] {
+    for document in [bad, json!({"canary_marker_text": 1})] {
         let error = parse_request(&bytes(&document)).unwrap_err();
         let printed = format!("{error:?}|{error}");
         assert!(!printed.contains("canary_"), "{printed}");
     }
-    let garbage = parse_request(b"{\"canary_9f8e7d6c5b4a3210\": nope").unwrap_err();
+    let garbage = parse_request(b"{\"canary_marker_text\": nope").unwrap_err();
     assert!(!format!("{garbage:?}|{garbage}").contains("canary_"));
-    let Err(error) = parse_update(b"{\"canary_9f8e7d6c5b4a3210\": 1}") else {
+    let Err(error) = parse_update(b"{\"canary_marker_text\": 1}") else {
         panic!()
     };
     assert!(!format!("{error:?}|{error}").contains("canary_"));
     // Results: a credential-like revision never shows in a rejected or accepted result.
     let (mut document, pinned) = unwrap_result(&fixture("result/cross/wrong-revision"));
-    document["identity"]["function_revision"] = json!(secret);
+    document["identity"]["function_revision"] = json!(marker);
     let projection = parse_projection(&bytes(&fixture(pinned.as_str().unwrap()))).unwrap();
     let error = parse_result(&bytes(&document), &projection).unwrap_err();
     assert!(!format!("{error:?}|{error}").contains("canary_"));
