@@ -3,7 +3,9 @@
 use super::projection::{LanguageProfile, Projection};
 use super::refusal::{Class, Refusal};
 use super::request::ExecuteRequest;
-use super::types::{Digest, Id, InterfaceVersion, Logs, Positive, RuntimeMode, Text, Version};
+use super::types::{
+    Count, Digest, Id, InterfaceVersion, Logs, Positive, RuntimeMode, Text, Version,
+};
 use super::wire::{constant, present, redacted, unit_debug};
 use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
@@ -24,7 +26,7 @@ unit_debug!(Status: Success, Failure);
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct HandlerResult {
-    status_code: u16,
+    status_code: Count,
     #[serde(
         default,
         deserialize_with = "present",
@@ -127,8 +129,11 @@ impl ExecutionResult {
     pub(super) fn check(&self, pinned: &impl Pinned) -> Result<(), Malformed> {
         match (&self.status, &self.result, &self.class) {
             (Status::Success, Outcome::Handler(handler), None) => {
-                if !(100..=599).contains(&handler.status_code) {
+                if !handler.status_code.within(100, 599) {
                     return Err(constraint("result.statusCode"));
+                }
+                if handler.status_code.is(304) && handler.body.is_some() {
+                    return Err(constraint("result.body"));
                 }
             }
             (Status::Failure, Outcome::Failure(refusal), Some(class)) => {

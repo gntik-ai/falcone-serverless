@@ -1,6 +1,6 @@
 //! Execution updates (heartbeat, progress, checkpoint reference) and cancellation.
 
-use super::types::{Id, Positive, Text, Version};
+use super::types::{Count, Id, Positive, Text, Version};
 use super::wire::{constant, present, redacted};
 use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ constant!(CancelType, "cancel");
 pub enum Update {
     Heartbeat {},
     Progress {
-        completed: u64,
+        completed: Count,
         #[serde(
             default,
             deserialize_with = "present",
@@ -47,7 +47,7 @@ impl UpdateMessage {
             Update::Progress {
                 completed,
                 total: Some(total),
-            } if Positive::exceeds(*completed, *total) => Err(constraint("update.progress")),
+            } if completed.exceeds(*total) => Err(constraint("update.progress")),
             _ => Ok(()),
         }
     }

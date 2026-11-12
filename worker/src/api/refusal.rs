@@ -4,7 +4,7 @@
 //! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`
 //! and `request_too_large`. Nothing in this module reads a request field.
 
-use super::types::Text;
+use super::types::{Count, Text};
 use super::wire::unit_debug;
 use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
@@ -120,7 +120,7 @@ pub struct Detail {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Refusal {
-    status: u16,
+    status: Count,
     code: Code,
     message: Text,
     detail: Detail,
@@ -131,7 +131,7 @@ impl Refusal {
     pub(crate) fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
-            status: code.status(),
+            status: Count::from(code.status()),
             code,
             message: Text::fixed(code.message()),
             detail: Detail { reason },
@@ -141,7 +141,7 @@ impl Refusal {
 
     /// A parsed envelope must carry the status, reason and retryability of its code.
     pub(crate) fn check(&self) -> Result<(), Malformed> {
-        if self.status == self.code.status()
+        if self.status.is(self.code.status())
             && self.code.allows(self.detail.reason)
             && self.retryable == (self.code.class() == Class::Retryable)
         {

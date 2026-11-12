@@ -1734,3 +1734,107 @@ fn the_spec_states_the_grant_divergence_and_the_provenance() {
         assert!(spec.contains(path) && spec.contains(hash), "{path}");
     }
 }
+
+// --- integers: the schema's `integer` type, bounded at 2^53 - 1 ---------------------------
+
+/// Edits one field of a fixture and reports whether the schema and the runtime parser accept it.
+fn integer_verdict(kind: &str, name: &str, pointer: &str, number: Value) -> (bool, bool) {
+    let (mut document, pinned) = if kind == "result" {
+        unwrap_result(&fixture(name))
+    } else {
+        (fixture(name), Value::Null)
+    };
+    *document.pointer_mut(pointer).unwrap() = number;
+    let pinned = (kind == "result").then_some(&pinned);
+    let (schema_valid, verdict) = judge(kind, &document, pinned);
+    (
+        schema_valid,
+        matches!(verdict, Verdict::Accepted(_) | Verdict::Refused(_)),
+    )
+}
+
+#[test]
+fn integral_numbers_are_accepted_by_schema_and_parser_alike() {
+    let max: Value = serde_json::from_str("9007199254740991").unwrap();
+    let past_max: Value = serde_json::from_str("9007199254740992").unwrap();
+    let past_u64: Value = serde_json::from_str("18446744073709551616").unwrap();
+    // (message, fixture, field, whether zero is allowed)
+    let fields = [
+        (
+            "request",
+            "request/valid/wasm-no-base",
+            "/attempt_number",
+            false,
+        ),
+        (
+            "request",
+            "request/valid/wasm-no-base",
+            "/projection/budgets/fuel",
+            false,
+        ),
+        ("update", "update/valid/progress", "/sequence", false),
+        (
+            "update",
+            "update/valid/progress-open-ended",
+            "/update/completed",
+            true,
+        ),
+        (
+            "result",
+            "result/valid/success-none-base",
+            "/attempt_number",
+            false,
+        ),
+    ];
+    for (kind, name, pointer, zero_allowed) in fields {
+        let cases = [
+            ("1.0", json!(2.0), true),
+            ("1e1", json!(1e1), true),
+            ("max", max.clone(), true),
+            ("past max", past_max.clone(), false),
+            ("past u64", past_u64.clone(), false),
+            ("fraction", json!(2.5), false),
+            ("negative", json!(-1), false),
+            ("zero", json!(0), zero_allowed),
+        ];
+        for (label, number, expected) in cases {
+            let (schema, parser) = integer_verdict(kind, name, pointer, number);
+            assert_eq!(schema, expected, "{name} {pointer} {label}: schema");
+            assert_eq!(parser, expected, "{name} {pointer} {label}: parser");
+        }
+    }
+}
+
+#[test]
+fn a_status_code_is_an_integral_number_from_100_to_599() {
+    for (label, number, expected) in [
+        ("whole", json!(200), true),
+        ("float whole", json!(200.0), true),
+        ("below", json!(99.0), false),
+        ("above", json!(600), false),
+        ("fraction", json!(200.5), false),
+    ] {
+        let (schema, parser) = integer_verdict(
+            "result",
+            "result/valid/success-none-base",
+            "/result/statusCode",
+            number,
+        );
+        assert_eq!(schema, expected, "{label}: schema");
+        assert_eq!(parser, expected, "{label}: parser");
+    }
+}
+
+#[test]
+fn a_304_result_with_a_body_is_malformed_in_schema_and_parser() {
+    let (document, pinned) = unwrap_result(&fixture("result/invalid/body-on-304"));
+    let (schema, verdict) = judge("result", &document, Some(&pinned));
+    assert!(!schema, "the schema accepts a 304 with a body");
+    assert_eq!(verdict, Verdict::Malformed);
+    // The same body is allowed on any other status.
+    let (mut document, pinned) = unwrap_result(&fixture("result/invalid/body-on-304"));
+    document["result"]["statusCode"] = json!(200);
+    let (schema, verdict) = judge("result", &document, Some(&pinned));
+    assert!(schema);
+    assert!(matches!(verdict, Verdict::Accepted(_)));
+}

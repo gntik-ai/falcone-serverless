@@ -167,14 +167,37 @@ string_type!(
     timestamp
 );
 
-/// An integer of at least one.
+/// The largest integer the contract carries: 2^53 - 1, exactly representable in any JSON reader.
+const MAX_WHOLE: u64 = 9_007_199_254_740_991;
+
+/// Reads an integral JSON number in `0..=MAX_WHOLE`, as the schema's `integer` type does:
+/// `1`, `1.0` and `1e0` are the same integer; fractions, negatives and larger values are not.
+fn whole<'de, D: Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
+    let number = serde_json::Number::deserialize(input)?;
+    let value = match number.as_u64() {
+        Some(value) => value,
+        None => match number.as_f64() {
+            Some(float) if float.fract() == 0.0 && (0.0..=MAX_WHOLE as f64).contains(&float) => {
+                float as u64
+            }
+            _ => return Err(D::Error::custom("invalid value")),
+        },
+    };
+    if value <= MAX_WHOLE {
+        Ok(value)
+    } else {
+        Err(D::Error::custom("invalid value"))
+    }
+}
+
+/// An integer of at least one and at most 2^53 - 1.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Positive(u64);
 
 impl<'de> Deserialize<'de> for Positive {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
-        match u64::deserialize(input)? {
+        match whole(input)? {
             0 => Err(D::Error::custom("invalid value")),
             value => Ok(Self(value)),
         }
@@ -182,10 +205,37 @@ impl<'de> Deserialize<'de> for Positive {
 }
 redacted!(Positive);
 
-impl Positive {
-    /// Whether `completed` is more than `total`.
-    pub(crate) fn exceeds(completed: u64, total: Self) -> bool {
-        completed > total.0
+/// An integer of at least zero and at most 2^53 - 1.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct Count(u64);
+
+impl<'de> Deserialize<'de> for Count {
+    fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
+        whole(input).map(Self)
+    }
+}
+redacted!(Count);
+
+impl From<u16> for Count {
+    fn from(value: u16) -> Self {
+        Self(u64::from(value))
+    }
+}
+
+impl Count {
+    /// Whether this count is more than `total`.
+    pub(crate) fn exceeds(self, total: Positive) -> bool {
+        self.0 > total.0
+    }
+
+    /// Whether this count is an HTTP status in `low..=high`.
+    pub(crate) fn within(self, low: u64, high: u64) -> bool {
+        (low..=high).contains(&self.0)
+    }
+
+    pub(crate) fn is(self, value: u16) -> bool {
+        self.0 == u64::from(value)
     }
 }
 

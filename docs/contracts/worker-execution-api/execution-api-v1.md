@@ -60,7 +60,7 @@ malformed. The credential never reaches a guest.
 | `language_profile` | `{name, version}`, an exact profile pin. |
 | `engine_version`, `wasi_version`, `interface_version` | The engine (Wasmtime), WASI and host interface versions. `interface_version` is `0.2.0`, from `falcone:host@0.2.0`. |
 | `imports` | Declared imports; empty means none. |
-| `budgets` | Positive integers `fuel`, `memory_bytes`, `timeout_ms`, `max_host_calls`. |
+| `budgets` | Integers from 1 to 2^53 - 1: `fuel`, `memory_bytes`, `timeout_ms`, `max_host_calls`. |
 | `grants` | Granted capabilities, validated as the revision-runtime-manifest grants (`@0.2.0`). |
 
 Digests are `sha256:` followed by 64 lowercase hex digits.
@@ -86,7 +86,7 @@ discriminated by `kind`:
 | `kind` | Fields |
 | --- | --- |
 | `heartbeat` | none |
-| `progress` | `completed` (integer, at least 0) and optional `total` (at least 1, at least `completed`) |
+| `progress` | `completed` (integer, 0 to 2^53 - 1) and optional `total` (at least 1, at least `completed`) |
 | `checkpoint` | `checkpoint_ref`: a reference to a committed checkpoint object, never its payload |
 
 ### Cancel
@@ -103,9 +103,11 @@ The result keeps the legacy `{status, result, logs}` envelope and adds `activati
 - `status` is `success` or `failure`.
 - On `success`, `result` is the legacy handler result `{statusCode, headers?, body?}`: an integer
   `statusCode` from 100 to 599, optional string `headers`, and optional `body` (a JSON value that
-  is not `null`; a 304 has none). `class` is absent.
+  is not `null`; a 304 has none, and a 304 result carrying `body` is malformed). `class` is absent.
 - On `failure`, `result` is the failure envelope below and `class` is required.
 - `logs` is an array of at most 1000 strings of at most 8192 characters.
+
+Every integer field is an integral JSON number between its minimum and 2^53 - 1 (9007199254740991); `1` and `1.0` are the same integer, and fractions and larger values are malformed.
 
 An optional field specified as absent is never `null`: `base` in the projection, `base_digest` in
 the identity, `class`, `headers`, `body`, `idempotency_key`, `correlation_id`, `total`,
