@@ -1,15 +1,16 @@
 //! Bounded, fail-closed redaction of the log lines of one execution.
 //!
-//! The credential strings are collected once and compiled into one leftmost-longest
-//! Aho-Corasick matcher per execution. Every line is cut to `MAX_LINE_CHARS` characters before it
+//! The credential strings are collected once and compiled into one Aho-Corasick matcher per
+//! execution, run as a single overlapping pass over each line. Every line is cut to `MAX_LINE_CHARS` characters before it
 //! is scanned, the lines are capped at `MAX_LINES`, and the whole execution shares one fixed work
 //! budget (`WORK_BUDGET` units: the secret set, plus the bytes the matcher reads). A secret set
 //! or a scan that would go over any limit never degrades to unredacted text: the logs are
 //! dropped and one `MARKER` line stands in for them.
 //!
-//! A match is expanded to the union of every occurrence that overlaps it, so secrets that
-//! overlap or share a prefix are redacted whole; leftmost-longest matching alone would leave the
-//! tail of the second of two overlapping secrets.
+//! Every occurrence is reported and the overlapping ones are merged into one block, so secrets
+//! that overlap or share a prefix are redacted whole. The scan is one pass whose work is the
+//! bytes read plus the occurrences reported, charged as it goes: a search can never run
+//! further than the budget, whatever the secrets look like.
 
 use super::wire::redacted;
 use aho_corasick::{AhoCorasick, Input, MatchKind};
@@ -21,9 +22,10 @@ pub const MARKER: &str = "<redacted>";
 pub const MAX_LINES: usize = 1000;
 /// The most characters of one log line (`logs` of the result schema).
 pub const MAX_LINE_CHARS: usize = 8192;
-/// A shorter string is not treated as a secret: a one-byte secret would redact every occurrence of
-/// a letter. It also bounds how far the marker can grow a line.
-pub const MIN_SECRET_BYTES: usize = 4;
+/// Every non-empty credential string is a secret, however short: a short claim or reference that
+/// appears in a log line is still the credential, and a line that over-redacts is still safe. The
+/// marker can grow a line, so the result is cut again after replacement.
+pub const MIN_SECRET_BYTES: usize = 1;
 /// The longest single secret.
 pub const MAX_SECRET_BYTES: usize = 4096;
 /// The most distinct secrets.
@@ -76,7 +78,7 @@ impl Redactor {
             return Self { mode: Mode::Plain };
         }
         match AhoCorasick::builder()
-            .match_kind(MatchKind::LeftmostLongest)
+            .match_kind(MatchKind::Standard)
             .build(distinct)
         {
             Ok(matcher) => Self {
@@ -147,29 +149,28 @@ impl Redactor {
 
 /// The byte ranges of `text` covered by any secret, overlapping occurrences merged. `None` when
 /// the work budget is exhausted.
+///
+/// One overlapping pass of the matcher reports every occurrence in order of its end, so the
+/// scan reads each byte once and does constant work per reported occurrence; each occurrence is
+/// charged to the budget as it is reported, so a secret set that matches very often is cut off
+/// instead of scanned to the end. The occurrences are merged on a stack: a new one pops every
+/// block it overlaps, which makes the merge amortised constant per occurrence.
 fn occurrences(matcher: &AhoCorasick, text: &str, work: &mut usize) -> Option<Vec<(usize, usize)>> {
-    let mut find = |from: usize| -> Option<Option<(usize, usize)>> {
-        let found = matcher.find(Input::new(text).span(from..text.len()));
-        let reached = found.map_or(text.len(), |found| found.end());
-        *work = work.saturating_add(reached.saturating_sub(from).max(1));
-        (*work <= WORK_BUDGET).then_some(found.map(|found| (found.start(), found.end())))
-    };
-    let mut blocks = Vec::new();
-    let mut next = find(0)?;
-    while let Some((start, mut end)) = next {
-        // Every occurrence that starts inside the block extends it. Probing from start + 1 visits
-        // each start position in order; the first one at or past `end` is the next block's start.
-        let mut from = start + 1;
-        next = loop {
-            match find(from)? {
-                Some((probe_start, probe_end)) if probe_start < end => {
-                    end = end.max(probe_end);
-                    from = probe_start + 1;
-                }
-                other => break other,
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
+    for found in matcher.try_find_overlapping_iter(Input::new(text)).ok()? {
+        *work = work.saturating_add(1);
+        if *work > WORK_BUDGET {
+            return None;
+        }
+        let mut start = found.start();
+        while let Some(&(block_start, block_end)) = blocks.last() {
+            if block_end <= start {
+                break;
             }
-        };
-        blocks.push((start, end));
+            start = start.min(block_start);
+            blocks.pop();
+        }
+        blocks.push((start, found.end()));
     }
     Some(blocks)
 }

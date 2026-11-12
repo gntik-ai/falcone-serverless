@@ -505,6 +505,22 @@ fn saturation() -> Outcome {
         harness.running.slots().1 == concurrency as usize,
         "busy_held_a_slot",
     )?;
+    // The contract's admission comes before capacity: a runtime mode other than wasm is still the
+    // non-retryable 409 refusal while every execute slot is held.
+    for mode in ["oci", "wasm2"] {
+        let mut other = request(78, ECHO, &[], None);
+        other["projection"]["runtime_mode"] = json!(mode);
+        let refused = harness.execute(&other)?;
+        let body = refused.json()?;
+        let envelope = body.get("result").unwrap_or(&body);
+        check(
+            refused.status == 409
+                && envelope["code"] == "runtime_mode_not_supported"
+                && envelope["detail"]["reason"] == "runtime_mode_not_wasm"
+                && envelope["retryable"] == false,
+            "non_wasm_under_saturation",
+        )?;
+    }
     // A cancel is accepted with every execute slot held, and takes effect within its deadline.
     for (request, handle) in spinners {
         let started = Instant::now();

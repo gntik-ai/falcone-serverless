@@ -149,7 +149,7 @@ projection, with `wasmtime_version` the pinned engine; the worker refuses a proj
 1. The admission of the contract, in its order: a `runtime_mode` other than `wasm` is refused
    (`runtime_mode_not_supported`) before anything else; then grants, credential binding and the
    legacy inputs (`missing_path`, `body_too_large`, `non_json_body`).
-2. Capacity (below), the pinned engine, the deadline, the artifact and its digest.
+2. Capacity (below; an execute request over capacity is refused only by item 1 or `busy`), the pinned engine, the deadline, the artifact and its digest.
 3. The declared-import check, before any compile or instantiation: every import of the component
    must be in the projection's `imports` **and** in the host's allow-list; otherwise `422
    undeclared_import`, with no compile, no instance and no guest code. `imports: []` means none.
@@ -170,11 +170,14 @@ enforced by RUN-02.
 
 At most `concurrency` execute requests run at once. A fixed reserve of `4` control slots serves
 cancel and update and is never used by execute requests, so the connection limit is `concurrency +
-4`. A connection over the limit is closed before a byte is read. An execute request over capacity,
-or a control request when the reserve is in use, gets `503` with the bare `busy` envelope
-(`retryable`, with `Retry-After: 1`) as soon as its head is read; it holds no slot and its body is
-not read. The `busy` reply has no activation to attribute, so it is the failure envelope itself
-rather than a result.
+4`. A connection over the limit is closed before a byte is read. A control request when the
+reserve is in use gets `503` with the bare `busy` envelope (`retryable`, with `Retry-After: 1`) as
+soon as its head is read. An execute request over capacity holds no execute slot: its body is read
+within the same ceilings and deadlines so that the contract's admission can come first, and a
+`runtime_mode` other than `wasm` is answered `409 runtime_mode_not_supported` (non-retryable)
+exactly as when the worker is idle; any other execute request is answered `503 busy` as soon as
+that check has passed, without parsing further, compiling or running anything. The `busy` reply
+has no activation to attribute, so it is the failure envelope itself rather than a result.
 
 Cancel interrupts the guest and waits for it to stop, up to `cancel_reserve_ms` (default 5 s). It
 answers `acknowledged` once the guest has stopped, and `uncertain` when it has not stopped within
@@ -206,12 +209,15 @@ WASI context, to guest memory, to a preopened file, to a log line or to an error
 strings of the credential (claims and grant scopes) are redacted from the guest's logs:
 
 - each log line is cut to 8192 characters before it is scanned, and at most 1000 lines are kept;
-- one leftmost-longest multi-pattern matcher is built per execution; the work is linear in the
-  line length plus the secret set, under one fixed budget (16 MiB of secret and scanned bytes);
+- one multi-pattern matcher is built per execution and run as a single overlapping pass over each
+  line, so the work is linear in the line length plus the secret set; the bytes read and every
+  occurrence reported are charged to one fixed budget (16 MiB), as they happen, so a secret set
+  that matches very often (for example prefixes of one another over a repetitive line) is cut off
+  by the budget and never scanned to the end;
 - overlapping and prefix-sharing secrets are redacted whole;
-- strings shorter than 4 bytes are not treated as secrets; more than 4096 distinct secrets, a
-  secret over 4096 bytes, more than 256 KiB of secrets, or work over the budget fail closed: the
-  logs are dropped and a single `<redacted>` line is returned.
+- every non-empty string of the credential is a secret, however short; more than 4096 distinct
+  secrets, a secret over 4096 bytes, more than 256 KiB of secrets, or work over the budget fail
+  closed: the logs are dropped and a single `<redacted>` line is returned.
 
 The documented time bound: the largest secret set plus 1000 lines of 8192 characters is redacted in
 under 1 s in a release build (`worker/tests/execute_api_local.rs` asserts it; the measured time is

@@ -211,20 +211,26 @@ fn serve_connection(shared: &Shared, mut stream: TcpStream, mut connection: Conn
         Ok(head) => head,
         Err(reject) => return refuse(&mut stream, reject, limits),
     };
-    // The slot is claimed before the body is read, so a request over capacity is answered at
-    // once and holds nothing. Execute never claims a control slot.
+    // The slot is claimed before the body is read, and execute never claims a control slot. A
+    // control request over capacity is answered `busy` at once. An execute request over capacity
+    // has its body read, within the same ceilings and deadlines and holding no execute slot,
+    // because the contract refuses a `runtime_mode` other than `wasm` before capacity is
+    // considered; anything else is answered `busy` as soon as that check has passed.
     let route = head.route;
     let admitted = match route {
         Route::Execute => connection.take_execute(),
         Route::Update | Route::Cancel => connection.take_control(),
     };
-    if !admitted {
+    if !admitted && route != Route::Execute {
         return send(&mut stream, &Reply::busy(), limits, true);
     }
     let body = match http::read_body(&mut stream, head, limits) {
         Ok(body) => body,
         Err(reject) => return refuse(&mut stream, reject, limits),
     };
+    if !admitted {
+        return send(&mut stream, &execute::over_capacity(&body), limits, false);
+    }
     let reply = match route {
         Route::Execute => execute::execute(shared, &body),
         Route::Cancel => execute::cancel(shared, &body),

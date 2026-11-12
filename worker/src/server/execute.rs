@@ -96,6 +96,20 @@ pub fn execute(shared: &Shared, body: &[u8]) -> Reply {
     }
 }
 
+/// The answer to an execute request over capacity. The contract's admission comes first: a
+/// `runtime_mode` other than `wasm` is refused `runtime_mode_not_supported` (non-retryable) even
+/// when every execute slot is busy. Everything else is `busy`; no guest, engine or cache is
+/// touched, and a request that does not parse is answered `busy` too.
+pub fn over_capacity(body: &[u8]) -> Reply {
+    let mode = Refusal::new(Code::RuntimeModeNotSupported, Reason::RuntimeModeNotWasm);
+    match parse_request(body) {
+        Err(Rejection::Refused(refused)) if refused.refusal == mode => {
+            failure_of(refused.attribution.as_ref(), refused.refusal, Vec::new())
+        }
+        _ => Reply::busy(),
+    }
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

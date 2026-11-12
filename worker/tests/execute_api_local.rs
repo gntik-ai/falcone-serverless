@@ -74,9 +74,51 @@ fn overlapping_secrets_are_fully_redacted() {
 }
 
 #[test]
-fn secrets_shorter_than_the_minimum_are_not_matched() {
-    // A one-byte secret would redact every occurrence of the letter; it is not a credential.
-    assert_eq!(redact(&["a", "ab"], &["abcabc"]), ["abcabc"]);
+fn short_credential_strings_are_redacted_too() {
+    // A claim or reference of one to three bytes is still the credential: it is replaced, so
+    // nothing of the credential is left in a line, even if the line over-redacts.
+    assert_eq!(
+        redact(&["a", "ab"], &["abcabc"]),
+        [format!("{MARKER}c{MARKER}c")]
+    );
+    assert_eq!(
+        redact(&["iss"], &["by iss, iss"]),
+        [format!("by {MARKER}, {MARKER}")]
+    );
+    // The marker may grow a line; the result still fits the line length.
+    let out = redact(&["x"], &["x".repeat(MAX_LINE_CHARS).as_str()]);
+    assert!(out[0].chars().count() <= MAX_LINE_CHARS);
+    assert!(!out[0].contains('x'));
+}
+
+#[test]
+fn a_failed_long_prefix_does_not_make_the_search_quadratic() {
+    // "aaaa" matches at every byte of an all-`a` line; the long secret shares that prefix and
+    // fails on its last byte at every start. A leftmost-longest search that restarts at each
+    // overlapping position would examine billions of bytes here.
+    let short = "a".repeat(4);
+    let long = format!("{}b", "a".repeat(MAX_SECRET_BYTES - 1));
+    let line = "a".repeat(MAX_LINE_CHARS);
+    let started = Instant::now();
+    let out = Redactor::new([short.as_str(), long.as_str()]).redact(vec![line; MAX_LINES]);
+    let elapsed = started.elapsed();
+    assert!(elapsed < redaction_bound(), "took {elapsed:?}");
+    // Every line is one redacted block; no run of the secret's bytes survives.
+    assert_eq!(out.len(), MAX_LINES);
+    assert!(out.iter().all(|line| line == MARKER));
+}
+
+#[test]
+fn a_prefix_ladder_over_a_dense_line_is_cut_off_by_the_budget() {
+    // Secrets `aaaa`, `aaaaa`, ... all match at nearly every byte: the occurrences alone are far
+    // over the fixed budget, and the search stops there with only the marker.
+    let secrets: Vec<String> = (4..=700).map(|n| "a".repeat(n)).collect();
+    let lines = vec!["a".repeat(MAX_LINE_CHARS); MAX_LINES];
+    let started = Instant::now();
+    let out = Redactor::new(secrets.iter().map(String::as_str)).redact(lines);
+    let elapsed = started.elapsed();
+    assert_eq!(out, [MARKER]);
+    assert!(elapsed < redaction_bound(), "took {elapsed:?}");
 }
 
 #[test]
@@ -160,15 +202,16 @@ fn work_over_budget_yields_only_the_marker_never_unredacted_text() {
 }
 
 #[test]
-fn many_matches_in_the_work_budget_fail_closed() {
-    // One 4096-byte secret of repeated bytes against 1000 lines of the same byte: every probe
-    // rescans the secret, so the total work is far over the fixed budget.
+fn a_repetitive_secret_over_repetitive_lines_is_one_linear_pass() {
+    // One 4096-byte secret of repeated bytes against 1000 lines of the same byte: one pass reads
+    // each byte once and every line is a single redacted block.
     let secret = "a".repeat(MAX_SECRET_BYTES);
     let line = "a".repeat(MAX_LINE_CHARS);
     let started = Instant::now();
     let out = Redactor::new([secret.as_str()]).redact(vec![line; MAX_LINES]);
-    assert_eq!(out, [MARKER]);
     assert!(started.elapsed() < redaction_bound());
+    assert_eq!(out.len(), MAX_LINES);
+    assert!(out.iter().all(|line| line == MARKER));
 }
 
 #[test]
@@ -417,8 +460,9 @@ fn read_reply(stream: &mut TcpStream) -> Option<Reply> {
 
 fn connect(addr: SocketAddr) -> TcpStream {
     let stream = TcpStream::connect(addr).unwrap();
+    // The guests that log 1000 lines take tens of seconds unoptimized and under load.
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(Duration::from_secs(120)))
         .unwrap();
     stream
 }
@@ -747,6 +791,51 @@ fn adversarial_logging_through_execute_is_redacted_within_the_bound_and_releases
 }
 
 #[test]
+fn short_credential_strings_never_reach_the_logs_of_a_result() {
+    let fixture = Fixture::start(1, HttpLimits::default());
+    let mut request = request(130, LOGS, &[LOGGING], None);
+    // Three-byte claims and a three-byte grant scope, each carried by the guest's own params.
+    request["credential"]["iss"] = json!("zq1");
+    request["credential"]["workspace"] = json!("zq2");
+    request["credential"]["allowed_capabilities"][0]["scope"]["hosts"] = json!(["zq3"]);
+    request["params"] = json!({"__ow_path": "/x", "a": "zq1", "b": "zq2", "c": "zq3"});
+    let reply = fixture.execute(&request);
+    assert_eq!(reply.status, 200, "{}", reply.text());
+    let logs = reply.json()["logs"].clone();
+    assert!(logs.as_array().is_some_and(|lines| !lines.is_empty()));
+    let text = logs.to_string();
+    for value in ["zq1", "zq2", "zq3"] {
+        assert!(!text.contains(value), "{value} is in the logs");
+    }
+    assert!(text.contains(MARKER));
+    fixture.recovered();
+}
+
+#[test]
+fn a_failed_long_prefix_through_execute_is_redacted_within_the_bound_and_releases_the_slot() {
+    let fixture = Fixture::start(1, HttpLimits::default());
+    let long = format!("{}b", "a".repeat(MAX_SECRET_BYTES - 1));
+    let mut request = request(131, LOGS, &[LOGGING], None);
+    request["credential"]["allowed_capabilities"][0]["scope"]["hosts"] = json!(["aaaa", long]);
+    // Shorter lines than the Redactor test: this one also runs the guest, unoptimized.
+    request["params"] = json!({"__ow_path": "/x", "run": "a".repeat(1500)});
+    let started = Instant::now();
+    let reply = fixture.execute(&request);
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        &reply.text()[..200.min(reply.body.len())]
+    );
+    assert!(started.elapsed() < redaction_bound() + Duration::from_secs(30));
+    let result = reply.json();
+    for line in result["logs"].as_array().unwrap() {
+        assert!(!line.as_str().unwrap().contains("aaaa"));
+    }
+    fixture.recovered();
+}
+
+#[test]
 fn no_failure_text_carries_a_credential_or_request_value() {
     let fixture = Fixture::start(1, HttpLimits::default());
     let mut bodies = Vec::new();
@@ -829,6 +918,21 @@ fn control_slots_survive_full_execute_load_and_an_extra_execute_gets_busy_at_onc
     let busy = extra.json();
     assert_eq!(busy["code"], "busy");
     assert_eq!(busy["retryable"], true);
+    // The contract refuses a runtime mode other than wasm before capacity is considered, so with
+    // every execute slot taken an image-based or unknown mode is still a non-retryable 409.
+    for mode in ["oci", "wasm2", ""] {
+        let mut other = request(78, ECHO, &[], None);
+        other["projection"]["runtime_mode"] = json!(mode);
+        let refused = fixture.execute(&other);
+        assert_eq!(refused.status, 409, "{mode}: {}", refused.text());
+        let refusal = refused.json();
+        let envelope = refusal.get("result").unwrap_or(&refusal);
+        assert_eq!(envelope["code"], "runtime_mode_not_supported");
+        assert_eq!(envelope["detail"]["reason"], "runtime_mode_not_wasm");
+        assert_eq!(envelope["retryable"], false);
+        assert!(!refused.text().contains(CANARY));
+    }
+    assert_eq!(fixture.running().slots().1, concurrency as usize);
     // The connection limit is concurrency + reserve, and the busy reply held no slot.
     assert_eq!(fixture.running().slots().1, concurrency as usize);
     // Cancel is accepted while every execute slot is held, and takes effect within the deadline.
