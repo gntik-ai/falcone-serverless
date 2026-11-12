@@ -1,4 +1,5 @@
 //! Cancellation ownership is separate from both the compiler lock and connection admission.
+use crate::host::outcome::InvocationOutcome;
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Condvar, Mutex,
@@ -36,7 +37,15 @@ impl Attempt {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *done == Some(true)
     }
-    pub fn complete(&self, acknowledged: bool) {
+    pub fn complete(&self, outcome: InvocationOutcome) {
+        // A late cancel flag cannot turn an already-final result into an
+        // interruption. Completion owns this rule so callers cannot infer an
+        // acknowledgement from the flag alone.
+        let acknowledged = self.cancelled.load(Ordering::Acquire)
+            && matches!(
+                outcome,
+                InvocationOutcome::GuestInterrupted | InvocationOutcome::Cancelled
+            );
         *self
             .done
             .lock()

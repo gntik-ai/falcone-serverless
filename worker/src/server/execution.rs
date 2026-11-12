@@ -1,15 +1,23 @@
 //! All import checks precede cache construction, compilation and guest instantiation.
-use super::error;
+use super::{
+    Service,
+    attempt::{Attempt, Registration},
+    error,
+};
 use crate::{
     api::{ExecuteRequest, Pinned},
-    artifact::validate::validate,
+    artifact::{cache_key::ENGINE_VERSION, supervisor::CompileLimits, validate::validate},
+    cache::{CONTRACT_VERSION, Cache},
     config::RuntimeConfig,
+    host,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
+use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::time::{Duration, Instant};
 
 const MAX_COMPONENT: usize = 64 * 1024 * 1024;
 
@@ -53,18 +61,6 @@ pub(super) fn component(
         .map_err(|_| error(422, "undeclared_import"))?;
     Ok(bytes)
 }
-
-use super::{
-    Service,
-    attempt::{Attempt, Registration},
-};
-use crate::{
-    artifact::{cache_key::ENGINE_VERSION, supervisor::CompileLimits},
-    cache::{CONTRACT_VERSION, Cache},
-    host,
-};
-use std::sync::{Arc, Mutex, atomic::Ordering};
-use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct Logs(Mutex<Vec<String>>);
@@ -181,10 +177,7 @@ pub(super) fn execute(
         }
         Err(execution) => execution,
     };
-    registration.attempt.complete(
-        attempt.cancelled.load(Ordering::Acquire)
-            && execution.outcome != host::outcome::InvocationOutcome::Uncertain,
-    );
+    registration.attempt.complete(execution.outcome);
     let result = execution.result.map_err(|e| error(422, e.code))?;
     let logs = logs
         .0
@@ -197,4 +190,69 @@ pub(super) fn execute(
         200,
         serde_json::to_value(result).map_err(|_| error(500, "invalid_input"))?,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use host::outcome::InvocationOutcome;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn cancel_after_guest_completion_does_not_acknowledge_an_interruption() {
+        for outcome in [
+            InvocationOutcome::Success,
+            InvocationOutcome::Failed,
+            InvocationOutcome::GuestMemoryLimit,
+            InvocationOutcome::BufferLimit,
+            InvocationOutcome::Uncertain,
+        ] {
+            let attempt = Attempt::new(Arc::new(AtomicBool::new(false)));
+            // The guest outcome is already final when cancel arrives, but the
+            // execution handler has not yet published completion to its waiter.
+            assert!(!attempt.cancel(Duration::ZERO));
+            attempt.complete(outcome);
+            assert!(
+                !attempt.cancel(Duration::ZERO),
+                "late cancel acknowledged for {outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancellation_waiter_acknowledges_only_a_completed_interruption() {
+        for outcome in [
+            InvocationOutcome::GuestInterrupted,
+            InvocationOutcome::Cancelled,
+        ] {
+            let attempt = Attempt::new(Arc::new(AtomicBool::new(false)));
+            std::thread::scope(|scope| {
+                let waiter = scope.spawn(|| attempt.cancel(Duration::from_secs(5)));
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !attempt.cancelled.load(Ordering::Acquire) {
+                    assert!(Instant::now() < deadline, "cancel never requested");
+                    std::thread::yield_now();
+                }
+                attempt.complete(outcome);
+                assert!(waiter.join().unwrap(), "interruption not acknowledged");
+            });
+        }
+    }
+
+    #[test]
+    fn completion_before_cancel_does_not_acknowledge_a_later_request() {
+        for outcome in [
+            InvocationOutcome::Success,
+            InvocationOutcome::Failed,
+            InvocationOutcome::GuestMemoryLimit,
+            InvocationOutcome::BufferLimit,
+            InvocationOutcome::Uncertain,
+            InvocationOutcome::GuestInterrupted,
+            InvocationOutcome::Cancelled,
+        ] {
+            let attempt = Attempt::new(Arc::new(AtomicBool::new(false)));
+            attempt.complete(outcome);
+            assert!(!attempt.cancel(Duration::ZERO));
+        }
+    }
 }

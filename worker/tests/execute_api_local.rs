@@ -374,6 +374,24 @@ fn http_preserves_all_three_legacy_refusals_before_invocation() {
 }
 
 #[test]
+fn oversized_transport_is_a_framing_error_not_a_legacy_body_refusal() {
+    use execution_http::Wire;
+    let service = Service::start(1);
+    let mut wire = Wire::new("/v1/execute", &request());
+    wire.input = std::io::Cursor::new(
+        b"POST /v1/execute HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 8388609\r\n\r\n"
+            .to_vec(),
+    );
+    service
+        .inner
+        .connection()
+        .unwrap()
+        .respond(&mut wire, &mut Vec::new());
+    assert_eq!(wire.response(), (400, json!({"code":"invalid_request"})));
+    assert!(!service.root.join("native").exists());
+}
+
+#[test]
 fn qualification_binaries_match_the_wat_oracles_without_running_guests() {
     let root =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/qualification/api_fixtures");

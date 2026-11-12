@@ -90,9 +90,7 @@ impl Projection {
     pub(crate) fn base_digest(&self) -> Option<&Digest> {
         self.base.as_ref().map(Base::digest)
     }
-}
 
-impl Projection {
     pub(crate) fn component_digest(&self) -> &str {
         self.component_digest.as_str()
     }
@@ -108,9 +106,7 @@ impl Projection {
             Err(constraint("projection.imports"))
         }
     }
-}
 
-impl Projection {
     pub(crate) fn engine_version(&self) -> &str {
         self.engine_version.as_str()
     }

@@ -183,9 +183,7 @@ impl ExecuteRequest {
             .map_err(|refusal| refuse(&self, refusal))?;
         Ok(self)
     }
-}
 
-impl ExecuteRequest {
     pub(crate) fn key(&self) -> (String, String) {
         (
             self.activation_id.as_str().to_owned(),
@@ -208,9 +206,7 @@ impl ExecuteRequest {
                 .unwrap_or_default(),
         )
     }
-}
 
-impl ExecuteRequest {
     pub(super) fn redact_logs(&self, logs: Vec<String>) -> Vec<String> {
         fn strings(value: &Value, found: &mut Vec<String>, minimum: usize) {
             match value {

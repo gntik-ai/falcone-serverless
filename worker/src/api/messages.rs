@@ -51,6 +51,13 @@ impl UpdateMessage {
             _ => Ok(()),
         }
     }
+
+    pub(crate) fn key(&self) -> (String, String) {
+        (
+            self.activation_id.as_str().to_owned(),
+            self.attempt_id.as_str().to_owned(),
+        )
+    }
 }
 
 /// `requested` and `uncertain` carry no claim that external side effects were reversed.
@@ -87,17 +94,7 @@ impl CancelMessage {
         };
         self
     }
-}
 
-impl CancelMessage {
-    pub(crate) fn key(&self) -> (String, String) {
-        (
-            self.activation_id.as_str().to_owned(),
-            self.attempt_id.as_str().to_owned(),
-        )
-    }
-}
-impl UpdateMessage {
     pub(crate) fn key(&self) -> (String, String) {
         (
             self.activation_id.as_str().to_owned(),

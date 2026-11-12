@@ -2,7 +2,7 @@
 use super::error;
 use serde_json::Value;
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::time::{Duration, Instant};
 
 const MAX_HEADERS: usize = 16 * 1024;
@@ -56,6 +56,22 @@ impl Write for Socket {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.stream.flush()
+    }
+}
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        // Queue the response's FIN before closing. Discard only already queued
+        // input so an unread request (notably an over-capacity execute) does not
+        // reset the socket and discard its response. Never wait for more input
+        // or let a sender keep this connection alive by streaming indefinitely.
+        let _ = self.stream.shutdown(Shutdown::Write);
+        if self.stream.set_nonblocking(true).is_ok() {
+            let _ = std::io::copy(
+                &mut (&mut self.stream).take((MAX_HEADERS + MAX_REQUEST) as u64),
+                &mut std::io::sink(),
+            );
+        }
     }
 }
 
@@ -120,7 +136,9 @@ pub(super) fn head(io: &mut impl Read, control: bool) -> Result<(String, usize),
     }
     let length = length.ok_or_else(bad)?;
     if length > MAX_REQUEST {
-        return Err(error(413, "request_too_large"));
+        // This is a transport framing limit, before the legacy action body is
+        // parsed. Reserve request_too_large for its complete v1 refusal envelope.
+        return Err(bad());
     }
     Ok((path, length))
 }

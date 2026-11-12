@@ -142,7 +142,9 @@ This is an HTTP/1.1 JSON POST transport: one request per connection, `Content-Le
 encoded request data. Connections close after the response. Header transfer has an absolute
 5 second deadline from acceptance; sending a byte does not renew it. Body reads and socket
 writes retain their 5 second inactivity allowance. These transport bounds do not replace the
-legacy body checks.
+legacy body checks. An encoded request over 8 MiB is a framing error: HTTP 400
+`invalid_request`. HTTP 413 `request_too_large` remains the complete legacy refusal
+envelope with `detail.reason: body_too_large` for the action body limit below.
 
 | Path | Operation |
 | --- | --- |
@@ -170,6 +172,9 @@ both listeners is `concurrency + 4`, including when concurrency is 64 or greater
 connection over capacity receives HTTP 503 `busy` immediately at acceptance, without reading
 headers/body, compiling or retaining a connection while waiting for an execution slot. Even
 incomplete execute request lines cannot occupy the control listener's capacity.
+After writing the response, the worker shuts down the socket's write side and discards
+queued input with a bounded, nonblocking read before closing; it never waits for an
+over-capacity sender to finish sending its request.
 
 There can be at most four simultaneous control connections, including their transfer time and
 any cancellation wait up to `cancel_reserve_ms`. A fifth control connection receives HTTP 503
@@ -180,7 +185,9 @@ Cancellation never waits for the compiler lock or an execution slot. Its process
 `RuntimeConfig.cancel_reserve_ms` (default **5000 ms**), measured after the cancel is parsed; socket
 transfer time is separate. The worker signals the attempt's cancellation flag and waits at most
 that interval for completion. A completed interruption without an uncertain host outcome reports
-`acknowledged`; otherwise it reports `uncertain` by that deadline. Cancellation interrupts guest
+`acknowledged` only for `GuestInterrupted` or `Cancelled` outcomes with cancellation requested.
+All other outcomes, including a cancel racing with an already-final success, failure or
+resource-limit outcome, report `uncertain` by that deadline. Cancellation interrupts guest
 code through the existing epoch mechanism; it never claims external side effects were undone.
 Host-call deadlines and full drain/probe/limit policy remain RUN-02 work. Existing host safety
 ceilings remain enforced.
