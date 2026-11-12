@@ -156,6 +156,12 @@ impl Running {
         self.shared.admission.slots()
     }
 
+    /// Excess execute requests being read outside the connection count; at most the control
+    /// reserve.
+    pub fn overflow(&self) -> usize {
+        self.shared.admission.overflow()
+    }
+
     /// The limit on open connections: `concurrency` plus the control reserve.
     pub fn connection_limit(&self) -> usize {
         self.shared.admission.connection_limit()
@@ -212,16 +218,23 @@ fn serve_connection(shared: &Shared, mut stream: TcpStream, mut connection: Conn
         Err(reject) => return refuse(&mut stream, reject, limits),
     };
     // The slot is claimed before the body is read, and execute never claims a control slot. A
-    // control request over capacity is answered `busy` at once. An execute request over capacity
-    // has its body read, within the same ceilings and deadlines and holding no execute slot,
-    // because the contract refuses a `runtime_mode` other than `wasm` before capacity is
-    // considered; anything else is answered `busy` as soon as that check has passed.
+    // control request over capacity is answered `busy` at once. The contract refuses a
+    // `runtime_mode` other than `wasm` before capacity is considered, which needs the body of an
+    // execute request over capacity: it is read outside the connection count, in the bounded
+    // overflow pool, so it never occupies a connection a cancel needs; over the pool it is
+    // answered `busy` at once, body unread.
     let route = head.route;
-    let admitted = match route {
-        Route::Execute => connection.take_execute(),
-        Route::Update | Route::Cancel => connection.take_control(),
+    let (admitted, reading) = match route {
+        Route::Execute => {
+            let admitted = connection.take_execute();
+            (admitted, admitted || connection.take_overflow())
+        }
+        Route::Update | Route::Cancel => {
+            let admitted = connection.take_control();
+            (admitted, admitted)
+        }
     };
-    if !admitted && route != Route::Execute {
+    if !reading {
         return send(&mut stream, &Reply::busy(), limits, true);
     }
     let body = match http::read_body(&mut stream, head, limits) {

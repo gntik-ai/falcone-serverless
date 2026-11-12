@@ -29,6 +29,7 @@ the `saturation` and `http` groups are recorded together.
 | `credential` | api | AC4: no ambient environment or preopen (declared `wasi:` imports are refused), no credential in the first 4 KiB of guest memory, credential redacted from logs, absent from the worker's environment |
 | `imports` | api | AC5: `undeclared_import` (422) for `imports: []`, for a list missing an import and for a declared import that is not allow-listed, with no compile or instance; a fully declared component runs |
 | `saturation` | saturation | AC6, AC9: `concurrency` guests that have reported progress through the update operation (so are running, not merely admitted) and then block, an extra execute gets `503 busy` at once, a cancel is acknowledged within the deadline while every execute slot is held, then recovery |
+| `saturation-stalled` | saturation | AC6, AC9: with every execute slot held by a blocked guest, more execute requests than the overflow pool holds, sent one at a time send valid headers and stall their bodies; they hold no connection (only the running guests are counted), those beyond the pool get `503 busy` at once, and a cancel is acknowledged within the deadline while the stalled bodies are still open, then recovery |
 | `http-headers` | http | AC8: headers over `MAX_HEADERS` (16 KiB) get 431 or a close, no guest |
 | `http-request` | http | AC8: a request over `MAX_REQUEST` (8 MiB) gets 413 before its body is read |
 | `http-action-body` | http | AC8: an action body over 1 MiB gets the contract's `413 body_too_large`, no guest, no artifact fetch |

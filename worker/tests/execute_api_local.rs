@@ -356,7 +356,7 @@ impl Fixture {
             cancel.text()
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        while self.running().slots() != (0, 0, 0) {
+        while self.running().slots() != (0, 0, 0) || self.running().overflow() != 0 {
             assert!(Instant::now() < deadline, "a slot leaked");
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -958,6 +958,83 @@ fn control_slots_survive_full_execute_load_and_an_extra_execute_gets_busy_at_onc
 }
 
 #[test]
+fn stalled_excess_executes_hold_no_connection_and_cannot_starve_a_cancel() {
+    let concurrency = 2;
+    let fixture = Fixture::start(concurrency, HttpLimits::default());
+    let spinners: Vec<_> = (0..concurrency)
+        .map(|n| {
+            let addr = fixture.addr();
+            let request = request(60 + n, SPIN, &[PROGRESS], None);
+            let handle = std::thread::spawn({
+                let request = request.clone();
+                move || post(addr, "/v1/execute", &serde_json::to_vec(&request).unwrap())
+            });
+            (request, handle)
+        })
+        .collect();
+    for (request, _) in &spinners {
+        wait_until_running(&fixture, request);
+    }
+    // More excess executes than the overflow pool holds, each with valid headers and a body that
+    // never completes: the pool fills, the rest are answered busy at once.
+    let reserve = CONTROL_RESERVE as usize;
+    let stalled = 2 * reserve + 2;
+    // One at a time: the first `reserve` fill the pool and wait; each one after that is answered
+    // busy at once, its body unread.
+    let mut streams: Vec<TcpStream> = Vec::new();
+    for n in 0..stalled {
+        let mut stream = connect(fixture.addr());
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n{")
+            .unwrap();
+        if n < reserve {
+            let deadline = Instant::now() + Duration::from_secs(4);
+            while fixture.running().overflow() < n + 1 {
+                assert!(Instant::now() < deadline, "the overflow pool did not fill");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            streams.push(stream);
+        } else {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let reply = read_reply(&mut stream).expect("busy at once");
+            assert_eq!(reply.status, 503, "{}", reply.text());
+            assert_eq!(reply.json()["code"], "busy");
+        }
+    }
+    // No connection is held for them: once those beyond the pool have been answered busy and
+    // closed, the count is the running guests alone, so every control slot is free.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fixture.running().slots().0 != concurrency as usize {
+        assert!(
+            Instant::now() < deadline,
+            "a stalled execute held a connection"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        fixture.running().slots(),
+        (concurrency as usize, concurrency as usize, 0)
+    );
+    // With the pool full of stalled bodies and every execute slot held, cancels are accepted
+    // within the deadline.
+    for (request, handle) in spinners {
+        let started = Instant::now();
+        let cancel = fixture.post("/v1/cancel", &cancel_body(&request, "requested"));
+        assert_eq!(cancel.status, 200, "{}", cancel.text());
+        assert_eq!(cancel.json()["cancel"]["state"], "acknowledged");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert_eq!(
+            handle.join().unwrap().json()["result"]["detail"]["reason"],
+            "cancelled"
+        );
+    }
+    drop(streams);
+    fixture.recovered();
+}
+
+#[test]
 fn a_cancel_for_an_attempt_that_is_not_running_is_acknowledged() {
     let fixture = Fixture::start(1, HttpLimits::default());
     let request = request(80, ECHO, &[], None);
@@ -1347,13 +1424,14 @@ fn serve_with_a_bad_config_or_a_missing_argument_fails_without_listening() {
 
 /// The cases of the restricted-pod qualification, run here as the fast feedback loop: the same
 /// binary, the same service and the same production limits, on loopback outside a pod.
-const POD_CASES: [&str; 14] = [
+const POD_CASES: [&str; 15] = [
     "identity",
     "non-wasm",
     "legacy",
     "credential",
     "imports",
     "saturation",
+    "saturation-stalled",
     "http-headers",
     "http-request",
     "http-action-body",
@@ -1391,7 +1469,7 @@ fn the_pod_qualification_cases_pass_locally_and_record_their_evidence() {
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
-        let group = if case == "saturation" {
+        let group = if case.starts_with("saturation") {
             "saturation"
         } else if case.starts_with("http-") {
             "http"

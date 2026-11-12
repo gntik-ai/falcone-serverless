@@ -73,6 +73,7 @@ cluster_cases! {
     credential => "credential",
     imports => "imports",
     saturation => "saturation",
+    saturation_stalled => "saturation-stalled",
     http_headers => "http-headers",
     http_request => "http-request",
     http_action_body => "http-action-body",
@@ -129,6 +130,7 @@ fn every_runner_case_has_a_cluster_test() {
         "http-control-body",
         "http-body-drip",
         "saturation",
+        "saturation-stalled",
     ] {
         assert!(cluster.contains(case), "{case}");
     }
