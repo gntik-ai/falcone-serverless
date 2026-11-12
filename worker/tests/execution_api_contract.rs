@@ -759,6 +759,8 @@ fn scalar_rules_agree_between_schema_and_parser() {
         ("/deadline", "no zone", json!("2026-11-11T12:00:30")),
         ("/deadline", "month 13", json!("2026-13-11T12:00:30Z")),
         ("/deadline", "feb 30", json!("2026-02-30T12:00:30Z")),
+        ("/deadline", "leap second", json!("2026-06-30T23:59:60Z")),
+        ("/deadline", "second 61", json!("2026-06-30T23:59:61Z")),
         ("/deadline", "hour 24", json!("2026-11-11T24:00:00Z")),
         ("/deadline", "leap day", json!("2028-02-29T00:00:00Z")),
         ("/deadline", "no leap day", json!("2026-02-29T00:00:00Z")),
