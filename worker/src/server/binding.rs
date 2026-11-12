@@ -11,7 +11,8 @@ use crate::host::{Bindings, Context, HostError, Level, Operation, Reply};
 use std::sync::{Mutex, PoisonError};
 
 /// A line is kept up to the result's line length plus what the longest secret can reach past it,
-/// so a secret straddling the cut is still found; the redactor cuts to the result length.
+/// so a secret straddling the cut is still recognised. That extra text is lookahead only: the
+/// redactor emits nothing from past the result length.
 const KEPT_CHARS: usize = MAX_LINE_CHARS + MAX_SECRET_BYTES;
 
 #[derive(Default)]

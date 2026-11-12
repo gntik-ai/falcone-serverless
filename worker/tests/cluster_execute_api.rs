@@ -79,6 +79,8 @@ cluster_cases! {
     http_silent => "http-silent",
     http_drip => "http-drip",
     http_stall => "http-stall",
+    http_control_body => "http-control-body",
+    http_body_drip => "http-body-drip",
 }
 
 #[test]
@@ -124,6 +126,8 @@ fn every_runner_case_has_a_cluster_test() {
         "http-silent",
         "http-drip",
         "http-stall",
+        "http-control-body",
+        "http-body-drip",
         "saturation",
     ] {
         assert!(cluster.contains(case), "{case}");

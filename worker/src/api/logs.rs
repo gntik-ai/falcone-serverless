@@ -123,7 +123,7 @@ impl Redactor {
                 .nth(MAX_LINE_CHARS)
                 .map_or(line.len(), |(at, _)| at);
             // A secret that starts before the cut can end after it: scan as far as the longest
-            // secret reaches, then cut the redacted result.
+            // secret reaches to recognise it, but emit only text from before the cut.
             let mut end = if cut_at < line.len() {
                 (cut_at + guard).min(line.len())
             } else {
@@ -139,7 +139,7 @@ impl Redactor {
             let Some(blocks) = occurrences(matcher, &line[..end], &mut work) else {
                 return vec![MARKER.to_owned()];
             };
-            out.push(cut(replace(&line[..end], &blocks), MAX_LINE_CHARS));
+            out.push(cut(replace(&line[..end], &blocks, cut_at), MAX_LINE_CHARS));
         }
         out
     }
@@ -174,15 +174,24 @@ fn occurrences(matcher: &AhoCorasick, text: &str, work: &mut usize) -> Option<Ve
     Some(blocks)
 }
 
-fn replace(text: &str, blocks: &[(usize, usize)]) -> String {
-    let mut out = String::with_capacity(text.len());
+/// `text` with each block replaced by `MARKER`, showing only what lies before `cut_at`. The bytes
+/// past `cut_at` were scanned only to recognise a secret that starts before it; a block that
+/// starts before the cut is replaced whole, and no plain text from past the cut is emitted, so a
+/// replacement that is shorter than its secret never pulls later text into the line.
+fn replace(text: &str, blocks: &[(usize, usize)], cut_at: usize) -> String {
+    let mut out = String::with_capacity(cut_at.min(text.len()) + MARKER.len());
     let mut copied = 0;
     for &(start, end) in blocks {
+        if start >= cut_at {
+            break;
+        }
         out.push_str(&text[copied..start]);
         out.push_str(MARKER);
         copied = end;
     }
-    out.push_str(&text[copied..]);
+    if copied < cut_at {
+        out.push_str(&text[copied..cut_at]);
+    }
     out
 }
 

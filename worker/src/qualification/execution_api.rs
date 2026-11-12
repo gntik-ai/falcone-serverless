@@ -42,12 +42,15 @@ pub const CASES: &[Case] = &[
     ("http-silent", "http", http_silent),
     ("http-drip", "http", http_drip),
     ("http-stall", "http", http_stall),
+    ("http-control-body", "http", http_control_body),
+    ("http-body-drip", "http", http_body_drip),
 ];
 
 const ECHO: &[u8] = include_bytes!("execute_fixtures/handler.wasm");
 const IMPORTS: &[u8] = include_bytes!("execute_fixtures/api-imports.wasm");
 const SPIN: &[u8] = include_bytes!("execute_fixtures/api-spin.wasm");
 const WASI: &[u8] = include_bytes!("execute_fixtures/wasi-import.wasm");
+const PROGRESS: &str = "falcone:host/progress@0.2.0";
 const LOGGING: &str = "falcone:host/logging@0.2.0";
 const CONTEXT: &str = "falcone:host/invocation-context@0.2.0";
 const CANARY: &str = "canary-credential-0001";
@@ -174,6 +177,29 @@ fn cancel_body(request: &Value) -> Vec<u8> {
         "activation_id": request["activation_id"], "attempt_id": request["attempt_id"],
         "cancel": {"state": "requested"}
     }))
+}
+
+fn update_body(request: &Value) -> Vec<u8> {
+    bytes(&json!({
+        "version": "1", "type": "update",
+        "activation_id": request["activation_id"], "attempt_id": request["attempt_id"],
+        "sequence": 1, "update": {"kind": "heartbeat"}
+    }))
+}
+
+/// Waits until the guest of `request` has run: the spinning guest reports progress 1 of 1 as its
+/// first act and the worker serves it through the update operation. An execute slot says only
+/// that a request was admitted, not that its guest runs.
+fn wait_until_running(addr: SocketAddr, request: &Value) -> Outcome {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let reply = post(addr, "/v1/update", &update_body(request))?;
+        if reply.status == 200 && reply.json()?["update"]["kind"] == "progress" {
+            return Ok(());
+        }
+        check(Instant::now() < deadline, "guest_did_not_start")?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// The service under test, with its own scratch directory.
@@ -447,17 +473,21 @@ fn saturation() -> Outcome {
     )?;
     let spinners: Vec<_> = (0..concurrency)
         .map(|n| {
-            let request = request(70 + n, SPIN, &[], None);
+            let request = request(70 + n, SPIN, &[PROGRESS], None);
             let (addr, body) = (harness.addr(), bytes(&request));
             let handle = std::thread::spawn(move || post(addr, "/v1/execute", &body));
             (request, handle)
         })
         .collect();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while harness.running.slots().1 < concurrency as usize {
-        check(Instant::now() < deadline, "executions_did_not_start")?;
-        std::thread::sleep(Duration::from_millis(10));
+    // Every guest has reported that it runs, so the slots are held by running guests and the
+    // cancels below interrupt guests, not a request still being parsed or compiled.
+    for (request, _) in &spinners {
+        wait_until_running(harness.addr(), request)?;
     }
+    check(
+        harness.running.slots().1 == concurrency as usize,
+        "execute_slots_not_held",
+    )?;
     // An extra execute gets 503 busy at once and holds no connection.
     let started = Instant::now();
     let extra = harness.execute(&request(79, ECHO, &[], None))?;
@@ -610,6 +640,69 @@ fn http_stall() -> Outcome {
         &mut stream,
         started,
         limits.io_timeout + Duration::from_secs(2),
+    )?;
+    harness.no_guest_ran()?;
+    harness.recovered()
+}
+
+fn http_control_body() -> Outcome {
+    let limits = HttpLimits::default();
+    let mut harness = Harness::start(1, limits)?;
+    // A cancel and an update whose body is over the 16 KiB control ceiling get 413 before the body
+    // is read, and no guest runs.
+    for path in ["/v1/cancel", "/v1/update"] {
+        let mut stream = connect(harness.addr())?;
+        let head = format!(
+            "POST {path} HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            limits.max_control_body + 1
+        );
+        stream.write_all(head.as_bytes()).map_err(|_| "write")?;
+        let reply = read_reply(&mut stream).ok_or("no_reply")?;
+        check(
+            reply.status == 413 && reply.json()?["code"] == "request_too_large",
+            "oversized_control_body_status",
+        )?;
+    }
+    harness.no_guest_ran()?;
+    harness.recovered()
+}
+
+fn http_body_drip() -> Outcome {
+    let limits = HttpLimits::default();
+    let mut harness = Harness::start(1, limits)?;
+    let mut stream = connect(harness.addr())?;
+    let mut dripper = stream.try_clone().map_err(|_| "clone")?;
+    let started = Instant::now();
+    let stop = Arc::new(AtomicBool::new(false));
+    // One body byte every third of the inactivity timeout: no read ever stalls, yet the body as
+    // a whole passes the absolute BODY_DEADLINE (30 s). The announced length is never reached.
+    let drip = std::thread::spawn({
+        let stop = stop.clone();
+        move || {
+            let head = b"POST /v1/execute HTTP/1.1\r\nContent-Length: 1000000\r\n\r\n";
+            if dripper.write_all(head).is_err() {
+                return;
+            }
+            while !stop.load(Ordering::SeqCst) && started.elapsed() < limits.body_deadline * 2 {
+                if dripper.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(limits.io_timeout / 3);
+            }
+        }
+    });
+    let closed = closed_within(
+        &mut stream,
+        started,
+        limits.body_deadline + Duration::from_secs(2),
+    );
+    stop.store(true, Ordering::SeqCst);
+    let _ = drip.join();
+    closed?;
+    // Closed by the absolute deadline, not by the shorter inactivity timeout.
+    check(
+        started.elapsed() >= limits.body_deadline - Duration::from_secs(1),
+        "closed_by_inactivity_not_by_the_body_deadline",
     )?;
     harness.no_guest_ran()?;
     harness.recovered()

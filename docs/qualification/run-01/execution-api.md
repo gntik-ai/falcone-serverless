@@ -28,13 +28,15 @@ the `saturation` and `http` groups are recorded together.
 | `legacy` | api | AC3: `missing_path`, `non_json_body`, `body_too_large` in contract order, no guest |
 | `credential` | api | AC4: no ambient environment or preopen (declared `wasi:` imports are refused), no credential in the first 4 KiB of guest memory, credential redacted from logs, absent from the worker's environment |
 | `imports` | api | AC5: `undeclared_import` (422) for `imports: []`, for a list missing an import and for a declared import that is not allow-listed, with no compile or instance; a fully declared component runs |
-| `saturation` | saturation | AC6, AC9: `concurrency` blocked guests, an extra execute gets `503 busy` at once, a cancel is acknowledged within the deadline while every execute slot is held, then recovery |
+| `saturation` | saturation | AC6, AC9: `concurrency` guests that have reported progress through the update operation (so are running, not merely admitted) and then block, an extra execute gets `503 busy` at once, a cancel is acknowledged within the deadline while every execute slot is held, then recovery |
 | `http-headers` | http | AC8: headers over `MAX_HEADERS` (16 KiB) get 431 or a close, no guest |
 | `http-request` | http | AC8: a request over `MAX_REQUEST` (8 MiB) gets 413 before its body is read |
 | `http-action-body` | http | AC8: an action body over 1 MiB gets the contract's `413 body_too_large`, no guest, no artifact fetch |
 | `http-silent` | http | AC8: a connection that sends nothing is closed within `HEADER_DEADLINE` (5 s) |
 | `http-drip` | http | AC8: header bytes dripped faster than `IO_TIMEOUT` are closed at the absolute `HEADER_DEADLINE` |
 | `http-stall` | http | AC8: a body that stalls is closed within `IO_TIMEOUT` (5 s), no guest |
+| `http-control-body` | http | AC8: a cancel or update body over the 16 KiB control ceiling gets 413 before the body is read, no guest |
+| `http-body-drip` | http | AC8: body bytes dripped faster than `IO_TIMEOUT` are closed at the absolute `BODY_DEADLINE` (30 s), no guest |
 
 The local feedback loop for the same cases is `worker/tests/execute_api_local.rs`, which also runs the
 pod cases on loopback outside a pod.

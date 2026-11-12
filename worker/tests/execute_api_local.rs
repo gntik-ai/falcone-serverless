@@ -107,6 +107,26 @@ fn a_secret_that_straddles_the_cut_is_not_partly_shown() {
 }
 
 #[test]
+fn shrinking_replacements_never_pull_text_past_the_cut_into_the_line() {
+    // Two whole copies of A fill the 8192-char window; B starts right after the `x`, past the cut.
+    // Replacing A twice shrinks the line, but nothing beyond the original cut may appear.
+    // Neither secret overlaps itself, so each copy is one match.
+    let a = format!("A{}", "a".repeat(MAX_SECRET_BYTES - 1));
+    let b = format!("B{}", "b".repeat(MAX_SECRET_BYTES - 1));
+    let line = format!("{a}{a}x{b}");
+    let out = redact(&[&a, &b], &[&line]);
+    assert_eq!(out, [format!("{MARKER}{MARKER}")]);
+    // The same with a secret that straddles the cut: it is replaced whole, and what follows
+    // the cut is still not shown.
+    let line = format!("{}{a}yz{b}", "x".repeat(MAX_LINE_CHARS - 100));
+    let out = redact(&[&a, &b], &[&line]);
+    assert_eq!(
+        out,
+        [format!("{}{MARKER}", "x".repeat(MAX_LINE_CHARS - 100))]
+    );
+}
+
+#[test]
 fn logs_are_capped_at_1000_lines() {
     let lines: Vec<String> = (0..MAX_LINES + 50).map(|n| format!("line {n}")).collect();
     let out = Redactor::new(["canary-credential-0004"]).redact(lines);
@@ -185,6 +205,8 @@ const ECHO: &[u8] = include_bytes!("../src/qualification/execute_fixtures/handle
 const IMPORTS: &[u8] = include_bytes!("../src/qualification/execute_fixtures/api-imports.wasm");
 const SPIN: &[u8] = include_bytes!("../src/qualification/execute_fixtures/api-spin.wasm");
 const WASI: &[u8] = include_bytes!("../src/qualification/execute_fixtures/wasi-import.wasm");
+const LOGS: &[u8] = include_bytes!("../src/qualification/execute_fixtures/api-logs.wasm");
+const PROGRESS: &str = "falcone:host/progress@0.2.0";
 const LOGGING: &str = "falcone:host/logging@0.2.0";
 const CONTEXT: &str = "falcone:host/invocation-context@0.2.0";
 const CANARY: &str = "canary-credential-0001";
@@ -227,7 +249,7 @@ impl Fixture {
         ));
         std::fs::create_dir(&directory).unwrap();
         let store = Arc::new(Store {
-            components: [ECHO, IMPORTS, SPIN, WASI]
+            components: [ECHO, IMPORTS, SPIN, WASI, LOGS]
                 .iter()
                 .map(|bytes| (digest(bytes), bytes.to_vec()))
                 .collect(),
@@ -666,6 +688,64 @@ fn the_credential_is_redacted_from_logs_and_never_reaches_guest_memory() {
     fixture.recovered();
 }
 
+/// An execute request whose guest logs its params 1000 times, with `hosts` distinct credential
+/// strings and params of 9000 characters that carry the first of them.
+fn adversarial_logging_request(n: u32, hosts: usize) -> (Value, Vec<String>) {
+    let secrets: Vec<String> = (0..hosts)
+        .map(|at| format!("adv-credential-{at:08}.example.invalid"))
+        .collect();
+    let mut request = request(n, LOGS, &[LOGGING], None);
+    request["credential"]["allowed_capabilities"][0]["scope"]["hosts"] = json!(secrets);
+    request["params"] = json!({"__ow_path": "/x", "leak": secrets[0], "pad": "p".repeat(9000)});
+    (request, secrets)
+}
+
+#[test]
+fn adversarial_logging_through_execute_is_redacted_within_the_bound_and_releases_the_slot() {
+    let fixture = Fixture::start(1, HttpLimits::default());
+    // The most distinct credential strings the redactor accepts, and 1000 lines of the maximum
+    // length: nothing of any of them survives, and the work finishes within the bound.
+    let (request, secrets) = adversarial_logging_request(120, 4000);
+    let started = Instant::now();
+    let reply = fixture.execute(&request);
+    let elapsed = started.elapsed();
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        &reply.text()[..200.min(reply.body.len())]
+    );
+    assert!(
+        elapsed < redaction_bound() + Duration::from_secs(30),
+        "{elapsed:?}"
+    );
+    let result = reply.json();
+    let logs = result["logs"].as_array().unwrap();
+    assert!(!logs.is_empty() && logs.len() <= MAX_LINES);
+    for line in logs {
+        let line = line.as_str().unwrap();
+        assert!(line.chars().count() <= MAX_LINE_CHARS);
+        assert!(
+            !line.contains("adv-credential-"),
+            "a credential string survived"
+        );
+        assert!(!line.contains(CANARY));
+    }
+    assert!(
+        logs.iter()
+            .any(|line| line.as_str() == Some(MARKER) || line.as_str().unwrap().contains(MARKER))
+    );
+    assert!(secrets.len() < MAX_SECRETS);
+    // The slot was released: a normal execute and a cancel both succeed.
+    fixture.recovered();
+    // Past the secret count the redactor fails closed: the logs are one marker line.
+    let (request, _) = adversarial_logging_request(121, MAX_SECRETS + 100);
+    let reply = fixture.execute(&request);
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["logs"], json!([MARKER]));
+    fixture.recovered();
+}
+
 #[test]
 fn no_failure_text_carries_a_credential_or_request_value() {
     let fixture = Fixture::start(1, HttpLimits::default());
@@ -724,7 +804,7 @@ fn control_slots_survive_full_execute_load_and_an_extra_execute_gets_busy_at_onc
     let spinners: Vec<_> = (0..concurrency)
         .map(|n| {
             let addr = fixture.addr();
-            let request = request(70 + n, SPIN, &[], None);
+            let request = request(70 + n, SPIN, &[PROGRESS], None);
             let handle = std::thread::spawn({
                 let request = request.clone();
                 move || post(addr, "/v1/execute", &serde_json::to_vec(&request).unwrap())
@@ -732,11 +812,12 @@ fn control_slots_survive_full_execute_load_and_an_extra_execute_gets_busy_at_onc
             (request, handle)
         })
         .collect();
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while fixture.running().slots().1 < concurrency as usize {
-        assert!(Instant::now() < deadline, "the executions did not start");
-        std::thread::sleep(Duration::from_millis(10));
+    // Each guest has reported that it runs: the slots below are held by running guests, not by
+    // requests still being parsed, registered or compiled.
+    for (request, _) in &spinners {
+        wait_until_running(&fixture, request);
     }
+    assert_eq!(fixture.running().slots().1, concurrency as usize);
     // Every execute slot is taken by a blocked guest. An extra execute is answered at once.
     let started = Instant::now();
     let extra = fixture.execute(&request(79, ECHO, &[], None));
@@ -927,39 +1008,50 @@ fn update_body(request: &Value, sequence: u64, kind: &str) -> Vec<u8> {
     .unwrap()
 }
 
+/// Blocks until the guest of `request` has run: the spinning guest reports progress 1 of 1 as its
+/// first act, and the worker serves it through the update operation. Execute-slot counts say
+/// only that a request was admitted, not that its guest runs; this is the guest's own signal.
+fn wait_until_running(fixture: &Fixture, request: &Value) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let reply = fixture.post("/v1/update", &update_body(request, 1, "heartbeat"));
+        if reply.status == 200 && reply.json()["update"]["kind"] == "progress" {
+            assert_eq!(reply.json()["update"]["completed"], 1);
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the guest did not report that it runs"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn a_running_attempt_answers_a_heartbeat_and_an_unknown_one_is_not_found() {
     use falcone_serverless_worker::api::parse_update;
     let fixture = Fixture::start(1, HttpLimits::default());
-    let spinning = request(95, SPIN, &[], None);
+    let spinning = request(95, SPIN, &[PROGRESS], None);
     let run = std::thread::spawn({
         let addr = fixture.addr();
         let body = serde_json::to_vec(&spinning).unwrap();
         move || post(addr, "/v1/execute", &body)
     });
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while fixture.running().slots().1 == 0 {
-        assert!(Instant::now() < deadline, "the execution did not start");
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    // The registration precedes the guest: wait until the heartbeat finds a bound attempt.
-    let reply = loop {
-        let reply = fixture.post("/v1/update", &update_body(&spinning, 7, "heartbeat"));
-        if reply.status == 200 || Instant::now() > deadline {
-            break reply;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    };
+    wait_until_running(&fixture, &spinning);
+    let reply = fixture.post("/v1/update", &update_body(&spinning, 7, "heartbeat"));
     assert_eq!(reply.status, 200, "{}", reply.text());
     parse_update(&reply.body).unwrap();
     let update = reply.json();
-    assert_eq!(update["update"]["kind"], "heartbeat");
+    // The guest's own report, with the sequence the poll asked for.
+    assert_eq!(update["update"]["kind"], "progress");
+    assert_eq!(update["update"]["completed"], 1);
+    assert_eq!(update["update"]["total"], 1);
     assert_eq!(update["sequence"], 7);
     assert_eq!(update["activation_id"], spinning["activation_id"]);
     // Only a heartbeat is a poll; the worker's own kinds are not accepted.
     let reply = fixture.post("/v1/update", &update_body(&spinning, 1, "progress"));
     assert_eq!(reply.status, 400);
-    let other = request(96, SPIN, &[], None);
+    let other = request(96, SPIN, &[PROGRESS], None);
     let reply = fixture.post("/v1/update", &update_body(&other, 1, "heartbeat"));
     assert_eq!((reply.status, reply.body.len()), (404, 0));
     let cancel = fixture.post("/v1/cancel", &cancel_body(&spinning, "requested"));
@@ -1151,7 +1243,7 @@ fn serve_with_a_bad_config_or_a_missing_argument_fails_without_listening() {
 
 /// The cases of the restricted-pod qualification, run here as the fast feedback loop: the same
 /// binary, the same service and the same production limits, on loopback outside a pod.
-const POD_CASES: [&str; 12] = [
+const POD_CASES: [&str; 14] = [
     "identity",
     "non-wasm",
     "legacy",
@@ -1164,6 +1256,8 @@ const POD_CASES: [&str; 12] = [
     "http-silent",
     "http-drip",
     "http-stall",
+    "http-control-body",
+    "http-body-drip",
 ];
 
 #[test]
