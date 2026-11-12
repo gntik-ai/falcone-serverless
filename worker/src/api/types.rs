@@ -45,6 +45,17 @@ macro_rules! string_type {
     };
 }
 
+/// The value of a string type, for routing and comparison; never for formatted output.
+macro_rules! as_str {
+    ($($ty:ident),+) => {$(
+        impl $ty {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    )+};
+}
+
 fn id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=128).contains(&bytes.len())
@@ -151,6 +162,8 @@ string_type!(
     Digest,
     digest
 );
+as_str!(Id, Text, NonEmpty, Digest);
+
 string_type!(
     /// A catalog base name; the concrete part of `id@version`.
     CatalogId,
@@ -205,6 +218,12 @@ impl<'de> Deserialize<'de> for Positive {
 }
 redacted!(Positive);
 
+impl Positive {
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
+
 /// An integer of at least zero and at most 2^53 - 1.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
@@ -256,6 +275,10 @@ impl<'de> Deserialize<'de> for Seconds {
 }
 redacted!(Seconds);
 
+/// The schema's bounds on `logs`: at most 1000 lines of at most 8192 characters.
+pub const MAX_LOG_LINES: usize = 1000;
+pub const MAX_LOG_CHARS: usize = 8192;
+
 /// Free text bounded by a character count, for log lines.
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
@@ -264,7 +287,8 @@ pub struct Logs(Vec<String>);
 impl<'de> Deserialize<'de> for Logs {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
         let lines = Vec::<String>::deserialize(input)?;
-        if lines.len() <= 1000 && lines.iter().all(|l| l.chars().count() <= 8192) {
+        if lines.len() <= MAX_LOG_LINES && lines.iter().all(|l| l.chars().count() <= MAX_LOG_CHARS)
+        {
             Ok(Self(lines))
         } else {
             Err(D::Error::custom("invalid value"))
@@ -272,3 +296,15 @@ impl<'de> Deserialize<'de> for Logs {
     }
 }
 redacted!(Logs);
+
+impl Logs {
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Log lines the worker produced; `None` when they exceed the schema's bounds.
+    pub(crate) fn new(lines: Vec<String>) -> Option<Self> {
+        (lines.len() <= MAX_LOG_LINES && lines.iter().all(|l| l.chars().count() <= MAX_LOG_CHARS))
+            .then_some(Self(lines))
+    }
+}

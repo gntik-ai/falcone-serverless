@@ -23,6 +23,7 @@ pub use projection::Projection;
 pub use refusal::Refusal;
 pub use request::ExecuteRequest;
 pub use result::{ExecutionResult, Pinned};
+pub use types::{MAX_LOG_CHARS, MAX_LOG_LINES};
 
 use refusal::{Code, Reason};
 use serde::Deserialize;

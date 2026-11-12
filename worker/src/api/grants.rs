@@ -134,3 +134,68 @@ impl Grant {
 pub(crate) fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
     grants.iter().all(|grant| grant.valid(version))
 }
+
+/// The concrete scope entries a request may use, per family. Only exact entries both the
+/// revision (projection) and the credential grant survive; wildcards confer no authority.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct Scopes {
+    pub prefixes: Vec<String>,
+    pub hosts: Vec<String>,
+    pub topics: Vec<String>,
+    pub targets: Vec<String>,
+}
+redacted!(Scopes);
+
+impl Grant {
+    fn entries(&self) -> (Family, &[String]) {
+        let names = match self.family {
+            Family::Storage => &self.scope.prefixes,
+            Family::Http => &self.scope.hosts,
+            Family::Event => &self.scope.topics,
+            Family::Workflow => &self.scope.targets,
+        };
+        (self.family, names.as_ref().map_or(&[][..], |n| &n.0))
+    }
+}
+
+fn entries_of(grants: &[Grant], family: Family) -> Vec<&String> {
+    grants
+        .iter()
+        .map(Grant::entries)
+        .filter(|(candidate, _)| *candidate == family)
+        .flat_map(|(_, entries)| entries)
+        .collect()
+}
+
+/// The entries of `family` granted by both lists, in the revision's order, without repeats.
+pub(crate) fn intersect(projection: &[Grant], credential: &[Grant]) -> Scopes {
+    let allowed = |family| {
+        let granted = entries_of(credential, family);
+        let mut kept: Vec<String> = Vec::new();
+        for entry in entries_of(projection, family) {
+            if granted.contains(&entry) && !kept.contains(entry) {
+                kept.push(entry.clone());
+            }
+        }
+        kept
+    };
+    Scopes {
+        prefixes: allowed(Family::Storage),
+        hosts: allowed(Family::Http),
+        topics: allowed(Family::Event),
+        targets: allowed(Family::Workflow),
+    }
+}
+
+/// Every string the grants carry that a log line could repeat: scope entries, secret
+/// references and guest grant identifiers.
+pub(crate) fn strings(grants: &[Grant], into: &mut Vec<String>) {
+    for grant in grants {
+        into.extend(grant.entries().1.iter().cloned());
+        if let Some(secret) = &grant.secret_ref {
+            into.push(secret.name.as_str().to_owned());
+            into.extend(secret.version.iter().map(|v| v.as_str().to_owned()));
+        }
+        into.extend(grant.guest_grant_id.iter().map(|id| id.as_str().to_owned()));
+    }
+}

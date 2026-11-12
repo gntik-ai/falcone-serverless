@@ -4,10 +4,12 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
-[OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
+`ctr-worker-execution-api` under ADR 0010 D1. It defines the messages and parsers
+(`worker/src/api`) and, since RUN-01.t3, the HTTP service that serves them
+(`worker/src/server`, started by `falcone-serverless-worker serve PATH`; see
+[The HTTP service](#the-http-service)). The service reads no credential store. The dispatcher
+adopts it in a later issue (INV-01). The [OCI profile](oci-profile.md) is an independent
+profile of the same contract name for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
 revision and activation state) are Proposed. This contract follows the operator decisions
@@ -172,6 +174,147 @@ The checks run in this order: path, size, JSON. The size is `max-host-to-guest-b
 case-insensitively with `application/json` ignoring parameters. The fixture labels of the inventory
 (`envelope-invalid`, `body-not-json`, `body-too-large`) are not wire codes; this mapping is. The
 legacy handler is not invoked for any of them.
+
+## The HTTP service
+
+`worker/src/server` serves the execution API on two pod-local TCP listeners with independent
+capacity. A connection belongs to the listener it arrived on; the server never classifies a
+connection after accept, so execute traffic cannot consume control capacity. Both listeners
+serve one request per connection (`Connection: close`) over plain HTTP/1.1 inside the pod;
+dispatcher authentication of either listener is decided with INV-01 and is not provided here.
+
+| Listener | Config | Serves | Everything else |
+| --- | --- | --- | --- |
+| execute | `listen_port` (8080) | `POST /v1/execute` | `404` (`405` for another method on that path) |
+| control | `control_port` (8082) | `POST /v1/cancel`, `POST /v1/update` | `404`, including `/v1/execute` |
+
+The control transport is a second TCP port, not a Unix socket, so that the dispatcher can reach
+it at the pod address on `control_port` (see [worker-runtime-config.md](../worker-runtime-config.md)).
+The controller-written Services and the chart values do not expose `control_port` yet; that is a
+follow-up in falcone-charts and in the controller.
+
+### Capacity
+
+- **Execute listener.** At most `concurrency` executions run at once. The listener admits at most
+  `concurrency` + 4 connections (`ADMISSION_ALLOWANCE`, fixed): connections reading a request,
+  writing a response or running a guest. A connection over that number is answered
+  `503 {"error":"busy"}` at once and closed without its body being read. A request inside the
+  allowance whose execution slot is taken is answered `503 busy` after it was parsed and judged
+  (below). `concurrency` is between 1 and 256.
+- **Control listener.** At most `control_max_connections` (16 by default, 1 to 256) connections;
+  one more is answered `503 busy` at once. Its header and body deadlines are
+  `control_header_deadline_ms` and `control_body_deadline_ms`. Stalled control connections never
+  affect a running execution, and stalled execute connections never affect the control listener;
+  the control listener recovers as soon as its deadlines have closed the stalled connections.
+
+### Size ceilings and deadlines
+
+| Limit | Value | Over the limit |
+| --- | --- | --- |
+| Header block (request line, headers and blank line), both listeners | 16 KiB | `431`, connection closed; no guest code runs |
+| Request body, execute listener | 8 MiB (8388608 bytes) | `413 request_too_large` from the declared `Content-Length`; the body is not read |
+| Request body, control listener | 64 KiB | `413 request_too_large` likewise |
+| `__ow_body` (action body) | 1048576 bytes | `413`, the contract's `request_too_large` result; no guest code runs |
+| Complete header block, execute listener | 5 s from accept, absolute | closed, no answer (a dripping connection is closed at the deadline) |
+| Body, execute listener | 5 s per read and 30 s in total | closed, no answer |
+| Header block and body, control listener | `control_header_deadline_ms`, `control_body_deadline_ms` | closed, no answer |
+| Response write | 5 s | closed |
+
+A request needs `Content-Length`; `Transfer-Encoding` is refused (`400`). After a response the
+server half-closes and discards what the client still sends for at most 250 ms.
+
+### Execute
+
+The body is an `execute` message. The service decides in this order, and nothing later runs once
+an earlier step answers:
+
+1. A message that does not parse: `400 malformed_request`.
+2. The contract refusals, passed through unchanged with their status and `failure` result:
+   `runtime_mode` other than `wasm` (including an image-based revision and an unknown value)
+   comes first, `409 runtime_mode_not_supported`, even when the worker is at capacity; then the
+   legacy-input refusals (`400 invalid_request`, `413 request_too_large`). No instance is created.
+3. `projection.engine_version` must be the pinned Wasmtime (`49.0.5`): otherwise
+   `409 engine_version_mismatch`.
+4. An execution slot: otherwise `503 busy`. A second execute for the same activation and attempt
+   while one runs: `409 duplicate_attempt`.
+5. The component. The worker reads the validated component the platform staged at
+   `<cache_path>/artifacts/<hex>.wasm`, where `<hex>` is the digest of `projection.component_digest`
+   and its bytes must hash to it (`424 artifact_unavailable`, `424 artifact_digest_mismatch`).
+   How artifacts reach that directory (a fetch from `falcone_api_endpoint`) is not part of this
+   task. A tenant-supplied precompiled artifact is never deserialized: the component is validated
+   (`worker/src/artifact/validate.rs`) and compiled only by the trusted compiler.
+6. **Declared imports**, before anything is compiled or instantiated. Every import of the
+   component must be in `projection.imports` **and** in `ALLOWED_IMPORTS`; an empty `imports`
+   means none. Otherwise `422 {"error":"undeclared_import","import":"<name>"}` and no guest code
+   runs. WASI imports (environment, filesystem, sockets) are never allowed, so a guest has no
+   environment variables, preopened files or sockets.
+7. The guest runs with only the `params` object as input. Its deadline is the smallest of
+   `projection.budgets.timeout_ms`, `max_wall_clock_ms` and 30 s; fuel, host-call counts, the
+   request `deadline` and host-call deadlines are limit enforcement and belong to RUN-02.
+
+A success is `200` with the `result` message: the guest's output is the legacy handler result
+(an object with `statusCode` is used as is and must satisfy the result schema; any other JSON
+value is the body of a `200`), `logs` are the guest's log lines after redaction, and `identity` is
+filled from the revision projection and the pinned Wasmtime version. A guest output that is not a
+valid handler result is `502 invalid_handler_result`.
+
+A guest that does not succeed is not a contract failure code yet (the code table above is closed):
+the service answers `{"error": <code>, "logs": [...]}` with `400 invalid_input`, `409 cancelled`,
+`504 deadline_exceeded`, `422` for an instantiation or export failure, and `502` for
+`handler_failed`, `handler_trapped`, `uncertain` and the limit codes. Guest failure text is not
+returned. Adding failure codes with classes for these outcomes is a follow-up to this contract.
+
+The service-level errors above (`malformed_request`, `busy`, `undeclared_import`, `engine_version_mismatch`,
+`duplicate_attempt`, `artifact_*`, the guest codes, `not_found`, `execution_not_found`) are
+`{"error": <code>}` objects, not `result` messages.
+
+### Cancel and update (control listener)
+
+`POST /v1/cancel` takes a `cancel` message in state `requested`, sets the execution's
+cancellation, which interrupts the guest at its next epoch tick (5 ms) and refuses further host
+calls, and waits for the execution to end for at most `cancel_reserve_ms` (5000 by default). It
+answers `200` with the same message in state `acknowledged` once the execution has ended, and in
+state `uncertain` when it has not ended within that time (for example a blocked host call, which
+RUN-02's host-call deadlines will bound) or when a mutating host call may still commit. An
+execution that is not running is `404 execution_not_found`. No state claims that external side
+effects were reversed. The interrupted execute request answers `409 cancelled`.
+
+`POST /v1/update` takes an `update` message for a running execution and answers `202` with
+`{"accepted":true,"sequence":N}`. Sequences must increase: a repeated or older one is
+`409 stale_sequence`. The worker keeps only the latest sequence; relaying progress and
+checkpoints is RUN-02 and JOB work.
+
+### Credential and redaction
+
+The execution credential is parsed and checked against the request, then used for two things
+only: the host `Context` (tenant, workspace, invocation identity) and the redaction set. It is
+never passed to the guest, never placed in WASI environment or files, never written to a
+worker log and never returned. The worker's structured events (one JSON object per line on stderr:
+`listening`, `admitted`, `execution_started`, `execution_finished`, `panic`) carry only static
+text and numbers, and the panic hook prints only a source line.
+
+Guest log lines are the only text that leaves the host from guest code. Each execution redacts
+them like this: keep at most 1000 lines; truncate each line to 8192 characters **first**; then
+replace every string of the credential (all claim strings, grant scope entries, secret
+references; one-character ones included) with `<redacted>` using one leftmost-longest
+multi-pattern matcher (Aho-Corasick) built once per execution, so the work is linear in the
+pattern bytes plus the line bytes; then truncate to 8192 characters again, because replacements
+can lengthen a line. The work has a fixed budget of 12 MiB (credential-string bytes plus line
+bytes). Over the budget, or if the matcher cannot be built, the logs are dropped and the result
+carries the single line `<redacted>`: the failure mode never returns unredacted text. In a
+release build, redacting 400,000 distinct strings against 1000 maximum-length lines takes under
+one second.
+
+## Qualification of the service
+
+`worker/tests/execute_api_local.rs` starts the real `serve` binary and runs each case over
+loopback TCP; the same cases (`worker/src/qualification/execution_api.rs`) run in the restricted
+`fs-test-run01-*` pod through `worker/tests/cluster_execute_api.rs` (gated by `FS_TEST_CLUSTER`).
+The cases, by acceptance criterion: `envelope` (identity), `runtime-mode`, `credential`,
+`imports`, `saturation` and `control-stall` (capacity, cancel under load, recovery),
+`cross-listener`, and `headers`, `request`, `action-body`, `silent`, `drip`, `stalled-body`
+(every size ceiling and deadline, each followed by a successful execute and a successful
+cancel). Cases synchronize on the worker's events and on responses.
 
 ## Grant versions
 

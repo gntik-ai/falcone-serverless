@@ -7,7 +7,7 @@ use super::types::{
     Count, Digest, Id, InterfaceVersion, Logs, Positive, RuntimeMode, Text, Version,
 };
 use super::wire::{constant, present, redacted, unit_debug};
-use super::{Malformed, constraint};
+use super::{Attribution, Malformed, constraint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -125,6 +125,48 @@ impl Pinned for ExecuteRequest {
 }
 
 impl ExecutionResult {
+    /// A successful execution: the guest's output as the legacy handler result, the redacted
+    /// logs, and the identity of the revision on the pinned Wasmtime. `None` when the output is
+    /// not a valid handler result or the logs exceed the schema.
+    pub fn success(
+        request: &ExecuteRequest,
+        output: &[u8],
+        logs: Vec<String>,
+        wasmtime_version: &str,
+    ) -> Option<Self> {
+        let result = Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: request.activation_id().clone(),
+            attempt_id: request.attempt_id().clone(),
+            attempt_number: request.attempt_number(),
+            status: Status::Success,
+            result: Outcome::Handler(HandlerResult::from_output(output)?),
+            class: None,
+            logs: Logs::new(logs)?,
+            identity: Identity::of(&request.projection, wasmtime_version),
+        };
+        result.check(request).ok()?;
+        Some(result)
+    }
+
+    /// A refusal: nothing ran. The identity describes the pinned revision as projected.
+    pub fn refused(attribution: &Attribution, refusal: Refusal) -> Self {
+        let projection = &attribution.projection;
+        Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: attribution.activation_id.clone(),
+            attempt_id: attribution.attempt_id.clone(),
+            attempt_number: attribution.attempt_number,
+            status: Status::Failure,
+            class: Some(refusal.class()),
+            result: Outcome::Failure(refusal),
+            logs: Logs::empty(),
+            identity: Identity::of(projection, projection.engine_version()),
+        }
+    }
+
     /// The rules a schema cannot attach to one field, and the identity of the pinned revision.
     pub(super) fn check(&self, pinned: &impl Pinned) -> Result<(), Malformed> {
         match (&self.status, &self.result, &self.class) {
@@ -155,7 +197,39 @@ impl ExecutionResult {
     }
 }
 
+impl HandlerResult {
+    /// The legacy handler result from a guest's output. An object with `statusCode` is the
+    /// web-action shape and must satisfy the contract; any other JSON value is the action's
+    /// result and becomes the body of a 200 (`null` has no body). Non-JSON output is `None`.
+    fn from_output(output: &[u8]) -> Option<Self> {
+        let value: Value = serde_json::from_slice(output).ok()?;
+        match value {
+            Value::Object(ref map) if map.contains_key("statusCode") => {
+                serde_json::from_value(value).ok()
+            }
+            other => Some(Self {
+                status_code: Count::from(200),
+                headers: None,
+                body: (!other.is_null()).then_some(other),
+            }),
+        }
+    }
+}
+
 impl Identity {
+    /// The identity of the pinned revision running on `wasmtime_version`.
+    fn of(projection: &Projection, wasmtime_version: &str) -> Self {
+        Self {
+            function_revision: projection.revision.clone(),
+            runtime_mode: projection.runtime_mode,
+            artifact_digest: projection.artifact_digest.clone(),
+            base_digest: projection.base_digest().cloned(),
+            wasmtime_version: Text::fixed(wasmtime_version),
+            language_profile: projection.language_profile.clone(),
+            interface_version: InterfaceVersion::Only,
+        }
+    }
+
     /// The identity must describe the pinned revision, and `base_digest` is present exactly
     /// when the projection pins a base (both inverse mutations are rejected).
     fn check(&self, projection: &Projection) -> Result<(), Malformed> {

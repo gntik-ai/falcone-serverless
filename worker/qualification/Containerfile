@@ -5,12 +5,14 @@ COPY compiler/Cargo.toml compiler/Cargo.toml
 COPY compiler/src compiler/src
 COPY worker/Cargo.toml worker/Cargo.toml
 COPY worker/src worker/src
-RUN cargo build --release --locked -p falcone-serverless-worker --bin qualification_runner --bin compile-cache-qualification --bin artifact-compile-child
+RUN cargo build --release --locked -p falcone-serverless-worker --bin qualification_runner --bin compile-cache-qualification --bin artifact-compile-child --bin falcone-serverless-worker
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 # Root-owned, readable and executable by any UID, writable by none. The guests are embedded.
 COPY --from=build --chmod=0555 /build/target/release/qualification_runner /usr/local/bin/qualification_runner
 COPY --from=build --chmod=0555 /build/target/release/compile-cache-qualification /usr/local/bin/compile-cache-qualification
 COPY --from=build --chmod=0555 /build/target/release/artifact-compile-child /usr/local/bin/artifact-compile-child
+# RUN-01.t3: the worker service the execution-API cases start inside the pod.
+COPY --from=build --chmod=0555 /build/target/release/falcone-serverless-worker /usr/local/bin/falcone-serverless-worker
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/qualification_runner"]

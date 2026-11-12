@@ -154,6 +154,11 @@ impl Refusal {
     pub(crate) fn class(&self) -> Class {
         self.code.class()
     }
+
+    /// The HTTP status of the refusal, passed through unchanged.
+    pub fn http_status(&self) -> u16 {
+        self.code.status()
+    }
 }
 
 /// Names the code and reason, which are validated codes; the message is not printed.

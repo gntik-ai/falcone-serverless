@@ -1,6 +1,6 @@
 //! The execute message and the checks that admit it to the Wasm worker.
 
-use super::grants::{Grant, GrantVersion, all_valid};
+use super::grants::{Grant, GrantVersion, Scopes, all_valid, intersect, strings};
 use super::projection::Projection;
 use super::refusal::{Code, Reason, Refusal};
 use super::types::{Deadline, Id, NonEmpty, Positive, RuntimeMode, Seconds, Version};
@@ -58,6 +58,13 @@ redacted!(Invocation);
 #[serde(transparent)]
 pub struct Params(Map<String, Value>);
 redacted!(Params);
+
+impl Params {
+    fn bytes(&self) -> Vec<u8> {
+        // A `Map` always serializes.
+        serde_json::to_vec(&self.0).unwrap_or_default()
+    }
+}
 
 impl<'de> Deserialize<'de> for Params {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
@@ -135,7 +142,83 @@ pub struct ExecuteRequest {
 }
 redacted!(ExecuteRequest);
 
+impl Credential {
+    /// Every string of the claims, including the grant scopes and secret references: the set
+    /// the worker redacts from logs. Numbers are not secrets.
+    fn strings(&self) -> Vec<String> {
+        let mut all: Vec<String> = [
+            &self.iss,
+            &self.aud,
+            &self.tenant,
+            &self.workspace,
+            &self.pool_profile,
+            &self.revision,
+            &self.activation,
+            &self.attempt,
+        ]
+        .iter()
+        .map(|value| value.as_str().to_owned())
+        .collect();
+        strings(&self.allowed_capabilities, &mut all);
+        all
+    }
+}
+
 impl ExecuteRequest {
+    pub fn activation(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    pub fn attempt(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    pub fn projection(&self) -> &Projection {
+        &self.projection
+    }
+
+    pub fn tenant(&self) -> &str {
+        self.credential.tenant.as_str()
+    }
+
+    pub fn workspace(&self) -> &str {
+        self.credential.workspace.as_str()
+    }
+
+    pub fn invocation_key(&self) -> &str {
+        self.invocation.invocation_key.as_str()
+    }
+
+    /// Empty when the request carries none.
+    pub fn idempotency_key(&self) -> &str {
+        self.invocation
+            .idempotency_key
+            .as_ref()
+            .map_or("", Id::as_str)
+    }
+
+    /// The only input a guest receives: the `params` object. The credential is not part of it.
+    pub fn guest_input(&self) -> Vec<u8> {
+        self.params.bytes()
+    }
+
+    /// The credential strings to redact, deduplicated and without empty entries.
+    pub fn secrets(&self) -> Vec<String> {
+        let mut all = self.credential.strings();
+        all.retain(|secret| !secret.is_empty());
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    /// The scopes both the revision and the credential grant.
+    pub fn scopes(&self) -> Scopes {
+        intersect(
+            self.projection.grants(),
+            &self.credential.allowed_capabilities,
+        )
+    }
+
     pub(super) fn activation_id(&self) -> &Id {
         &self.activation_id
     }

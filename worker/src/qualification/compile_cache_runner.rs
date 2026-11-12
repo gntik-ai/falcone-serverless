@@ -7,6 +7,7 @@ mod compile_cache_fixtures;
 mod counting_alloc;
 mod execute_cases;
 mod execute_runner;
+mod execution_api;
 mod limits_cases;
 mod limits_runner;
 pub use falcone_serverless_worker::host;
@@ -126,9 +127,37 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
     )
 }
 
+/// RUN-01.t3: one execution-API case against the worker service binary beside this executable,
+/// over real TCP inside this restricted pod.
+fn execution_api_main(case: &str) -> std::process::ExitCode {
+    let worker = std::env::current_exe()
+        .map(|exe| exe.with_file_name("falcone-serverless-worker"))
+        .map_err(|_| "executable_path".to_owned());
+    match worker.and_then(|worker| execution_api::run(case, &worker)) {
+        Ok(()) => {
+            println!("{}", serde_json::json!({"case":case,"status":"passed"}));
+            println!(
+                "{}",
+                serde_json::json!({"check":"execution_api","status":"passed"})
+            );
+            std::process::ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            println!(
+                "{}",
+                serde_json::json!({"check":"execution_api","status":"failed","case":case,"reason":reason})
+            );
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("--guest-execute-allocation") => return execute_runner::allocation_main(),
+        Some(flag) if flag.starts_with("--execution-api=") => {
+            return execution_api_main(&flag["--execution-api=".len()..]);
+        }
         Some(flag) if flag.starts_with("--guest-execute=") => {
             return execute_runner::run(&flag[16..]);
         }

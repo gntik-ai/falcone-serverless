@@ -29,6 +29,9 @@ wasmparser = { workspace = true }
 sha2 = { workspace = true }
 # Already locked; authenticates only process-local trusted compiler output.
 ring = "=0.17.14"
+# Already locked (via the engine's dependencies); one leftmost-longest multi-pattern matcher
+# redacts guest log lines in linear time.
+aho-corasick = { version = "=1.1.5", default-features = false, features = ["std"] }
 
 [[bin]]
 name = "artifact-compile-child"

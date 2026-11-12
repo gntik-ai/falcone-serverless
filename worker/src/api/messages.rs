@@ -42,6 +42,18 @@ pub struct UpdateMessage {
 redacted!(UpdateMessage);
 
 impl UpdateMessage {
+    pub fn activation(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    pub fn attempt(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence.get()
+    }
+
     pub(super) fn check(&self) -> Result<(), Malformed> {
         match &self.update {
             Update::Progress {
@@ -74,3 +86,34 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+impl CancelMessage {
+    pub fn activation(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    pub fn attempt(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    /// Whether this is the dispatcher's request, the only state the worker accepts.
+    pub fn is_requested(&self) -> bool {
+        matches!(self.cancel, Cancel::Requested {})
+    }
+
+    /// The worker's answer to this request: `acknowledged`, or `uncertain` when the outcome of
+    /// the cancellation is not known. Neither claims that external side effects were reversed.
+    pub fn answer(&self, acknowledged: bool) -> Self {
+        Self {
+            version: Version::Only,
+            message: CancelType::Only,
+            activation_id: self.activation_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            cancel: if acknowledged {
+                Cancel::Acknowledged {}
+            } else {
+                Cancel::Uncertain {}
+            },
+        }
+    }
+}

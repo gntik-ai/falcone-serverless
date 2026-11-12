@@ -4,6 +4,10 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
+// The worker service (worker/src/server, RUN-01.t3) uses the accessors and constructors of the
+// api module; this conformance test drives only the parsers. The same allowance sits on
+// `mod api` in main.rs, where the dispatcher-side parsers are likewise unused by the service.
+#[allow(dead_code, unused_imports)]
 #[path = "../src/api/mod.rs"]
 mod api;
 

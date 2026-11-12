@@ -87,6 +87,28 @@ impl Projection {
         }
     }
 
+    /// The Wasmtime version the revision pins.
+    pub fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+
+    /// The declared imports; empty means none.
+    pub fn imports(&self) -> impl Iterator<Item = &str> {
+        self.imports.iter().map(Text::as_str)
+    }
+
+    pub fn component_digest(&self) -> &str {
+        self.component_digest.as_str()
+    }
+
+    pub fn timeout_ms(&self) -> u64 {
+        self.budgets.timeout_ms.get()
+    }
+
+    pub(crate) fn grants(&self) -> &[Grant] {
+        &self.grants
+    }
+
     pub(crate) fn base_digest(&self) -> Option<&Digest> {
         self.base.as_ref().map(Base::digest)
     }

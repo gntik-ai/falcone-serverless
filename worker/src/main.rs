@@ -2,8 +2,8 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
+// The server uses the request, result, cancel and update types; the projection, result and
+// update parsers stay for the dispatcher side and the conformance tests until it adopts them.
 #[cfg_attr(not(test), allow(dead_code))]
 mod api;
 
@@ -11,6 +11,8 @@ mod api;
 mod checkpoint;
 
 mod config;
+
+mod server;
 
 #[cfg(test)]
 mod runtime_metrics;
@@ -25,6 +27,19 @@ pub fn version() -> &'static str {
 
 /// Run CLI arguments excluding the executable name, including explicit execution.
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
+    // The service runs until the process ends and writes its structured events to stderr from
+    // many threads, so it must not run while this thread holds the stderr lock.
+    if let [command, path] = args
+        && command == "serve"
+    {
+        return match serve_command(std::path::Path::new(path)) {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+    }
     run_with_io(
         args,
         &mut std::io::stdout().lock(),
@@ -66,11 +81,19 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+/// `serve PATH`: validates the config file and runs the execute and control listeners.
+fn serve_command(path: &std::path::Path) -> Result<(), String> {
+    let input = std::fs::read_to_string(path)
+        .map_err(|error| format!("read config {}: {error}", path.display()))?;
+    let config = config::load_from_str(&input)?;
+    server::serve(&config)
 }
 
 fn execute_command(

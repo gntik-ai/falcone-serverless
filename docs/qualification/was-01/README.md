@@ -108,6 +108,10 @@ lifting allocates a result or error message. Hooks restore the existing import
 budget when entering guest code or a host import. This changes the compiled
 Wasmtime surface and is part of the R3 second review and operator approval;
 it adds no packages, changes no versions and leaves Cargo.lock unchanged.
+RUN-01.t3 adds the worker dependency `aho-corasick =1.1.5` (std only), the one
+leftmost-longest multi-pattern matcher that redacts guest log lines in linear time. It was
+already locked through the engine's dependency tree: Cargo.lock gains only the worker's
+dependency edge and no package, and no version changes.
 Existing dependency tables are intentional. Any other changed entry or added lock
 package requires an explicit review and guard update; the evidence report adds no
 dependencies. Fixture tests check that

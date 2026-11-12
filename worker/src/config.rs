@@ -13,6 +13,16 @@ pub struct RuntimeConfig {
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
     pub probe_port: u16,
+    /// The pod-local control listener (cancel and execution update), separate from
+    /// `listen_port` so execute traffic can never consume control capacity.
+    #[serde(default = "default_u16::<8082>")]
+    pub control_port: u16,
+    #[serde(default = "default_u32::<16>")]
+    pub control_max_connections: u32,
+    #[serde(default = "default_u64::<5000>")]
+    pub control_header_deadline_ms: u64,
+    #[serde(default = "default_u64::<5000>")]
+    pub control_body_deadline_ms: u64,
     #[serde(default = "startup_probe_path")]
     pub startup_probe_path: String,
     #[serde(default = "readiness_probe_path")]
@@ -64,6 +74,11 @@ impl Default for EgressConfig {
     }
 }
 
+/// Documented upper bounds; the execute listener spawns one thread per admitted connection.
+pub const MAX_CONCURRENCY: u32 = 256;
+pub const MAX_CONTROL_CONNECTIONS: u32 = 256;
+pub const MAX_CONTROL_DEADLINE_MS: u64 = 60_000;
+
 fn default_u16<const N: u16>() -> u16 {
     N
 }
@@ -108,6 +123,43 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
             return Err(format!("{field}: must not be empty"));
         }
     }
+    if !(1..=MAX_CONCURRENCY).contains(&config.concurrency) {
+        return Err(format!(
+            "concurrency: must be between 1 and {MAX_CONCURRENCY}"
+        ));
+    }
+    if !(1..=MAX_CONTROL_CONNECTIONS).contains(&config.control_max_connections) {
+        return Err(format!(
+            "control_max_connections: must be between 1 and {MAX_CONTROL_CONNECTIONS}"
+        ));
+    }
+    for (field, value) in [
+        (
+            "control_header_deadline_ms",
+            config.control_header_deadline_ms,
+        ),
+        ("control_body_deadline_ms", config.control_body_deadline_ms),
+    ] {
+        if !(1..=MAX_CONTROL_DEADLINE_MS).contains(&value) {
+            return Err(format!(
+                "{field}: must be between 1 and {MAX_CONTROL_DEADLINE_MS}"
+            ));
+        }
+    }
+    // Port 0 asks the OS for an ephemeral port and is reported by the `listening` event.
+    let ports = [
+        ("listen_port", config.listen_port),
+        ("metrics_port", config.metrics_port),
+        ("probe_port", config.probe_port),
+        ("control_port", config.control_port),
+    ];
+    for (index, (field, port)) in ports.iter().enumerate() {
+        if *port != 0
+            && let Some((other, _)) = ports[..index].iter().find(|(_, other)| other == port)
+        {
+            return Err(format!("{field}: must differ from {other}"));
+        }
+    }
     if config.default_wall_clock_ms > config.max_wall_clock_ms {
         return Err("default_wall_clock_ms must not exceed max_wall_clock_ms".into());
     }
@@ -131,11 +183,21 @@ mod tests {
     use std::collections::BTreeMap;
 
     const DOC: &str = include_str!("../../docs/contracts/worker-runtime-config.md");
-    const FIELDS: [[&str; 5]; 22] = [
+    const FIELDS: [[&str; 5]; 26] = [
         ["version", "u32", "none", "1", "false"],
         ["listen_port", "u16", "port", "8080", "false"],
         ["metrics_port", "u16", "port", "9090", "false"],
         ["probe_port", "u16", "port", "8081", "false"],
+        ["control_port", "u16", "port", "8082", "false"],
+        [
+            "control_max_connections",
+            "u32",
+            "connections",
+            "16",
+            "false",
+        ],
+        ["control_header_deadline_ms", "u64", "ms", "5000", "false"],
+        ["control_body_deadline_ms", "u64", "ms", "5000", "false"],
         ["startup_probe_path", "string", "path", "/startupz", "false"],
         ["readiness_probe_path", "string", "path", "/readyz", "false"],
         ["pool_id", "string", "none", "none", "true"],
@@ -291,6 +353,10 @@ mod tests {
                 "listen_port": 8080,
                 "metrics_port": 9090,
                 "probe_port": 8081,
+                "control_port": 8082,
+                "control_max_connections": 16,
+                "control_header_deadline_ms": 5000,
+                "control_body_deadline_ms": 5000,
                 "startup_probe_path": "/startupz",
                 "readiness_probe_path": "/readyz",
                 "pool_id": "tenant-a-interactive",
@@ -395,6 +461,52 @@ mod tests {
             let error = super::load_from_str(&format!("{MINIMAL}\n{budgets}")).unwrap_err();
             assert!(error.contains("drain_ms"), "{error}");
         }
+    }
+
+    #[test]
+    fn concurrency_and_control_limits_have_documented_bounds() {
+        for (line, field) in [
+            ("concurrency = 0", "concurrency"),
+            ("concurrency = 257", "concurrency"),
+            ("control_max_connections = 0", "control_max_connections"),
+            ("control_max_connections = 257", "control_max_connections"),
+            (
+                "control_header_deadline_ms = 0",
+                "control_header_deadline_ms",
+            ),
+            (
+                "control_header_deadline_ms = 60001",
+                "control_header_deadline_ms",
+            ),
+            ("control_body_deadline_ms = 0", "control_body_deadline_ms"),
+            (
+                "control_body_deadline_ms = 60001",
+                "control_body_deadline_ms",
+            ),
+        ] {
+            let error = super::load_from_str(&format!("{line}\n{MINIMAL}")).unwrap_err();
+            assert!(error.starts_with(field), "{line}: {error}");
+        }
+        for line in ["concurrency = 256", "control_max_connections = 256"] {
+            super::load_from_str(&format!("{line}\n{MINIMAL}")).expect(line);
+        }
+    }
+
+    #[test]
+    fn control_port_and_listener_ports_must_be_distinct() {
+        for (line, field) in [
+            ("control_port = 8080", "control_port"),
+            ("control_port = 9090", "control_port"),
+            ("control_port = 8081", "control_port"),
+            ("listen_port = 9090", "metrics_port"),
+            ("probe_port = 8080", "probe_port"),
+        ] {
+            let error = super::load_from_str(&format!("{line}\n{MINIMAL}")).unwrap_err();
+            assert!(error.starts_with(field), "{line}: {error}");
+        }
+        // Ephemeral ports never collide with each other.
+        super::load_from_str(&format!("listen_port = 0\ncontrol_port = 0\n{MINIMAL}"))
+            .expect("ephemeral ports");
     }
 
     #[test]

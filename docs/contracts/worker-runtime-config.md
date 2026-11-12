@@ -3,8 +3,11 @@
 Contract version: v1
 
 This closed TOML contract provides `ctr-worker-runtime-config` for the Wasm worker,
-chart and controller. Adding a field requires v2. Unknown keys are rejected at every
-level. No runtime consumer, server, engine or cluster operation is implemented here.
+chart and controller. Unknown keys are rejected at every
+level. The parser itself has no runtime side effects; `serve PATH` (RUN-01.t3) starts the
+execute and control listeners from a validated file. RUN-01.t3 added the four `control_*`
+fields below with defaults, so a v1 file without them stays valid; consumers (charts) must
+tolerate the defaults. Any further field requires v2.
 
 ## Fields
 
@@ -20,6 +23,10 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | listen_port | u16 | port | 8080 | false |
 | metrics_port | u16 | port | 9090 | false |
 | probe_port | u16 | port | 8081 | false |
+| control_port | u16 | port | 8082 | false |
+| control_max_connections | u32 | connections | 16 | false |
+| control_header_deadline_ms | u64 | ms | 5000 | false |
+| control_body_deadline_ms | u64 | ms | 5000 | false |
 | startup_probe_path | string | path | /startupz | false |
 | readiness_probe_path | string | path | /readyz | false |
 | pool_id | string | none | none | true |
@@ -38,6 +45,20 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | falcone_api_endpoint | string | URL | none | true |
 | falcone_dispatcher_endpoint | string | URL | none | true |
 | dispatcher_key_path | string | path | /var/run/falcone/dispatcher-keys | false |
+
+`listen_port` is the execute listener (only `POST /v1/execute`). `control_port` is a second
+pod-local TCP port, the control listener (only cancel and execution update); the dispatcher
+reaches it at the pod address on `control_port`. The two listeners have independent
+connection limits: the execute listener admits at most `concurrency` running executions plus
+a fixed admission allowance (see [the execution API](worker-execution-api/execution-api-v1.md)),
+and the control listener admits at most `control_max_connections` connections, each bound by
+`control_header_deadline_ms` (time to receive the complete header block) and
+`control_body_deadline_ms` (time to receive the complete body). `concurrency` is between 1
+and 256, `control_max_connections` between 1 and 256, and each control deadline between 1
+and 60000 ms. `listen_port`, `metrics_port`, `probe_port` and `control_port` must be pairwise
+distinct; port 0 asks the OS for an ephemeral port (used by tests, reported in the
+`listening` event) and is exempt from that check. Exposing the control port in a Service is
+not part of this contract.
 
 Each default budget must be at or below its configured maximum. The sum of
 `cancel_reserve_ms`, `checkpoint_reserve_ms` and `kill_grace_ms` must be at or
@@ -88,6 +109,10 @@ version = 1
 listen_port = 8080
 metrics_port = 9090
 probe_port = 8081
+control_port = 8082
+control_max_connections = 16
+control_header_deadline_ms = 5000
+control_body_deadline_ms = 5000
 startup_probe_path = "/startupz"
 readiness_probe_path = "/readyz"
 pool_id = "tenant-a-interactive"

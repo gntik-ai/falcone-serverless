@@ -553,6 +553,7 @@ dependencies = [
 name = "falcone-serverless-worker"
 version = "0.1.0"
 dependencies = [
+ "aho-corasick",
  "jsonschema",
  "k8s-openapi",
  "kube",
