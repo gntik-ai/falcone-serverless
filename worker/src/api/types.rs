@@ -124,6 +124,11 @@ string_type!(
     id
 );
 impl Id {
+    /// The identifier text, for host-side routing and the guest's invocation identity.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub(crate) fn same_as(&self, other: &NonEmpty) -> bool {
         self.0 == other.0
     }
@@ -135,6 +140,10 @@ string_type!(
     text
 );
 impl Text {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// Library-authored text, never request data.
     pub(crate) fn fixed(value: &str) -> Self {
         Self(value.to_owned())
@@ -151,6 +160,12 @@ string_type!(
     Digest,
     digest
 );
+impl Digest {
+    /// The 64 lowercase hex digits after the `sha256:` prefix; the type guarantees both.
+    pub fn hex(&self) -> &str {
+        &self.0["sha256:".len()..]
+    }
+}
 string_type!(
     /// A catalog base name; the concrete part of `id@version`.
     CatalogId,
@@ -260,6 +275,12 @@ redacted!(Seconds);
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Logs(Vec<String>);
+
+impl Logs {
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+}
 
 impl<'de> Deserialize<'de> for Logs {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {

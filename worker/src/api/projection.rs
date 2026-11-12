@@ -87,6 +87,16 @@ impl Projection {
         }
     }
 
+    /// The digest the raw artifact must hash to.
+    pub fn artifact_digest(&self) -> &Digest {
+        &self.artifact_digest
+    }
+
+    /// The engine version the revision was pinned to.
+    pub fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+
     pub(crate) fn base_digest(&self) -> Option<&Digest> {
         self.base.as_ref().map(Base::digest)
     }

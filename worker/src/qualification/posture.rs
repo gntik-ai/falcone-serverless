@@ -1,5 +1,8 @@
 //! Restricted-posture contract v1 and separately wired worker capability host.
 
+#[path = "../api/mod.rs"]
+pub mod api;
+
 #[path = "../host/mod.rs"]
 pub mod host;
 

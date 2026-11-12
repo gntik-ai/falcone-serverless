@@ -4,10 +4,10 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
-[OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
+`ctr-worker-execution-api` under ADR 0010 D1. The messages and parsers are in `worker/src/api`.
+The worker serves them over pod-local HTTP (see [Transport](#transport)); the dispatcher adopts
+them in a later issue (INV-01). The [OCI profile](oci-profile.md) is an independent profile of
+the same contract name for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
 revision and activation state) are Proposed. This contract follows the operator decisions
@@ -181,6 +181,66 @@ The two lists are validated separately and never mixed: a credential with a `0.2
 a projection with a `0.1.0` grant fails. The credential's `$ref`
 (`https://falcone.dev/contracts/serverless/capability-grants/v1#/$defs/grant`) is kept exactly as
 published and is resolved offline from [vendor/](vendor/README.md).
+
+## Transport
+
+`falcone-serverless-worker serve CONFIG [--artifacts DIR]` serves the contract on the
+`listen_port` of the [runtime config](../worker-runtime-config.md) (v1, unchanged), HTTP/1.1, one
+request per connection, JSON bodies, `POST` only:
+
+| Path | Request | Answer |
+| --- | --- | --- |
+| `/v1/execute` | `execute` | `200` with the `result` of the contract; a refusal answers with its contract status |
+| `/v1/cancel` | `cancel` with state `requested` | `200` with `cancel` state `acknowledged` or `uncertain` |
+| `/v1/update` | `update` | `202` for a running attempt |
+
+Any other path is `404` and any other method `405`. Every answer that is not a result, a refusal
+or a cancel answer is `{"error": "<label>"}` with a fixed label and no request value, and carries
+no envelope. No new failure code or schema field is defined by the transport.
+
+- **Execute.** The request is parsed and admitted by `parse_request` first. A refusal returns the
+  contract status: the failure `result` of the activation when the request was read in full, and
+  the bare failure envelope otherwise (an unknown runtime mode, or a body above the transport
+  bound, which is `request_too_large` with `413`). A malformed request is `400` with the label of
+  the violated rule. An accepted request resolves its artifact by `projection.artifact_digest`
+  from the trusted, read-only, digest-addressed directory (`DIR`, default
+  `/var/run/falcone/artifacts`, file `<64 hex digits>.wasm`), verifies the sha256 before anything
+  else, validates, compiles through the trusted compile child and runs the guest. A request never
+  carries artifact bytes and never names a path. The `result` carries the `identity` block from
+  the projection, with `wasmtime_version` from the engine embedded in the worker; a projection
+  pinned to another engine is `409 engine_version_mismatch` and nothing runs. The guest's output
+  must be a legacy handler result `{statusCode, headers?, body?}`; anything else is
+  `502 invalid_handler_result`.
+- **Interim errors without an envelope.** The v1 failure table has no code for these, and this
+  task adds none (open question for INV-01): `404 artifact_unavailable`, `422
+  artifact_digest_mismatch`, a validation or compile code of the artifact validator (for example
+  `422 precompiled_rejected`, `422 undeclared_import`), `503 busy` when as many attempts are
+  running as the configured `concurrency`, `409 attempt_in_progress` for a duplicate attempt, and
+  for a guest that did not finish `504 deadline_exceeded`, `409 cancelled` or `502` with the
+  engine's code. A guest's own error text is never echoed.
+- **Cancel.** A `requested` cancel of a running attempt stops the guest and waits up to
+  `cancel_reserve_ms` for it to end. The answer is `acknowledged` when the guest stopped and
+  `uncertain` when a host call may still commit or the guest did not stop in time. A cancel or an
+  update for an attempt that is not running is `404 unknown_attempt` and has no effect. Host-call
+  deadlines that interrupt a blocked host call belong to RUN-02.
+- **Update.** Updates flow from the worker to the dispatcher. Whether the worker pushes them to
+  the dispatcher endpoint or exposes them for polling is open (INV-01); this endpoint only
+  accepts one for a running attempt and keeps nothing.
+- **Bounds.** At most 16 KiB of request head and 4 MiB of body (a declared larger body is refused
+  unread), a read and write timeout per connection, 64 connections, and `concurrency` attempts.
+- **No authentication yet.** The caller is not authenticated until INV-01 defines how the
+  dispatcher authenticates to the worker, and the credential signature is not verified here.
+  Reachability is restricted by deployment, and pools stay at zero replicas until then.
+
+### The execution credential
+
+The credential claims are held only in the parsed request, a host-side value whose `Debug` and
+`Display` print `<redacted>`. The guest receives the `params` object and the invocation identity
+(`invocation_key`, `attempt_id`, `idempotency_key`) through `host::execute`, nothing else: no
+WASI environment, arguments or preopens exist, because a component may import only
+`falcone:host/*` and anything else fails validation as `undeclared_import`. Worker logs are
+structured JSON lines whose fields are fixed labels or the redacted `Debug` of a request; a panic
+logs only its location.
 
 ## Runtime parsers and redaction
 

@@ -1,10 +1,11 @@
 //! Standalone WAS-02 qualification of embedded fixtures; no worker service.
-pub use falcone_serverless_worker::{artifact, cache};
+pub use falcone_serverless_worker::{api, artifact, cache};
 mod capability_http;
 mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod execute_api_runner;
 mod execute_cases;
 mod execute_runner;
 mod limits_cases;
@@ -129,6 +130,9 @@ fn qualify(root: &Path, child: &Path) -> Result<(), String> {
 fn main() -> std::process::ExitCode {
     match std::env::args().nth(1).as_deref() {
         Some("--guest-execute-allocation") => return execute_runner::allocation_main(),
+        Some(flag) if flag.starts_with("--execute-api=") => {
+            return execute_api_runner::run(&flag[14..]);
+        }
         Some(flag) if flag.starts_with("--guest-execute=") => {
             return execute_runner::run(&flag[16..]);
         }

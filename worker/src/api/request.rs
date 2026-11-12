@@ -148,6 +148,33 @@ impl ExecuteRequest {
         self.attempt_number
     }
 
+    pub fn projection(&self) -> &Projection {
+        &self.projection
+    }
+
+    /// The invocation identity the guest reads through `falcone:host/invocation-context`.
+    pub fn invocation_key(&self) -> &str {
+        self.invocation.invocation_key.as_str()
+    }
+
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.invocation.idempotency_key.as_ref().map(Id::as_str)
+    }
+
+    pub fn attempt_key(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    pub fn activation_key(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    /// The only bytes of the request a guest receives: the legacy `main(params)` object. The
+    /// credential and the projection never reach the guest.
+    pub fn params_json(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.params).unwrap_or_default()
+    }
+
     fn attribution(&self) -> Attribution {
         Attribution {
             activation_id: self.activation_id.clone(),

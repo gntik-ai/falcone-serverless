@@ -8,7 +8,8 @@
 mod api;
 
 use api::{
-    Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,
+    ExecutionResult, Malformed, Refusal, Rejection, parse_cancel, parse_projection, parse_request,
+    parse_result, parse_update,
 };
 use jsonschema::{Draft, Registry, Validator};
 use serde_json::{Value, json};
@@ -1839,4 +1840,147 @@ fn a_304_result_with_a_body_is_malformed_in_schema_and_parser() {
     let (schema, verdict) = judge("result", &document, Some(&pinned));
     assert!(schema);
     assert!(matches!(verdict, Verdict::Accepted(_)));
+}
+
+#[test]
+fn a_success_reply_carries_the_identity_of_the_request_it_answers() {
+    let output =
+        br#"{"statusCode":200,"headers":{"content-type":"application/json"},"body":{"ok":true}}"#;
+    for name in names("request/valid") {
+        let document = fixture(&format!("request/valid/{name}"));
+        let request = parse_request(&bytes(&document)).unwrap();
+        let result = ExecutionResult::success(&request, "49.0.5", output).unwrap();
+        let reply = serde_json::to_value(&result).unwrap();
+        assert!(
+            Schemas::new().for_message("result").is_valid(&reply),
+            "{name}"
+        );
+        assert!(parse_result(&bytes(&reply), &request).is_ok(), "{name}");
+        let identity = &reply["identity"];
+        let projection = &document["projection"];
+        assert_eq!(
+            identity["function_revision"], projection["revision"],
+            "{name}"
+        );
+        assert_eq!(
+            identity["artifact_digest"], projection["artifact_digest"],
+            "{name}"
+        );
+        assert_eq!(identity["wasmtime_version"], "49.0.5", "{name}");
+        assert_eq!(identity["interface_version"], "0.2.0", "{name}");
+        let pinned = projection["base"]["digest"]
+            .as_str()
+            .or_else(|| projection["base"]["image_digest"].as_str());
+        assert_eq!(identity["base_digest"].as_str(), pinned, "{name}");
+        // The engine named in the reply is the engine that ran: a projection pinned to
+        // another engine does not describe it, so no reply is made.
+        assert!(
+            ExecutionResult::success(&request, "49.0.4", output).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_handler_output_that_is_not_a_handler_result_is_not_a_reply() {
+    let request = parse_request(&bytes(&fixture("request/valid/wasm-no-base"))).unwrap();
+    for output in [
+        &b"not json"[..],
+        br#"{"statusCode":99}"#,
+        br#"{"statusCode":304,"body":{}}"#,
+        br#"{"statusCode":200,"extra":1}"#,
+    ] {
+        assert!(ExecutionResult::success(&request, "49.0.5", output).is_err());
+    }
+}
+
+#[test]
+fn the_guest_receives_only_params_and_the_invocation_identity() {
+    let mut document = fixture("request/valid/wasm-no-base");
+    // Claim values that differ from every value the dispatcher also puts in `params`.
+    for claim in ["iss", "aud", "tenant", "workspace", "pool_profile"] {
+        document["credential"][claim] = format!("claim-{claim}-value").into();
+    }
+    let request = parse_request(&bytes(&document)).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&request.params_json()).unwrap(),
+        document["params"]
+    );
+    let sent = String::from_utf8(request.params_json()).unwrap();
+    for claim in ["iss", "aud", "tenant", "workspace", "pool_profile"] {
+        let value = document["credential"][claim].as_str().unwrap();
+        assert!(!sent.contains(value), "{claim} reaches the guest");
+    }
+    assert_eq!(request.invocation_key(), "inv-0000007");
+    assert_eq!(request.idempotency_key(), Some("idem-0000007"));
+    assert_eq!(request.attempt_key(), "att-synthetic-0001");
+    assert_eq!(request.activation_key(), "act-synthetic-0001");
+    let projection = request.projection();
+    assert_eq!(projection.engine_version(), "49.0.5");
+    assert_eq!(
+        format!("sha256:{}", projection.artifact_digest().hex()),
+        document["projection"]["artifact_digest"]
+    );
+    let without = {
+        let mut document = document.clone();
+        document["invocation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("idempotency_key");
+        parse_request(&bytes(&document)).unwrap()
+    };
+    assert_eq!(without.idempotency_key(), None);
+}
+
+#[test]
+fn a_refusal_is_answered_with_its_contract_status_and_the_activation_when_known() {
+    let oci = fixture("request/refused/oci-mode");
+    let Err(Rejection::Refused(refused)) = parse_request(&bytes(&oci)) else {
+        panic!("oci is not refused");
+    };
+    assert_eq!(refused.refusal.http_status(), 409);
+    let reply: Value = serde_json::from_slice(&refused.reply("49.0.5").unwrap()).unwrap();
+    assert!(Schemas::new().for_message("result").is_valid(&reply));
+    assert_eq!(
+        reply["result"],
+        expected_refusal("runtime_mode_not_supported", 409, "runtime_mode_not_wasm")
+    );
+    assert_eq!(reply["class"], "non_retryable");
+    assert_eq!(reply["activation_id"], oci["activation_id"]);
+    let projection = parse_projection(&bytes(&oci["projection"])).unwrap();
+    assert!(parse_result(&bytes(&reply), &projection).is_ok());
+    // Without an attribution only the failure envelope can be answered.
+    let unknown = fixture("request/refused/unknown-runtime-mode");
+    let Err(Rejection::Refused(refused)) = parse_request(&bytes(&unknown)) else {
+        panic!("an unknown mode is not refused");
+    };
+    let reply: Value = serde_json::from_slice(&refused.reply("49.0.5").unwrap()).unwrap();
+    assert_eq!(
+        reply,
+        expected_refusal("runtime_mode_not_supported", 409, "runtime_mode_not_wasm")
+    );
+    let too_large = Refusal::body_too_large();
+    assert_eq!(too_large.http_status(), 413);
+    assert_eq!(
+        serde_json::to_value(&too_large).unwrap(),
+        expected_refusal("request_too_large", 413, "body_too_large")
+    );
+}
+
+#[test]
+fn a_cancel_is_answered_acknowledged_or_uncertain_and_only_requested_is_a_request() {
+    let requested = parse_cancel(&bytes(&fixture("cancel/valid/requested"))).unwrap();
+    assert!(requested.is_requested());
+    assert_eq!(requested.activation(), "act-synthetic-0001");
+    assert_eq!(requested.attempt(), "att-synthetic-0001");
+    for (uncertain, expected) in [(false, "acknowledged"), (true, "uncertain")] {
+        let answer = serde_json::to_value(requested.answer(uncertain)).unwrap();
+        assert!(Schemas::new().for_message("cancel").is_valid(&answer));
+        assert_eq!(answer["cancel"]["state"], expected);
+        assert_eq!(answer["activation_id"], "act-synthetic-0001");
+        assert!(!parse_cancel(&bytes(&answer)).unwrap().is_requested());
+    }
+    let update = parse_update(&bytes(&fixture("update/valid/heartbeat"))).unwrap();
+    assert_eq!(update.activation(), "act-synthetic-0001");
+    assert_eq!(update.attempt(), "att-synthetic-0001");
 }

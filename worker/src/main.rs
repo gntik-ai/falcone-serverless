@@ -2,15 +2,12 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
-
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
 mod config;
+
+mod server;
 
 #[cfg(test)]
 mod runtime_metrics;
@@ -25,6 +22,17 @@ pub fn version() -> &'static str {
 
 /// Run CLI arguments excluding the executable name, including explicit execution.
 pub fn run(args: &[std::ffi::OsString]) -> i32 {
+    // The server logs from its own threads, so it must not run while this thread holds the
+    // stderr lock that `run_with_io` is given below.
+    if let Some(result) = serve_command(args) {
+        return match result {
+            Ok(()) => 0,
+            Err(error) => {
+                eprintln!("{error}");
+                1
+            }
+        };
+    }
     run_with_io(
         args,
         &mut std::io::stdout().lock(),
@@ -47,6 +55,23 @@ pub fn run_with_io(
     }
 }
 
+/// `serve CONFIG [--artifacts DIR]`; `None` for any other command.
+fn serve_command(args: &[std::ffi::OsString]) -> Option<Result<(), String>> {
+    let (config, artifacts) = match args {
+        [command, config] if command == "serve" => {
+            (config, std::ffi::OsStr::new(server::DEFAULT_ARTIFACTS))
+        }
+        [command, config, flag, artifacts] if command == "serve" && flag == "--artifacts" => {
+            (config, artifacts.as_os_str())
+        }
+        _ => return None,
+    };
+    Some(server::serve(
+        std::path::Path::new(config),
+        std::path::Path::new(artifacts),
+    ))
+}
+
 fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Result<(), String> {
     let output = match args {
         [] => format!("falcone-serverless-worker {}", version()),
@@ -66,7 +91,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS] | serve CONFIG [--artifacts DIR]]".into(),
             );
         }
     };

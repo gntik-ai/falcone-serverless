@@ -95,6 +95,20 @@ pub struct Refused {
 }
 
 impl Refused {
+    /// The refusal as the worker answers it: the failure result of the activation when the
+    /// request was read in full, otherwise the bare failure envelope.
+    pub fn reply(&self, engine: &str) -> Result<Vec<u8>, Malformed> {
+        let encoded = match &self.attribution {
+            Some(attribution) => serde_json::to_vec(&ExecutionResult::refusal(
+                attribution,
+                engine,
+                self.refusal.clone(),
+            )),
+            None => serde_json::to_vec(&self.refusal),
+        };
+        encoded.map_err(|_| constraint("reply"))
+    }
+
     fn new(refusal: Refusal, attribution: Option<Attribution>) -> Self {
         Self {
             refusal,

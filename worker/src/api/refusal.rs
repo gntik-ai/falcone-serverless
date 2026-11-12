@@ -154,6 +154,16 @@ impl Refusal {
     pub(crate) fn class(&self) -> Class {
         self.code.class()
     }
+
+    /// The HTTP status of the refusal, from its code.
+    pub fn http_status(&self) -> u16 {
+        self.code.status()
+    }
+
+    /// The refusal for a request whose HTTP body exceeded the transport bound.
+    pub fn body_too_large() -> Self {
+        Self::new(Code::RequestTooLarge, Reason::BodyTooLarge)
+    }
 }
 
 /// Names the code and reason, which are validated codes; the message is not printed.

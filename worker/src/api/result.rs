@@ -7,7 +7,7 @@ use super::types::{
     Count, Digest, Id, InterfaceVersion, Logs, Positive, RuntimeMode, Text, Version,
 };
 use super::wire::{constant, present, redacted, unit_debug};
-use super::{Malformed, constraint};
+use super::{Attribution, Malformed, constraint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -124,7 +124,81 @@ impl Pinned for ExecuteRequest {
     }
 }
 
+impl Identity {
+    /// What ran, from the pinned projection. `wasmtime_version` is the engine this worker
+    /// embeds, passed by the caller, so a result never claims an engine that did not run it.
+    fn of(projection: &Projection, engine: &str) -> Self {
+        Self {
+            function_revision: projection.revision.clone(),
+            runtime_mode: projection.runtime_mode,
+            artifact_digest: projection.artifact_digest.clone(),
+            base_digest: projection.base_digest().cloned(),
+            wasmtime_version: Text::fixed(engine),
+            language_profile: projection.language_profile.clone(),
+            interface_version: projection.interface_version,
+        }
+    }
+}
+
 impl ExecutionResult {
+    fn answer(
+        request: &ExecuteRequest,
+        engine: &str,
+        status: Status,
+        result: Outcome,
+        class: Option<Class>,
+    ) -> Self {
+        Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: request.activation_id().clone(),
+            attempt_id: request.attempt_id().clone(),
+            attempt_number: request.attempt_number(),
+            status,
+            result,
+            class,
+            logs: Logs::empty(),
+            identity: Identity::of(&request.projection, engine),
+        }
+    }
+
+    /// The success envelope for a handler's output, which must be a legacy handler result
+    /// `{statusCode, headers?, body?}`. The result is checked against the request it answers
+    /// before it is returned, so it is one `parse_result` accepts.
+    pub fn success(
+        request: &ExecuteRequest,
+        engine: &str,
+        output: &[u8],
+    ) -> Result<Self, Malformed> {
+        let handler: HandlerResult = serde_json::from_slice(output)?;
+        let result = Self::answer(
+            request,
+            engine,
+            Status::Success,
+            Outcome::Handler(handler),
+            None,
+        );
+        result.check(request)?;
+        Ok(result)
+    }
+
+    /// The failure envelope for a refusal, attributed to the activation it answers.
+    pub(super) fn refusal(attribution: &Attribution, engine: &str, refusal: Refusal) -> Self {
+        let class = refusal.class();
+        Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: attribution.activation_id.clone(),
+            attempt_id: attribution.attempt_id.clone(),
+            attempt_number: attribution.attempt_number,
+            status: Status::Failure,
+            result: Outcome::Failure(refusal),
+            class: Some(class),
+            logs: Logs::empty(),
+            identity: Identity::of(&attribution.projection, engine),
+        }
+    }
+
     /// The rules a schema cannot attach to one field, and the identity of the pinned revision.
     pub(super) fn check(&self, pinned: &impl Pinned) -> Result<(), Malformed> {
         match (&self.status, &self.result, &self.class) {
