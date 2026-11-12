@@ -98,9 +98,37 @@
         "properties": {
           "result": {
             "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/failure"
+          }
+        },
+        "if": {
+          "properties": {
+            "result": {
+              "properties": {
+                "code": {
+                  "const": "busy"
+                }
+              },
+              "required": [
+                "code"
+              ]
+            }
           },
-          "class": {
-            "const": "non_retryable"
+          "required": [
+            "result"
+          ]
+        },
+        "then": {
+          "properties": {
+            "class": {
+              "const": "retryable"
+            }
+          }
+        },
+        "else": {
+          "properties": {
+            "class": {
+              "const": "non_retryable"
+            }
           }
         }
       }

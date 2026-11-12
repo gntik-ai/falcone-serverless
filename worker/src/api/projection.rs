@@ -78,6 +78,33 @@ pub struct Projection {
 redacted!(Projection);
 
 impl Projection {
+    pub fn revision(&self) -> &Id {
+        &self.revision
+    }
+
+    pub fn artifact_digest(&self) -> &Digest {
+        &self.artifact_digest
+    }
+
+    /// The engine (Wasmtime) version the revision is pinned to.
+    pub fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+
+    /// The imports the revision declares; empty means none.
+    pub fn imports(&self) -> impl Iterator<Item = &str> {
+        self.imports.iter().map(Text::as_str)
+    }
+
+    pub fn grants(&self) -> &[Grant] {
+        &self.grants
+    }
+
+    /// The revision's wall-clock budget in milliseconds.
+    pub fn timeout_ms(&self) -> u64 {
+        self.budgets.timeout_ms.get()
+    }
+
     /// The rules a schema cannot attach to one field.
     pub(crate) fn check(&self) -> Result<(), Malformed> {
         if all_valid(&self.grants, GrantVersion::V020) {

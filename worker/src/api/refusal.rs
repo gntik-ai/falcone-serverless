@@ -1,8 +1,9 @@
 //! Failure codes, their classes, and the refusal envelope.
 //!
 //! The three `GW_` codes are named and meant exactly as in ctr-functions-api v1 and are only
-//! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`
-//! and `request_too_large`. Nothing in this module reads a request field.
+//! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`,
+//! `request_too_large`, and the codes the worker service adds: `undeclared_import`, `busy` and
+//! `execution_failed`. Nothing in this module reads a request field.
 
 use super::types::{Count, Text};
 use super::wire::unit_debug;
@@ -10,8 +11,8 @@ use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// How a caller may react to a failure. Every v1 code is `non_retryable`; later revisions add
-/// codes of the other classes without changing these names.
+/// How a caller may react to a failure. Every code is `non_retryable` except `busy`; a retried
+/// attempt of a code never changes its class.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
@@ -35,6 +36,12 @@ pub enum Code {
     InvalidRequest,
     #[serde(rename = "request_too_large")]
     RequestTooLarge,
+    #[serde(rename = "undeclared_import")]
+    UndeclaredImport,
+    #[serde(rename = "busy")]
+    Busy,
+    #[serde(rename = "execution_failed")]
+    ExecutionFailed,
 }
 unit_debug!(
     Code: OciNotAuthorized,
@@ -43,6 +50,9 @@ unit_debug!(
     RuntimeModeNotSupported,
     InvalidRequest,
     RequestTooLarge,
+    UndeclaredImport,
+    Busy,
+    ExecutionFailed,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +65,22 @@ pub enum Reason {
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    UndeclaredImport,
+    Busy,
+    HandlerFailed,
+    HandlerTrapped,
+    InvalidInput,
+    InvalidHandlerResult,
+    DeadlineExceeded,
+    Cancelled,
+    GuestMemoryLimitExceeded,
+    BufferLimitExceeded,
+    ArtifactUnavailable,
+    ArtifactRejected,
+    ArtifactDigestMismatch,
+    EngineMismatch,
+    Uncertain,
+    WorkerError,
 }
 unit_debug!(
     Reason: OciNotAuthorized,
@@ -64,6 +90,22 @@ unit_debug!(
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    UndeclaredImport,
+    Busy,
+    HandlerFailed,
+    HandlerTrapped,
+    InvalidInput,
+    InvalidHandlerResult,
+    DeadlineExceeded,
+    Cancelled,
+    GuestMemoryLimitExceeded,
+    BufferLimitExceeded,
+    ArtifactUnavailable,
+    ArtifactRejected,
+    ArtifactDigestMismatch,
+    EngineMismatch,
+    Uncertain,
+    WorkerError,
 );
 
 impl Code {
@@ -73,6 +115,9 @@ impl Code {
             Self::BaseDisabled | Self::BaseMismatch | Self::RuntimeModeNotSupported => 409,
             Self::InvalidRequest => 400,
             Self::RequestTooLarge => 413,
+            Self::UndeclaredImport => 422,
+            Self::Busy => 503,
+            Self::ExecutionFailed => 500,
         }
     }
 
@@ -86,12 +131,20 @@ impl Code {
             }
             Self::InvalidRequest => "The request is malformed.",
             Self::RequestTooLarge => "The request body exceeds the size budget.",
+            Self::UndeclaredImport => {
+                "The component imports an interface the revision does not declare."
+            }
+            Self::Busy => "The worker is at capacity.",
+            Self::ExecutionFailed => "The execution failed.",
         }
     }
 
     /// Retries never change the class: a retried attempt of a non-retryable code stays so.
     pub(crate) fn class(self) -> Class {
-        Class::NonRetryable
+        match self {
+            Self::Busy => Class::Retryable,
+            _ => Class::NonRetryable,
+        }
     }
 
     fn allows(self, reason: Reason) -> bool {
@@ -106,6 +159,25 @@ impl Code {
                     Reason::MissingPath | Reason::NonJsonBody
                 )
                 | (Self::RequestTooLarge, Reason::BodyTooLarge)
+                | (Self::UndeclaredImport, Reason::UndeclaredImport)
+                | (Self::Busy, Reason::Busy)
+                | (
+                    Self::ExecutionFailed,
+                    Reason::HandlerFailed
+                        | Reason::HandlerTrapped
+                        | Reason::InvalidInput
+                        | Reason::InvalidHandlerResult
+                        | Reason::DeadlineExceeded
+                        | Reason::Cancelled
+                        | Reason::GuestMemoryLimitExceeded
+                        | Reason::BufferLimitExceeded
+                        | Reason::ArtifactUnavailable
+                        | Reason::ArtifactRejected
+                        | Reason::ArtifactDigestMismatch
+                        | Reason::EngineMismatch
+                        | Reason::Uncertain
+                        | Reason::WorkerError
+                )
         )
     }
 }
@@ -128,7 +200,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn new(code: Code, reason: Reason) -> Self {
+    pub fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
             status: Count::from(code.status()),
@@ -153,6 +225,11 @@ impl Refusal {
 
     pub(crate) fn class(&self) -> Class {
         self.code.class()
+    }
+
+    /// The HTTP status the contract gives the code.
+    pub fn http_status(&self) -> u16 {
+        self.code.status()
     }
 }
 

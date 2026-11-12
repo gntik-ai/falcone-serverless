@@ -183,3 +183,24 @@ fn a_parsed_message_prints_no_value() {
         assert!(!printed.contains(value));
     }
 }
+
+#[test]
+fn a_deadline_converts_to_unix_milliseconds() {
+    use super::types::Deadline;
+    // Literals from an independent calendar implementation, including a leap day, the epoch,
+    // a fraction of one digit, three digits and more than three (truncated, not rounded).
+    for (text, millis) in [
+        ("1970-01-01T00:00:00Z", 0),
+        ("1970-01-01T00:00:00.5Z", 500),
+        ("2000-02-29T23:59:59.999Z", 951_868_799_999),
+        ("2024-02-29T12:34:56.789123Z", 1_709_210_096_789),
+        ("2026-11-12T15:00:01.05Z", 1_794_495_601_050),
+        ("2099-01-01T00:00:00Z", 4_070_908_800_000),
+    ] {
+        let deadline: Deadline = serde_json::from_value(json!(text)).unwrap();
+        assert_eq!(deadline.unix_millis(), Some(millis), "{text}");
+    }
+    // Before 1970 there is no unsigned millisecond count.
+    let early: Deadline = serde_json::from_value(json!("1969-12-31T23:59:59Z")).unwrap();
+    assert_eq!(early.unix_millis(), None);
+}

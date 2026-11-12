@@ -46,5 +46,29 @@
     "reasons": ["body_too_large"],
     "retryable": false,
     "class": "non_retryable"
+  },
+  {
+    "code": "undeclared_import",
+    "origin": "worker",
+    "status": 422,
+    "reasons": ["undeclared_import"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "busy",
+    "origin": "worker",
+    "status": 503,
+    "reasons": ["busy"],
+    "retryable": true,
+    "class": "retryable"
+  },
+  {
+    "code": "execution_failed",
+    "origin": "worker",
+    "status": 500,
+    "reasons": ["handler_failed", "handler_trapped", "invalid_input", "invalid_handler_result", "deadline_exceeded", "cancelled", "guest_memory_limit_exceeded", "buffer_limit_exceeded", "artifact_unavailable", "artifact_rejected", "artifact_digest_mismatch", "engine_mismatch", "uncertain", "worker_error"],
+    "retryable": false,
+    "class": "non_retryable"
   }
 ]

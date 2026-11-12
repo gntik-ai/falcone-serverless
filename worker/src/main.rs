@@ -2,11 +2,6 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
-
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
@@ -58,6 +53,9 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let config = config::load_from_str(&input)?;
             serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
         }
+        [command, config, artifacts] if command == "serve" => {
+            return serve_command(config, artifacts);
+        }
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
         }
@@ -66,11 +64,36 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve CONFIG ARTIFACTS | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+/// Serves the worker execution API (ctr-worker-execution-api v1) on `listen_port` of the
+/// configuration, from the components in the ARTIFACTS directory. The trusted compile child is
+/// resolved beside this executable, never from a request or the PATH.
+fn serve_command(config_path: &std::ffi::OsStr, artifacts: &std::ffi::OsStr) -> Result<(), String> {
+    use falcone_serverless_worker::server::{Config, DirArtifacts, Server};
+    let path = std::path::Path::new(config_path);
+    let input = std::fs::read_to_string(path)
+        .map_err(|error| format!("read config {}: {error}", path.display()))?;
+    let runtime = config::load_from_str(&input)?;
+    let compiler = std::env::current_exe()
+        .map_err(|_| "compile_failed")?
+        .with_file_name("artifact-compile-child");
+    let mut config = Config::new(
+        compiler,
+        std::path::PathBuf::from(&runtime.cache_path),
+        std::sync::Arc::new(DirArtifacts(std::path::PathBuf::from(artifacts))),
+    );
+    config.concurrency = runtime.concurrency;
+    config.cancel_deadline = std::time::Duration::from_millis(runtime.cancel_reserve_ms);
+    let address = std::net::SocketAddr::from(([0, 0, 0, 0], runtime.listen_port));
+    Server::bind(address, config)
+        .and_then(Server::serve)
+        .map_err(|error| format!("serve: {error}"))
 }
 
 fn execute_command(

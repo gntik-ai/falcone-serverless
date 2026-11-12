@@ -45,6 +45,18 @@ macro_rules! string_type {
     };
 }
 
+/// The validated text, for the trusted host code that acts on it. It is never formatted into an
+/// error or a log by this module.
+macro_rules! as_str {
+    ($($ty:ident),+ $(,)?) => {$(
+        impl $ty {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    )+};
+}
+
 fn id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=128).contains(&bytes.len())
@@ -167,6 +179,37 @@ string_type!(
     timestamp
 );
 
+impl Deadline {
+    /// Milliseconds since the Unix epoch, rounded down; `None` before 1970. The text was
+    /// checked as a real calendar date, so only the year range can fail.
+    pub fn unix_millis(&self) -> Option<u64> {
+        let b = self.0.as_bytes();
+        let number = |range: std::ops::Range<usize>| self.0[range].parse::<i64>().ok();
+        let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+        let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+        // Days from the civil calendar (proleptic Gregorian), as in Howard Hinnant's algorithm.
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let year_of_era = year.rem_euclid(400);
+        let shifted = (month + 9) % 12;
+        let day_of_year = (153 * shifted + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
+        // `.f` carries at most nine digits after the dot, before the trailing `Z`.
+        let fraction = if b.len() > 20 {
+            let digits = &self.0[20..b.len() - 1];
+            let padded = format!("{digits:0<3}");
+            padded[..3].parse::<i64>().ok()?
+        } else {
+            0
+        };
+        u64::try_from(seconds * 1000 + fraction).ok()
+    }
+}
+
+as_str!(Id, Text, NonEmpty, Digest);
+
 /// The largest integer the contract carries: 2^53 - 1, exactly representable in any JSON reader.
 const MAX_WHOLE: u64 = 9_007_199_254_740_991;
 
@@ -194,6 +237,12 @@ fn whole<'de, D: Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Positive(u64);
+
+impl Positive {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 impl<'de> Deserialize<'de> for Positive {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
@@ -260,6 +309,20 @@ redacted!(Seconds);
 #[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct Logs(Vec<String>);
+
+impl Logs {
+    /// Log lines already cut and redacted by the caller; the bounds hold regardless.
+    pub(crate) fn bounded(lines: Vec<String>) -> Self {
+        let mut lines = lines;
+        lines.truncate(1000);
+        for line in &mut lines {
+            if let Some((at, _)) = line.char_indices().nth(8192) {
+                line.truncate(at);
+            }
+        }
+        Self(lines)
+    }
+}
 
 impl<'de> Deserialize<'de> for Logs {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {

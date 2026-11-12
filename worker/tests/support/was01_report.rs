@@ -420,7 +420,9 @@ pub fn run(
 }
 
 /// Dependency tables and lockfile package names from b5e7330, with #277's
-/// worker-only call-hook feature for bounded return lifting (see WAS-01 README).
+/// worker-only call-hook feature for bounded return lifting (see WAS-01 README), and RUN-01.t3's
+/// worker-only `aho-corasick` (already locked by `jsonschema` and `regex`) for bounded log
+/// redaction: no package enters the lock.
 pub fn dependency_guard(root: &str, worker: &str, lock: &str) -> bool {
     fn tables(
         value: &toml::Value,

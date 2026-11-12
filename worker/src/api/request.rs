@@ -33,6 +33,35 @@ pub struct Credential {
 }
 redacted!(Credential);
 
+impl Credential {
+    pub fn tenant(&self) -> &str {
+        self.tenant.as_str()
+    }
+
+    pub fn workspace(&self) -> &str {
+        self.workspace.as_str()
+    }
+
+    /// Every string the credential carries. The host binding layer redacts these from logs and
+    /// error text; none of them reaches a guest.
+    pub fn strings(&self) -> Vec<&str> {
+        let mut out = vec![
+            self.iss.as_str(),
+            self.aud.as_str(),
+            self.tenant.as_str(),
+            self.workspace.as_str(),
+            self.pool_profile.as_str(),
+            self.revision.as_str(),
+            self.activation.as_str(),
+            self.attempt.as_str(),
+        ];
+        for grant in &self.allowed_capabilities {
+            grant.strings(&mut out);
+        }
+        out
+    }
+}
+
 /// The invocation identity (`falcone:host/invocation-context`); `attempt-id` is `attempt_id`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,6 +81,16 @@ pub struct Invocation {
     correlation_id: Option<Id>,
 }
 redacted!(Invocation);
+
+impl Invocation {
+    pub fn invocation_key(&self) -> &str {
+        self.invocation_key.as_str()
+    }
+
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_ref().map(Id::as_str)
+    }
+}
 
 /// The legacy `main(params)` object: `__ow_*` request fields beside the action parameters.
 #[derive(Clone, PartialEq, Serialize)]
@@ -136,19 +175,41 @@ pub struct ExecuteRequest {
 redacted!(ExecuteRequest);
 
 impl ExecuteRequest {
-    pub(super) fn activation_id(&self) -> &Id {
+    pub fn activation_id(&self) -> &Id {
         &self.activation_id
     }
 
-    pub(super) fn attempt_id(&self) -> &Id {
+    pub fn attempt_id(&self) -> &Id {
         &self.attempt_id
     }
 
-    pub(super) fn attempt_number(&self) -> Positive {
+    pub fn attempt_number(&self) -> Positive {
         self.attempt_number
     }
 
-    fn attribution(&self) -> Attribution {
+    pub fn deadline(&self) -> &Deadline {
+        &self.deadline
+    }
+
+    pub fn invocation(&self) -> &Invocation {
+        &self.invocation
+    }
+
+    pub fn credential(&self) -> &Credential {
+        &self.credential
+    }
+
+    pub fn projection(&self) -> &Projection {
+        &self.projection
+    }
+
+    /// The legacy `main(params)` object as the JSON the handler receives.
+    pub fn params_json(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.params).unwrap_or_default()
+    }
+
+    /// What a result for this request repeats.
+    pub fn attribution(&self) -> Attribution {
         Attribution {
             activation_id: self.activation_id.clone(),
             attempt_id: self.attempt_id.clone(),

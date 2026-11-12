@@ -7,9 +7,12 @@
 //! Redaction by construction: no type here derives `Debug`, and no formatted error, `Debug` or
 //! `Display` output carries a request value. Errors name the violated rule, never the input.
 //!
-//! Parsing is JSON only. Nothing in this module loads, compiles or executes a guest.
+//! Parsing is JSON only. Nothing in this module loads, compiles or executes a guest. The worker
+//! service (`crate::server`) builds results and cancel replies through the constructors here, so
+//! the identity of a result always comes from the projection it answers.
 
 mod grants;
+mod logs;
 mod messages;
 mod projection;
 mod refusal;
@@ -18,13 +21,16 @@ mod result;
 mod types;
 mod wire;
 
-pub use messages::{CancelMessage, UpdateMessage};
+pub use grants::Family;
+pub use logs::{
+    MARKER, MAX_LINE_CHARS, MAX_LINES, MAX_SECRET_BYTES, MAX_SECRET_SET_BYTES, MAX_SECRETS,
+    MIN_SECRET_BYTES, Redactor, WORK_BUDGET,
+};
+pub use messages::{CancelMessage, Latest, UpdateMessage};
 pub use projection::Projection;
-pub use refusal::Refusal;
-pub use request::ExecuteRequest;
-pub use result::{ExecutionResult, Pinned};
-
-use refusal::{Code, Reason};
+pub use refusal::{Code, Reason, Refusal};
+pub use request::{Credential, ExecuteRequest};
+pub use result::{ExecutionResult, HandlerResult, Pinned};
 use serde::Deserialize;
 use std::fmt;
 use types::{Id, Positive};

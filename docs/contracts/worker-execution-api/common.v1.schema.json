@@ -215,7 +215,10 @@
             "GW_BASE_MISMATCH",
             "runtime_mode_not_supported",
             "invalid_request",
-            "request_too_large"
+            "request_too_large",
+            "undeclared_import",
+            "busy",
+            "execution_failed"
           ]
         },
         "message": {
@@ -230,13 +233,29 @@
           "properties": {
             "reason": {
               "enum": [
+                "artifact_digest_mismatch",
+                "artifact_rejected",
+                "artifact_unavailable",
                 "base_disabled",
                 "base_mismatch",
                 "body_too_large",
+                "buffer_limit_exceeded",
+                "busy",
+                "cancelled",
+                "deadline_exceeded",
+                "engine_mismatch",
+                "guest_memory_limit_exceeded",
+                "handler_failed",
+                "handler_trapped",
+                "invalid_handler_result",
+                "invalid_input",
                 "missing_path",
                 "non_json_body",
                 "oci_not_authorized",
-                "runtime_mode_not_wasm"
+                "runtime_mode_not_wasm",
+                "uncertain",
+                "undeclared_import",
+                "worker_error"
               ]
             }
           }
@@ -426,6 +445,112 @@
                   "reason": {
                     "enum": [
                       "body_too_large"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "undeclared_import"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 422
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "undeclared_import"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "busy"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 503
+              },
+              "retryable": {
+                "const": true
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "busy"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 500
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "handler_failed",
+                      "handler_trapped",
+                      "invalid_input",
+                      "invalid_handler_result",
+                      "deadline_exceeded",
+                      "cancelled",
+                      "guest_memory_limit_exceeded",
+                      "buffer_limit_exceeded",
+                      "artifact_unavailable",
+                      "artifact_rejected",
+                      "artifact_digest_mismatch",
+                      "engine_mismatch",
+                      "uncertain",
+                      "worker_error"
                     ]
                   }
                 }
