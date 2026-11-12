@@ -31,10 +31,15 @@ impl Service {
     }
     pub fn post(&self, path: &str, input: &Value) -> (u16, Value) {
         let mut io = Wire::new(path, input);
-        self.inner
-            .connection()
-            .unwrap()
-            .respond(&mut io, &mut *self.log.lock().unwrap());
+        let connection = if matches!(path, "/v1/cancel" | "/v1/update") {
+            self.inner.control_connection()
+        } else {
+            self.inner.connection()
+        };
+        let Some(connection) = connection else {
+            return (503, serde_json::json!({"code":"busy"}));
+        };
+        connection.respond(&mut io, &mut *self.log.lock().unwrap());
         io.response()
     }
     pub fn logs(&self) -> String {

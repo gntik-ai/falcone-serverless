@@ -2,13 +2,88 @@
 use super::error;
 use serde_json::Value;
 use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::{Duration, Instant};
 
 const MAX_HEADERS: usize = 16 * 1024;
 const MAX_REQUEST: usize = 8 * 1024 * 1024;
+pub(super) const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(super) fn head(io: &mut impl Read) -> Result<(String, usize), (u16, Value)> {
+/// An absolute header deadline, followed by the existing body inactivity timeout.
+pub(super) struct Socket {
+    stream: TcpStream,
+    deadline: Instant,
+    tail: u32,
+    header: bool,
+}
+impl Socket {
+    pub fn new(stream: TcpStream) -> Self {
+        Self {
+            stream,
+            deadline: Instant::now() + IO_TIMEOUT,
+            tail: 0,
+            header: true,
+        }
+    }
+}
+impl Read for Socket {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        let remaining = if self.header {
+            self.deadline.saturating_duration_since(Instant::now())
+        } else {
+            IO_TIMEOUT
+        };
+        if remaining.is_zero() {
+            return Err(std::io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        let count = self.stream.read(bytes)?;
+        if self.header {
+            for byte in &bytes[..count] {
+                self.tail = (self.tail << 8) | u32::from(*byte);
+                if self.tail == 0x0d0a0d0a {
+                    self.header = false;
+                    break;
+                }
+            }
+        }
+        Ok(count)
+    }
+}
+impl Write for Socket {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.stream.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.flush()
+    }
+}
+
+pub(super) fn head(io: &mut impl Read, control: bool) -> Result<(String, usize), (u16, Value)> {
     let bad = || error(400, "invalid_request");
     let mut head = Vec::new();
+    // Reject execute on the control listener at its request line, before any
+    // remaining headers/body, and never compile or dispatch it there.
+    while !head.ends_with(b"\r\n") {
+        if head.len() == MAX_HEADERS {
+            return Err(bad());
+        }
+        let mut byte = [0];
+        io.read_exact(&mut byte).map_err(|_| bad())?;
+        head.push(byte[0]);
+    }
+    let text = std::str::from_utf8(&head).map_err(|_| bad())?;
+    let mut line = text.trim_end_matches("\r\n").split(' ');
+    if line.next() != Some("POST") {
+        return Err(bad());
+    }
+    let path = line.next().ok_or_else(bad)?.to_owned();
+    if line.next() != Some("HTTP/1.1") || line.next().is_some() {
+        return Err(bad());
+    }
+    if control && !matches!(path.as_str(), "/v1/cancel" | "/v1/update") {
+        return Err(bad());
+    }
     while !head.ends_with(b"\r\n\r\n") {
         if head.len() == MAX_HEADERS {
             return Err(bad());
@@ -18,18 +93,9 @@ pub(super) fn head(io: &mut impl Read) -> Result<(String, usize), (u16, Value)> 
         head.push(byte[0]);
     }
     let text = std::str::from_utf8(&head).map_err(|_| bad())?;
-    let mut lines = text.split("\r\n");
-    let mut line = lines.next().ok_or_else(bad)?.split(' ');
-    if line.next() != Some("POST") {
-        return Err(bad());
-    }
-    let path = line.next().ok_or_else(bad)?.to_owned();
-    if line.next() != Some("HTTP/1.1") || line.next().is_some() {
-        return Err(bad());
-    }
     let mut length = None;
     let mut json = false;
-    for line in lines.filter(|l| !l.is_empty()) {
+    for line in text.split("\r\n").skip(1).filter(|l| !l.is_empty()) {
         let (key, value) = line.split_once(':').ok_or_else(bad)?;
         if key.eq_ignore_ascii_case("transfer-encoding") {
             return Err(bad());

@@ -42,15 +42,15 @@ pub(super) fn component(
     file.take(MAX_COMPONENT as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| error(422, "invalid_module"))?;
+    if format!("{:x}", Sha256::digest(&bytes)) != hex {
+        return Err(error(422, "invalid_module"));
+    }
     let validated = validate(&bytes, MAX_COMPONENT).map_err(|e| error(422, e.code))?;
     // validate() enforces ALLOWED_IMPORTS. This second, per-request check also runs on
     // cache hits, so a previous projection cannot confer authority on this one.
     projection
         .check_imports(&validated.imports)
         .map_err(|_| error(422, "undeclared_import"))?;
-    if format!("{:x}", Sha256::digest(&bytes)) != hex {
-        return Err(error(422, "invalid_module"));
-    }
     Ok(bytes)
 }
 

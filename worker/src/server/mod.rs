@@ -13,8 +13,14 @@ use std::sync::{
 };
 use std::time::Duration;
 
-/// Fixed parsing/control reserve, independent of the execution concurrency.
+/// Fixed control reserve, independent of the execution concurrency.
 pub const CONTROL_RESERVE: usize = 4;
+
+/// A separate pod-local listener protects control admission even before a request
+/// sends its first byte. Keep the closed RuntimeConfig v1 schema unchanged.
+pub fn control_port(listen_port: u16) -> Result<u16, &'static str> {
+    listen_port.checked_add(2).ok_or("invalid_control_port")
+}
 
 struct Permit(Arc<AtomicUsize>);
 impl Permit {
@@ -37,7 +43,7 @@ impl Drop for Permit {
 pub struct Service {
     config: RuntimeConfig,
     connections: Arc<AtomicUsize>,
-    executions: Arc<AtomicUsize>,
+    controls: Arc<AtomicUsize>,
     cache: Mutex<Option<crate::cache::Cache>>,
     attempts: attempt::Attempts,
 }
@@ -49,19 +55,29 @@ impl Service {
         Ok(Arc::new(Self {
             config,
             connections: Arc::new(AtomicUsize::new(0)),
-            executions: Arc::new(AtomicUsize::new(0)),
+            controls: Arc::new(AtomicUsize::new(0)),
             cache: Mutex::new(None),
             attempts: Mutex::new(Default::default()),
         }))
     }
     pub fn connection(self: &Arc<Self>) -> Option<Connection> {
-        let permit = Permit::acquire(
-            &self.connections,
-            self.config.concurrency as usize + CONTROL_RESERVE,
-        )?;
+        self.admit(false)
+    }
+    /// Only cancel/update may use this listener's reserved capacity.
+    pub fn control_connection(self: &Arc<Self>) -> Option<Connection> {
+        self.admit(true)
+    }
+    fn admit(self: &Arc<Self>, control: bool) -> Option<Connection> {
+        let (count, limit) = if control {
+            (&self.controls, CONTROL_RESERVE)
+        } else {
+            (&self.connections, self.config.concurrency as usize)
+        };
+        let permit = Permit::acquire(count, limit)?;
         Some(Connection {
             service: self.clone(),
             _permit: permit,
+            control,
         })
     }
     fn dispatch(&self, path: &str, body: &[u8]) -> (u16, Value) {
@@ -125,24 +141,12 @@ impl Service {
 pub struct Connection {
     service: Arc<Service>,
     _permit: Permit,
+    control: bool,
 }
 impl Connection {
     pub fn respond(self, io: &mut (impl Read + Write), diagnostics: &mut dyn Write) {
         let response = (|| {
-            let (path, length) = http::head(io)?;
-            // Acquire execution capacity before reading its body. Execute never waits
-            // while holding a reserved control connection, even for slow senders.
-            let _execute = if path == "/v1/execute" {
-                Some(
-                    Permit::acquire(
-                        &self.service.executions,
-                        self.service.config.concurrency as usize,
-                    )
-                    .ok_or_else(|| error(503, "busy"))?,
-                )
-            } else {
-                None
-            };
+            let (path, length) = http::head(io, self.control)?;
             let body = http::body(io, length)?;
             Ok(self.service.dispatch(&path, &body))
         })()
@@ -160,29 +164,60 @@ fn error(status: u16, code: &'static str) -> (u16, Value) {
     (status, json!({"code":code}))
 }
 
-/// Serve only on the configured pod port. No credential/config values reach errors.
+/// Serve on the pod's execute and derived control ports. Errors contain no values.
 pub fn serve(config: RuntimeConfig) -> Result<(), &'static str> {
+    let control_port = control_port(config.listen_port)?;
     let listener =
         TcpListener::bind(("0.0.0.0", config.listen_port)).map_err(|_| "listen_failed")?;
+    let controls = TcpListener::bind(("0.0.0.0", control_port)).map_err(|_| "listen_failed")?;
     let service = Service::new(config)?;
+    std::thread::scope(|scope| {
+        let executions = service.clone();
+        std::thread::Builder::new()
+            .name("worker-execute-listener".into())
+            .spawn_scoped(scope, move || accept(listener, executions, false))
+            .map_err(|_| "listen_failed")?;
+        accept(controls, service, true);
+        Ok(())
+    })
+}
+
+fn connection_error() {
+    // Never format OS errors or peer/request values in diagnostics.
+    let _ = writeln!(
+        std::io::stderr(),
+        "{{\"event\":\"worker_connection_failed\"}}"
+    );
+}
+
+fn accept(listener: TcpListener, service: Arc<Service>, control: bool) {
     for stream in listener.incoming() {
-        let mut stream = stream.map_err(|_| "accept_failed")?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| "connection_failed")?;
-        stream
-            .set_write_timeout(Some(Duration::from_secs(5)))
-            .map_err(|_| "connection_failed")?;
-        if let Some(connection) = service.connection() {
-            std::thread::Builder::new()
+        let stream = match stream {
+            Ok(stream) => stream,
+            Err(_) => {
+                connection_error();
+                // Resource exhaustion must not turn the accept loop into a spin loop.
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+        };
+        if stream.set_write_timeout(Some(http::IO_TIMEOUT)).is_err() {
+            connection_error();
+            continue;
+        }
+        let mut stream = http::Socket::new(stream);
+        if let Some(connection) = service.admit(control) {
+            if std::thread::Builder::new()
                 .name("worker-http".into())
                 .spawn(move || {
                     connection.respond(&mut stream, &mut std::io::stderr());
                 })
-                .map_err(|_| "connection_failed")?;
+                .is_err()
+            {
+                connection_error();
+            }
         } else {
             let _ = http::write(&mut stream, error(503, "busy"));
         }
     }
-    Ok(())
 }

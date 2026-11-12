@@ -212,9 +212,9 @@ impl ExecuteRequest {
 
 impl ExecuteRequest {
     pub(super) fn redact_logs(&self, logs: Vec<String>) -> Vec<String> {
-        fn strings(value: &Value, found: &mut Vec<String>) {
+        fn strings(value: &Value, found: &mut Vec<String>, minimum: usize) {
             match value {
-                Value::String(value) if !value.is_empty() => {
+                Value::String(value) if value.len() >= minimum => {
                     found.push(value.clone());
                     // Bindings format structured logs as JSON. Scrub the encoded form
                     // too, so quotes, backslashes and control characters cannot bypass it.
@@ -222,8 +222,12 @@ impl ExecuteRequest {
                         found.push(encoded[1..encoded.len() - 1].to_owned());
                     }
                 }
-                Value::Array(values) => values.iter().for_each(|value| strings(value, found)),
-                Value::Object(values) => values.values().for_each(|value| strings(value, found)),
+                Value::Array(values) => values
+                    .iter()
+                    .for_each(|value| strings(value, found, minimum)),
+                Value::Object(values) => values
+                    .values()
+                    .for_each(|value| strings(value, found, minimum)),
                 _ => {}
             }
         }
@@ -231,7 +235,14 @@ impl ExecuteRequest {
             return vec!["<redacted>".into()];
         };
         let mut secrets = Vec::new();
-        strings(&claims, &mut secrets);
+        // Short identity/grant strings are ordinary vocabulary, not credentials.
+        // Always scrub issuer/audience, including short values, so even a complete
+        // credential made solely of short claims cannot survive in a log line.
+        strings(&claims, &mut secrets, 8);
+        strings(&claims["iss"], &mut secrets, 1);
+        strings(&claims["aud"], &mut secrets, 1);
+        secrets.sort();
+        secrets.dedup();
         secrets.sort_by_key(|value| std::cmp::Reverse(value.len()));
         logs.into_iter()
             .take(1000)

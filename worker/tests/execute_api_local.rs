@@ -70,6 +70,158 @@ fn component_imports_must_be_both_declared_and_globally_allowed() {
 }
 
 #[test]
+fn spool_integrity_is_checked_before_component_imports() {
+    let service = Service::start(1);
+    let mut input = request();
+    let hex = "a".repeat(64);
+    input["projection"]["component_digest"] = json!(format!("sha256:{hex}"));
+    std::fs::create_dir_all(service.root.join("components")).unwrap();
+    std::fs::write(
+        service.root.join("components").join(format!("{hex}.wasm")),
+        include_bytes!("../src/qualification/api_fixtures/forbidden.wasm"),
+    )
+    .unwrap();
+    let (status, response) = service.post("/v1/execute", &input);
+    assert_eq!(status, 422);
+    assert_eq!(response["code"], "invalid_module");
+    assert!(!service.root.join("native").exists());
+}
+
+#[test]
+fn incomplete_execute_headers_cannot_exhaust_cancel_capacity() {
+    use execution_http::Wire;
+    use std::io::{Read, Write};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct Paused {
+        wire: Wire,
+        offset: u64,
+        ready: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Read for Paused {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            if self.wire.input.position() == self.offset
+                && let Some(ready) = self.ready.take()
+            {
+                ready.send(()).unwrap();
+                self.release.recv_timeout(Duration::from_secs(300)).unwrap();
+            }
+            self.wire.read(bytes)
+        }
+    }
+    impl Write for Paused {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.wire.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let service = Service::start(1);
+    std::thread::scope(|scope| {
+        let mut releases = Vec::new();
+        let mut threads = Vec::new();
+        let mut rejected = 0;
+        // One admitted execute at the body boundary, then four incomplete heads.
+        for index in 0..5 {
+            let Some(connection) = service.inner.connection() else {
+                rejected += 1;
+                continue;
+            };
+            let wire = Wire::new("/v1/execute", &json!({}));
+            let offset = if index == 0 {
+                wire.input.get_ref().len() as u64 - 2
+            } else {
+                b"POST /v1/execute HTTP/1.1\r\n".len() as u64
+            };
+            let (ready, waiting) = mpsc::channel();
+            let (release, released) = mpsc::channel();
+            threads.push(scope.spawn(move || {
+                let mut paused = Paused {
+                    wire,
+                    offset,
+                    ready: Some(ready),
+                    release: released,
+                };
+                connection.respond(&mut paused, &mut Vec::new());
+            }));
+            waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            releases.push(release);
+        }
+        let mut cancel = Wire::new(
+            "/v1/cancel",
+            &json!({
+                "version":"1", "type":"cancel", "activation_id":"unknown", "attempt_id":"unknown", "cancel":{"state":"requested"}
+            }),
+        );
+        let response = service.inner.control_connection().map(|connection| {
+            connection.respond(&mut cancel, &mut Vec::new());
+            cancel.response()
+        });
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            response.map(|response| response.0),
+            Some(200),
+            "cancel starved by execute headers"
+        );
+        assert_eq!(rejected, 4, "execute headers consumed the control reserve");
+    });
+}
+
+#[test]
+fn control_listener_refuses_execute_before_reading_its_headers() {
+    use execution_http::Wire;
+    use std::io::{Read, Write};
+
+    struct RequestLineOnly(Wire);
+    impl Read for RequestLineOnly {
+        fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+            assert!(
+                self.0.input.position() < self.0.input.get_ref().len() as u64,
+                "execute waited for headers on the control listener"
+            );
+            self.0.read(bytes)
+        }
+    }
+    impl Write for RequestLineOnly {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let service = Service::start(1);
+    let mut wire = Wire::new("/v1/execute", &request());
+    wire.input = std::io::Cursor::new(b"POST /v1/execute HTTP/1.1\r\n".to_vec());
+    let mut io = RequestLineOnly(wire);
+    service
+        .inner
+        .control_connection()
+        .unwrap()
+        .respond(&mut io, &mut Vec::new());
+    assert_eq!(io.0.response(), (400, json!({"code":"invalid_request"})));
+    assert!(!service.root.join("native").exists());
+}
+
+#[test]
+fn control_port_is_fixed_without_changing_runtime_config_v1() {
+    use falcone_serverless_worker::server::control_port;
+    assert_eq!(control_port(8080), Ok(8082));
+    assert_eq!(control_port(65533), Ok(65535));
+    assert_eq!(control_port(65534), Err("invalid_control_port"));
+    assert_eq!(control_port(65535), Err("invalid_control_port"));
+}
+
+#[test]
 fn execute_capacity_never_consumes_the_control_reserve_even_above_64() {
     use execution_http::Wire;
     use std::io::{Read, Write};
@@ -134,9 +286,10 @@ fn execute_capacity_never_consumes_the_control_reserve_even_above_64() {
             let elapsed = start.elapsed();
             let mut reserve = Vec::new();
             for _ in 0..4 {
-                reserve.push(service.inner.connection());
+                reserve.push(service.inner.control_connection());
             }
-            let full = service.inner.connection().is_none();
+            let all_reserved = reserve.iter().all(Option::is_some);
+            let full = service.inner.control_connection().is_none();
             drop(reserve);
             for release in releases {
                 release.send(()).unwrap();
@@ -149,6 +302,7 @@ fn execute_capacity_never_consumes_the_control_reserve_even_above_64() {
             assert_eq!(cancel.0, 200);
             assert_eq!(cancel.1["cancel"]["state"], "uncertain");
             assert!(elapsed < Duration::from_secs(1));
+            assert!(all_reserved);
             assert!(full);
         });
     }
@@ -234,6 +388,22 @@ fn qualification_binaries_match_the_wat_oracles_without_running_guests() {
             );
         }
     }
+}
+
+#[test]
+fn short_identity_claims_do_not_corrupt_ordinary_guest_logs() {
+    use falcone_serverless_worker::api;
+    let mut input = request();
+    input["credential"]["tenant"] = json!("a");
+    let parsed = api::parse_request(&serde_json::to_vec(&input).unwrap()).unwrap();
+    let result = api::build_result(
+        &parsed,
+        br#"{"statusCode":200}"#,
+        vec!["ordinary guest diagnostic".into()],
+    )
+    .unwrap();
+    let result = serde_json::to_value(result).unwrap();
+    assert_eq!(result["logs"][0], "ordinary guest diagnostic");
 }
 
 #[test]

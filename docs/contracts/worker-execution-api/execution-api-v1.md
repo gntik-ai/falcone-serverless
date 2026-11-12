@@ -128,12 +128,21 @@ pinned base without `base_digest`, a `base_digest` without a pinned base, and a 
 ## Pod-local HTTP transport (RUN-01)
 
 Start the worker with `falcone-serverless-worker serve CONFIG`, where CONFIG is the versioned
-[RuntimeConfig TOML](../worker-runtime-config.md). It listens on `listen_port` inside the pod.
+[RuntimeConfig TOML](../worker-runtime-config.md). Execute uses `listen_port` inside the pod;
+cancel/update use a separate control listener on **`listen_port + 2`** (defaults: **8080** and
+**8082**). Reserve both ports for the worker; serve requires `listen_port <= 65533` and both
+binds to succeed. The offset is fixed and adds no field to the closed RuntimeConfig v1 schema.
+The execute listener still accepts cancel/update for compatibility when it has capacity, but
+dispatchers **must use the control listener** for cancellation under load. Execute and unknown
+paths on the control listener receive HTTP 400 `invalid_request` at the request line, before
+reading the rest of the headers or the body; execute is never dispatched there.
 The existing version, configuration-check and explicit execute commands retain their behavior.
 This is an HTTP/1.1 JSON POST transport: one request per connection, `Content-Length` required,
 `Content-Type: application/json`, no transfer encoding, at most 16 KiB of headers and 8 MiB of
-encoded request data. Connections close after the response. Socket reads and writes have a
-5 second inactivity allowance; these transport bounds do not replace the legacy body checks.
+encoded request data. Connections close after the response. Header transfer has an absolute
+5 second deadline from acceptance; sending a byte does not renew it. Body reads and socket
+writes retain their 5 second inactivity allowance. These transport bounds do not replace the
+legacy body checks.
 
 | Path | Operation |
 | --- | --- |
@@ -153,13 +162,19 @@ trusted `artifact-compile-child` beside the worker executable, never from a requ
 or tenant precompiled artifact. The engine pin must equal the worker's compiled-in Wasmtime
 version. Identity fields come from the projection, with that compiled-in engine version.
 
-At most `concurrency` execute requests are admitted (zero is invalid in serve mode). Running
-execute requests retain their own capacity through completion. **Four fixed control slots** are
-reserved for parsing/control connections; this reserve is not operator-configurable. The total
-connection limit is `concurrency + 4`, including when concurrency is 64 or greater. An execute
-over capacity receives HTTP 503 `busy` immediately after its headers, without waiting for its
-body, compiling or retaining a connection while waiting for an execution slot. Socket timeouts
-bound incomplete control requests.
+At most `concurrency` connections are admitted on the execute listener (zero is invalid in serve
+mode), including connections that have not sent a single byte, incomplete headers/bodies, and
+running executions. **Four fixed control slots** belong exclusively to the separate control
+listener; this reserve is not operator-configurable. The total admitted connection limit across
+both listeners is `concurrency + 4`, including when concurrency is 64 or greater. An execute
+connection over capacity receives HTTP 503 `busy` immediately at acceptance, without reading
+headers/body, compiling or retaining a connection while waiting for an execution slot. Even
+incomplete execute request lines cannot occupy the control listener's capacity.
+
+There can be at most four simultaneous control connections, including their transfer time and
+any cancellation wait up to `cancel_reserve_ms`. A fifth control connection receives HTTP 503
+`busy`; dispatchers must bound simultaneous control requests and retry excess cancels. This
+reserve guarantees availability against execute saturation, not against control saturation.
 
 Cancellation never waits for the compiler lock or an execution slot. Its processing deadline is
 `RuntimeConfig.cancel_reserve_ms` (default **5000 ms**), measured after the cancel is parsed; socket
@@ -178,7 +193,9 @@ error object; they do not invent a new failure envelope code or change the v1 sc
 The execution credential remains in host-side request state. Only action params and the explicit
 invocation identity enter the guest; no credential is placed in store context, WASI environment,
 preopens or the guest log binding. Guest log fields retain the host's redaction and returned logs
-also redact credential claim values. Structured worker diagnostics contain fixed events/statuses,
+also redact issuer/audience values of any length and other claim strings of at least eight bytes.
+This preserves ordinary words when identity/grant claims are short while still removing the
+credential (including its JSON-escaped issuer/audience). Structured worker diagnostics contain fixed events/statuses,
 and the serve panic hook never formats panic payloads. No request/error values are logged.
 
 Dispatcher-to-worker authentication and credential verification for platform capabilities remain

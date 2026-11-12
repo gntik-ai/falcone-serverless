@@ -1,5 +1,5 @@
 //! RUN-01 black-box scenarios. Selected only by the restricted-pod qualification harness.
-use falcone_serverless_worker::{api, artifact::cache_key::ENGINE_VERSION};
+use falcone_serverless_worker::{api, artifact::cache_key::ENGINE_VERSION, server};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -25,11 +25,15 @@ struct Worker {
 }
 impl Worker {
     fn start(concurrency: u32) -> Self {
-        let port = TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
+        let port = loop {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            if let Ok(control_port) = server::control_port(port)
+                && let Ok(_control) = TcpListener::bind(("127.0.0.1", control_port))
+            {
+                break port;
+            }
+        };
         let root = std::env::temp_dir().join(format!("run01-api-{}-{port}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
         let config = root.join("runtime.toml");
@@ -47,7 +51,9 @@ impl Worker {
         let mut worker = Self { child, root, port };
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            if TcpStream::connect(("127.0.0.1", port)).is_ok()
+                && TcpStream::connect(("127.0.0.1", server::control_port(port).unwrap())).is_ok()
+            {
                 break;
             }
             assert!(worker.child.try_wait().unwrap().is_none(), "worker_exited");
@@ -94,6 +100,11 @@ impl Drop for Worker {
     }
 }
 fn post(port: u16, path: &str, request: &Value) -> (u16, Value) {
+    let port = if matches!(path, "/v1/cancel" | "/v1/update") {
+        server::control_port(port).unwrap()
+    } else {
+        port
+    };
     let body = serde_json::to_vec(request).unwrap();
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stream
@@ -104,6 +115,9 @@ fn post(port: u16, path: &str, request: &Value) -> (u16, Value) {
         .unwrap();
     write!(stream, "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
     stream.write_all(&body).unwrap();
+    read_response(stream)
+}
+fn read_response(stream: TcpStream) -> (u16, Value) {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
@@ -216,8 +230,23 @@ fn saturation(concurrency: u32) {
                 std::thread::sleep(Duration::from_millis(5));
             }
         }
+        // Header-phase execute connections must not take any of the four control
+        // slots, even when no further bytes arrive from these senders.
+        let mut incomplete = Vec::new();
+        for _ in 0..server::CONTROL_RESERVE {
+            let mut stream = TcpStream::connect(("127.0.0.1", worker.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .write_all(b"POST /v1/execute HTTP/1.1\r\nX-Incomplete: ")
+                .unwrap();
+            incomplete.push(stream);
+        }
+        // Use a fresh attempt: duplicate registration must not satisfy this check.
+        let extra = worker.request(LOOP, &[], concurrency as usize);
         let start = Instant::now();
-        let (status, response) = worker.post("/v1/execute", &request);
+        let (status, response) = worker.post("/v1/execute", &extra);
         assert_eq!(status, 503);
         assert_eq!(response["code"], "busy");
         assert!(start.elapsed() < Duration::from_millis(CANCEL_MS));
@@ -232,6 +261,11 @@ fn saturation(concurrency: u32) {
             start.elapsed() < Duration::from_millis(CANCEL_MS),
             "cancel_deadline"
         );
+        for stream in incomplete {
+            let (status, response) = read_response(stream);
+            assert_eq!(status, 503);
+            assert_eq!(response["code"], "busy");
+        }
         for id in 1..concurrency as usize {
             let port = worker.port;
             let (status, _) = post(port, "/v1/cancel", &cancel(id));
