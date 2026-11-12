@@ -128,6 +128,28 @@ fn committed_image_has_pinned_toolchain_and_runtime_inputs() {
     assert!(!containerfile.lines().any(|line| line.starts_with("ADD ")));
 }
 
+#[test]
+fn production_image_ships_the_trusted_compiler_beside_the_worker() {
+    let containerfile = read("worker/Containerfile");
+    let build = containerfile
+        .lines()
+        .find(|line| line.starts_with("RUN cargo build"))
+        .expect("cargo build line");
+    assert!(build.contains("--bin artifact-compile-child"));
+    assert!(build.contains("--bin falcone-serverless-worker"));
+    let runtime = containerfile
+        .lines()
+        .filter(|line| line.starts_with("COPY --from=build "))
+        .collect::<Vec<_>>();
+    for binary in ["falcone-serverless-worker", "artifact-compile-child"] {
+        let wanted = format!("/build/target/release/{binary} /usr/local/bin/{binary}");
+        assert!(
+            runtime.iter().any(|line| line.ends_with(&wanted)),
+            "{binary} must be copied into the runtime image"
+        );
+    }
+}
+
 fn fixture_b() -> String {
     let committed = read("worker/Containerfile");
     let images = external_images(&committed);
