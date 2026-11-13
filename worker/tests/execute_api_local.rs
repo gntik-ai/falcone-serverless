@@ -154,6 +154,69 @@ fn contract_runtime_fixture_binaries_match_their_sources_and_validate() {
 }
 
 #[test]
+fn contract_fixture_preserves_response_data_while_receiving_legacy_params() {
+    let path =
+        std::env::temp_dir().join(format!("run01-fixture-params-{}.json", std::process::id()));
+    let mut request: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/contract/request/valid/wasm-no-base.json"
+    ))
+    .unwrap();
+    request["params"]["input"] = json!("x".repeat(1024));
+    std::fs::write(&path, serde_json::to_vec(&request["params"]).unwrap()).unwrap();
+    let component = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/qualification/execution_api_fixtures/success.wasm");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_falcone-serverless-worker"))
+        .arg("execute")
+        .arg(component)
+        .arg(&path)
+        .output()
+        .unwrap();
+    std::fs::remove_file(path).unwrap();
+    assert!(output.status.success(), "guest execution failed");
+    assert_eq!(output.stdout, br#"{"statusCode":200,"body":"ok"}"#);
+}
+
+#[test]
+fn contract_credential_probe_detects_a_canary_in_the_last_memory_word() {
+    let root = std::env::temp_dir().join(format!("run01-canary-probe-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let source = include_str!("../src/qualification/execution_api_fixtures/credential.wat")
+        .replace(
+            "(memory (export \"memory\") 64)",
+            "(memory (export \"memory\") 64) (data (i32.const 4194296) \"credOnly\")",
+        );
+    let component = root.join("negative-control.wasm");
+    let params = root.join("params.json");
+    std::fs::write(&component, wat::parse_str(source).unwrap()).unwrap();
+    std::fs::write(&params, b"{}").unwrap();
+    let clean_component = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/qualification/execution_api_fixtures/credential.wasm");
+    let clean = std::process::Command::new(env!("CARGO_BIN_EXE_falcone-serverless-worker"))
+        .arg("execute")
+        .arg(clean_component)
+        .arg(&params)
+        .output()
+        .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_falcone-serverless-worker"))
+        .arg("execute")
+        .arg(component)
+        .arg(params)
+        .output()
+        .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        clean.status.success(),
+        "memory probe must accept the clean control"
+    );
+    assert_eq!(clean.stdout, br#"{"statusCode":200,"body":"ok"}"#);
+    assert!(
+        !output.status.success(),
+        "memory probe must detect the negative control"
+    );
+    assert_eq!(output.stderr, b"handler_trapped\n");
+}
+
+#[test]
 fn contract_credential_redaction_covers_overlaps_prefixes_and_short_secrets() {
     let mut value: serde_json::Value = serde_json::from_str(include_str!(
         "fixtures/contract/request/valid/wasm-no-base.json"

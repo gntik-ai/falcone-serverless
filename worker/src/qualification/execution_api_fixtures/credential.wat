@@ -7,7 +7,8 @@
   (core module $guest
     (data (i32.const 256) "{\22statusCode\22:200,\22body\22:\22ok\22}")
     (memory (export "memory") 64)
-    (global $heap (mut i32) (i32.const 64))
+    ;; Parameter allocations must not overlap static response/log data.
+    (global $heap (mut i32) (i32.const 65536))
     (func (export "realloc") (param i32 i32 i32) (param $size i32) (result i32)
       (local $ptr i32)
       global.get $heap local.tee $ptr local.get $size i32.add global.set $heap
@@ -17,7 +18,7 @@
       (loop $scan-memory
         (if (i64.eq (i64.load (local.get $scan)) (i64.const 8749489463339872867)) (then unreachable))
         (local.set $scan (i32.add (local.get $scan) (i32.const 1)))
-        (br_if $scan-memory (i32.lt_u (local.get $scan) (i32.sub (i32.mul (memory.size) (i32.const 65536)) (i32.const 8)))))
+        (br_if $scan-memory (i32.le_u (local.get $scan) (i32.sub (i32.mul (memory.size) (i32.const 65536)) (i32.const 8)))))
       i32.const 4 i32.const 256 i32.store
       i32.const 8 i32.const 30 i32.store
       i32.const 0)
