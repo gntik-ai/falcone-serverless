@@ -37,6 +37,7 @@ const MAX_CONTROL_BODY: usize = 64 * 1024;
 const ADMISSION_ALLOWANCE: usize = 4;
 const EXECUTE_HEADER_DEADLINE: Duration = Duration::from_secs(5);
 const EXECUTE_BODY_IDLE: Duration = Duration::from_secs(5);
+const EXECUTE_BODY_TOTAL: Duration = Duration::from_secs(30);
 /// Slack on top of a documented deadline for scheduling and the 250 ms response drain.
 const SLACK: Duration = Duration::from_secs(3);
 const WAIT: Duration = Duration::from_secs(60);
@@ -334,9 +335,34 @@ impl Blocker {
             .join()
             .map_err(|_| "blocker thread panicked")??;
         ensure(response.status == 409, "the cancelled execute answers 409")?;
+        // A failed execution keeps the envelope: the failure, the attempt and the pinned identity.
+        let result = response.json()?;
+        let message = request(&self.name, BLOCK, &[], json!({ "__ow_path": "/b" }));
         ensure(
-            response.json()?["error"] == "cancelled",
+            result["type"] == "result" && result["status"] == "failure",
+            "the cancelled execute answers a failure result",
+        )?;
+        ensure(
+            result["result"]["code"] == "execution_cancelled"
+                && result["result"]["detail"]["reason"] == "cancelled"
+                && result["result"]["status"] == 409
+                && result["result"]["retryable"] == false
+                && result["class"] == "non_retryable",
             "the cancelled execute says cancelled",
+        )?;
+        for key in ["activation_id", "attempt_id", "attempt_number"] {
+            ensure(
+                result[key] == message[key],
+                "the failure repeats the attempt",
+            )?;
+        }
+        let identity = &result["identity"];
+        ensure(
+            identity["function_revision"] == message["projection"]["revision"]
+                && identity["runtime_mode"] == "wasm"
+                && identity["artifact_digest"] == message["projection"]["artifact_digest"]
+                && identity["wasmtime_version"] == "49.0.5",
+            "the failure carries the pinned runtime identity",
         )
     }
 }
@@ -1273,6 +1299,55 @@ fn stalled_body(binary: &Path) -> Check {
     worker.recovered("stalled")
 }
 
+fn body_drip(binary: &Path) -> Check {
+    let worker = Worker::start(binary, &Config::default())?;
+    let mut stream = connect(worker.execute)?;
+    // The head promises more body than the drip ever delivers. One byte per second keeps every
+    // read inside the idle limit, so only the separate total body deadline can close it.
+    let head = "POST /v1/execute HTTP/1.1\r\nHost: worker\r\nContent-Length: 4000\r\n\r\n";
+    let started = Instant::now();
+    stream
+        .write_all(head.as_bytes())
+        .map_err(|e| e.kind().to_string())?;
+    let mut closed = None;
+    while started.elapsed() < EXECUTE_BODY_TOTAL + SLACK + SLACK {
+        if stream.write_all(b"0").is_err() {
+            closed = Some(started.elapsed());
+            break;
+        }
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|e| e.kind().to_string())?;
+        let mut probe = [0_u8; 1];
+        match stream.read(&mut probe) {
+            Ok(_) => {
+                closed = Some(started.elapsed());
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Err(_) => {
+                closed = Some(started.elapsed());
+                break;
+            }
+        }
+    }
+    let took = closed.ok_or("a body that keeps arriving was never closed")?;
+    ensure(
+        took > EXECUTE_BODY_IDLE,
+        "the connection outlived the idle limit while bytes kept arriving",
+    )?;
+    ensure(
+        took <= EXECUTE_BODY_TOTAL + SLACK,
+        "the dripping body was closed within the total body deadline",
+    )?;
+    ensure(worker.count("execution_started") == 0, "no guest code ran")?;
+    worker.recovered("body-drip")
+}
+
 /// A named case: it starts its own worker from the binary at the given path.
 type Case = (&'static str, fn(&Path) -> Check);
 
@@ -1291,6 +1366,7 @@ pub const CASES: &[Case] = &[
     ("silent", silent_connection),
     ("drip", header_drip),
     ("stalled-body", stalled_body),
+    ("body-drip", body_drip),
 ];
 
 /// Runs one named case against the worker binary.

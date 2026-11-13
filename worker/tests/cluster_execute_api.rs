@@ -71,6 +71,7 @@ cluster_cases! {
     silent => "silent",
     drip => "drip",
     stalled_body => "stalled-body",
+    body_drip => "body-drip",
 }
 
 #[test]

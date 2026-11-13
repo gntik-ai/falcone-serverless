@@ -7,7 +7,7 @@
 
 use super::redact::redact_logs;
 use super::{Entry, Finish, Running, State, error_body, locked, log};
-use crate::api::{self, ExecuteRequest, ExecutionResult, Rejection};
+use crate::api::{self, ExecuteRequest, ExecutionResult, Refusal, Rejection};
 use falcone_serverless_worker::artifact::cache_key::ENGINE_VERSION;
 use falcone_serverless_worker::artifact::supervisor::CompileLimits;
 use falcone_serverless_worker::artifact::validate::validate;
@@ -249,20 +249,6 @@ fn refusal(refused: api::Refused) -> Reply {
     }
 }
 
-fn failure_status(code: &str) -> u16 {
-    match code {
-        "invalid_input" => 400,
-        "cancelled" => 409,
-        "deadline_exceeded" => 504,
-        "instantiation_failed"
-        | "missing_handler_export"
-        | "invalid_handler_signature"
-        | "epoch_interruption_required"
-        | "fuel_required" => 422,
-        _ => 502,
-    }
-}
-
 /// Handles one execute request body.
 pub fn execute(state: &State, body: &[u8]) -> Reply {
     let request = match api::parse_request(body) {
@@ -291,7 +277,7 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
     };
     let scopes = request.scopes();
     if cancelled.load(Ordering::Acquire) {
-        return finished_cancelled(&registered);
+        return finished_cancelled(&request, &registered);
     }
     let collector = Arc::new(Collector {
         lines: Mutex::new(Vec::new()),
@@ -316,6 +302,10 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
     .with_cancellation(Arc::clone(&cancelled));
     let entry = match component(state, &request, &cancelled) {
         Ok(entry) => entry,
+        // A cancel that interrupted the compilation is a cancelled execution, not a service error.
+        Err((409, _)) if cancelled.load(Ordering::Acquire) => {
+            return finished_cancelled(&request, &registered);
+        }
         Err(reply) => return reply,
     };
     let prepared = match host::Prepared::new(&entry.loaded, host) {
@@ -351,10 +341,24 @@ pub fn execute(state: &State, body: &[u8]) -> Reply {
 }
 
 /// A cancel arrived while the request was still being admitted: nothing ran, so the cancel is
-/// acknowledged and the request answers 409 `cancelled`.
-fn finished_cancelled(registered: &Registered<'_>) -> Reply {
+/// acknowledged and the request answers 409 `execution_cancelled`.
+fn finished_cancelled(request: &ExecuteRequest, registered: &Registered<'_>) -> Reply {
     registered.running.finish(Finish::Acknowledged);
-    fail(409, "cancelled")
+    failed(request, "cancelled", Vec::new())
+}
+
+/// The result envelope of an execution that did not succeed: the contract failure for the host's
+/// outcome code, the redacted logs, and the identity of the pinned revision. The HTTP status is
+/// the failure's own status.
+fn failed(request: &ExecuteRequest, host_code: &str, logs: Vec<String>) -> Reply {
+    let refusal = Refusal::executed(host_code);
+    let status = refusal.http_status();
+    match ExecutionResult::failed(request, refusal, logs, ENGINE_VERSION)
+        .and_then(|result| serde_json::to_vec(&result).ok())
+    {
+        Some(body) => (status, body),
+        None => fail(500, "internal"),
+    }
 }
 
 /// Tells a waiting cancel how the execution ended, then builds the response.
@@ -376,18 +380,15 @@ fn finished(
         redact_logs(&request.secrets(), lines)
     };
     match execution.result {
-        Ok(output) => match ExecutionResult::success(request, &output, logs, ENGINE_VERSION) {
-            Some(result) => match serde_json::to_vec(&result) {
-                Ok(body) => (200, body),
-                Err(_) => fail(500, "internal"),
-            },
-            None => fail(502, "invalid_handler_result"),
-        },
-        Err(error) => (
-            failure_status(error.code),
-            serde_json::json!({ "error": error.code, "logs": logs })
-                .to_string()
-                .into_bytes(),
-        ),
+        Ok(output) => {
+            match ExecutionResult::success(request, &output, logs.clone(), ENGINE_VERSION) {
+                Some(result) => match serde_json::to_vec(&result) {
+                    Ok(body) => (200, body),
+                    Err(_) => fail(500, "internal"),
+                },
+                None => failed(request, "invalid_handler_result", logs),
+            }
+        }
+        Err(error) => failed(request, error.code, logs),
     }
 }

@@ -37,6 +37,7 @@ cases! {
     silent_connections_are_closed => "silent",
     dripping_headers_are_closed => "drip",
     stalled_bodies_are_closed => "stalled-body",
+    dripping_bodies_are_closed_at_the_total_deadline => "body-drip",
 }
 
 #[test]

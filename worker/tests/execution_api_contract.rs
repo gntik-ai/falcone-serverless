@@ -4,10 +4,6 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-// The worker service (worker/src/server, RUN-01.t3) uses the accessors and constructors of the
-// api module; this conformance test drives only the parsers. The same allowance sits on
-// `mod api` in main.rs, where the dispatcher-side parsers are likewise unused by the service.
-#[allow(dead_code, unused_imports)]
 #[path = "../src/api/mod.rs"]
 mod api;
 
@@ -1037,7 +1033,8 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
         .map(String::from)
         .into()
     );
-    // The only worker-only codes: the non-wasm refusal and the two legacy rejections.
+    // The only worker-only codes: the non-wasm refusal, the two legacy rejections and the
+    // failures of an execution that did not succeed.
     let worker_only: BTreeSet<_> = table
         .iter()
         .filter(|row| row["origin"] == "worker")
@@ -1046,6 +1043,12 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
     assert_eq!(
         worker_only,
         [
+            "deadline_exceeded",
+            "execution_cancelled",
+            "execution_failed",
+            "execution_uncertain",
+            "guest_not_runnable",
+            "invalid_input",
             "invalid_request",
             "request_too_large",
             "runtime_mode_not_supported"
@@ -1053,9 +1056,15 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
         .map(String::from)
         .into()
     );
+    // No code is retryable; only an execution whose outcome is unknown is `uncertain`.
     for row in &table {
         assert_eq!(row["retryable"], false, "{}", row["code"]);
-        assert_eq!(row["class"], "non_retryable", "{}", row["code"]);
+        let class = if row["code"] == "execution_uncertain" {
+            "uncertain"
+        } else {
+            "non_retryable"
+        };
+        assert_eq!(row["class"], class, "{}", row["code"]);
     }
 }
 
@@ -1091,7 +1100,7 @@ fn the_code_table_matches_the_schema_the_spec_and_the_fixtures() {
             .find(|line| line.starts_with(&format!("| `{code}` |")))
             .unwrap_or_else(|| panic!("{code} is not in the spec table"));
         assert!(line.contains(&format!("| {} |", row["status"])), "{code}");
-        assert!(line.contains("non_retryable"), "{code}");
+        assert!(line.contains(row["class"].as_str().unwrap()), "{code}");
         for reason in row["reasons"].as_array().unwrap() {
             assert!(line.contains(reason.as_str().unwrap()), "{code}");
         }
@@ -1843,4 +1852,287 @@ fn a_304_result_with_a_body_is_malformed_in_schema_and_parser() {
     let (schema, verdict) = judge("result", &document, Some(&pinned));
     assert!(schema);
     assert!(matches!(verdict, Verdict::Accepted(_)));
+}
+
+// --- accessors and failed executions ----------------------------------------------------------
+
+fn request_fixture() -> api::ExecuteRequest {
+    match parse_request(&bytes(&fixture("request/valid/wasm-no-base"))) {
+        Ok(request) => request,
+        Err(_) => panic!("the fixture request is valid"),
+    }
+}
+
+#[test]
+fn the_request_exposes_the_fields_the_service_reads() {
+    let request = request_fixture();
+    assert_eq!(request.activation(), "act-synthetic-0001");
+    assert_eq!(request.attempt(), "att-synthetic-0001");
+    assert_eq!(request.tenant(), "tenant-synthetic-0001");
+    assert_eq!(request.workspace(), "ws-synthetic-0001");
+    assert_eq!(request.invocation_key(), "inv-0000007");
+    assert_eq!(request.idempotency_key(), "idem-0000007");
+    let projection = request.projection();
+    assert_eq!(projection.engine_version(), "49.0.5");
+    assert_eq!(projection.timeout_ms(), 30_000);
+    assert_eq!(
+        projection.imports().collect::<Vec<_>>(),
+        ["falcone:host/http@0.2.0", "falcone:host/storage@0.2.0"]
+    );
+    assert!(projection.component_digest().starts_with("sha256:"));
+    // The guest sees the params object and nothing of the credential.
+    let input: Value = serde_json::from_slice(&request.guest_input()).unwrap();
+    assert_eq!(input, fixture("request/valid/wasm-no-base")["params"]);
+    let scopes = request.scopes();
+    assert_eq!(scopes.hosts, ["api.example.test"]);
+    assert_eq!(scopes.prefixes, ["tenants/synthetic/"]);
+    assert!(scopes.topics.is_empty() && scopes.targets.is_empty());
+}
+
+#[test]
+fn the_secrets_are_every_credential_string_sorted_and_deduplicated() {
+    let secrets = request_fixture().secrets();
+    for expected in [
+        "dispatcher.synthetic.example",
+        "tenant-synthetic-0001",
+        "profile-synthetic-small",
+        "api.example.test",
+        "tenants/synthetic/",
+    ] {
+        assert!(secrets.iter().any(|s| s == expected), "{expected}");
+    }
+    assert!(secrets.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(secrets.iter().all(|secret| !secret.is_empty()));
+}
+
+#[test]
+fn the_update_and_cancel_messages_name_their_execution() {
+    let update = parse_update(&bytes(&fixture("update/valid/heartbeat"))).unwrap();
+    assert_eq!(update.activation(), "act-synthetic-0001");
+    assert_eq!(update.attempt(), "att-synthetic-0001");
+    assert_eq!(update.sequence(), 1);
+    let cancel = parse_cancel(&bytes(&fixture("cancel/valid/requested"))).unwrap();
+    assert_eq!(cancel.activation(), "act-synthetic-0001");
+    assert_eq!(cancel.attempt(), "att-synthetic-0001");
+    assert!(cancel.is_requested());
+    let answers = [(true, "acknowledged"), (false, "uncertain")];
+    for (acknowledged, state) in answers {
+        let answer = cancel.answer(acknowledged);
+        assert!(!answer.is_requested());
+        let value = serde_json::to_value(&answer).unwrap();
+        assert_eq!(value["cancel"]["state"], state);
+        assert_eq!(value["activation_id"], "act-synthetic-0001");
+    }
+}
+
+#[test]
+fn the_log_ceilings_are_those_of_the_schema() {
+    let logs = &schema("result")["properties"]["logs"];
+    assert_eq!(logs["maxItems"], 1000);
+    assert_eq!(logs["items"]["maxLength"], 8192);
+    assert_eq!(api::MAX_LOG_LINES, 1000);
+    assert_eq!(api::MAX_LOG_CHARS, 8192);
+}
+
+/// Every outcome of an execution that did not succeed becomes a failure result that passes the
+/// published schema and the parser, answers the request, and carries the pinned identity.
+#[test]
+fn a_failed_execution_is_a_contract_result_with_the_pinned_identity() {
+    let request = request_fixture();
+    let schemas = Schemas::new();
+    let outcomes = [
+        (
+            "invalid_input",
+            400,
+            "invalid_input",
+            "invalid_input",
+            "non_retryable",
+        ),
+        (
+            "cancelled",
+            409,
+            "execution_cancelled",
+            "cancelled",
+            "non_retryable",
+        ),
+        (
+            "deadline_exceeded",
+            504,
+            "deadline_exceeded",
+            "deadline_exceeded",
+            "non_retryable",
+        ),
+        (
+            "instantiation_failed",
+            422,
+            "guest_not_runnable",
+            "instantiation_failed",
+            "non_retryable",
+        ),
+        (
+            "missing_handler_export",
+            422,
+            "guest_not_runnable",
+            "missing_handler_export",
+            "non_retryable",
+        ),
+        (
+            "invalid_handler_signature",
+            422,
+            "guest_not_runnable",
+            "invalid_handler_signature",
+            "non_retryable",
+        ),
+        (
+            "epoch_interruption_required",
+            422,
+            "guest_not_runnable",
+            "epoch_interruption_required",
+            "non_retryable",
+        ),
+        (
+            "fuel_required",
+            422,
+            "guest_not_runnable",
+            "fuel_required",
+            "non_retryable",
+        ),
+        (
+            "handler_failed",
+            502,
+            "execution_failed",
+            "handler_failed",
+            "non_retryable",
+        ),
+        (
+            "handler_trapped",
+            502,
+            "execution_failed",
+            "handler_trapped",
+            "non_retryable",
+        ),
+        (
+            "invalid_handler_result",
+            502,
+            "execution_failed",
+            "invalid_handler_result",
+            "non_retryable",
+        ),
+        (
+            "buffer_limit_exceeded",
+            502,
+            "execution_failed",
+            "buffer_limit_exceeded",
+            "non_retryable",
+        ),
+        (
+            "guest_memory_limit_exceeded",
+            502,
+            "execution_failed",
+            "guest_memory_limit_exceeded",
+            "non_retryable",
+        ),
+        (
+            "something_new",
+            502,
+            "execution_failed",
+            "unclassified",
+            "non_retryable",
+        ),
+        (
+            "uncertain",
+            502,
+            "execution_uncertain",
+            "uncertain",
+            "uncertain",
+        ),
+    ];
+    for (host, status, code, reason, class) in outcomes {
+        let refusal = api::Refusal::executed(host);
+        assert_eq!(refusal.http_status(), status, "{host}");
+        let logs = vec!["line one".to_owned(), "line two".to_owned()];
+        let result = api::ExecutionResult::failed(&request, refusal, logs, "49.0.5")
+            .unwrap_or_else(|| panic!("{host}: a failure result"));
+        let document = serde_json::to_value(&result).unwrap();
+        assert_eq!(document["status"], "failure", "{host}");
+        assert_eq!(document["result"]["status"], status, "{host}");
+        assert_eq!(document["result"]["code"], code, "{host}");
+        assert_eq!(document["result"]["detail"]["reason"], reason, "{host}");
+        assert_eq!(document["result"]["retryable"], false, "{host}");
+        assert_eq!(document["class"], class, "{host}");
+        assert_eq!(document["logs"], json!(["line one", "line two"]), "{host}");
+        assert_eq!(document["activation_id"], "act-synthetic-0001", "{host}");
+        assert_eq!(document["identity"]["wasmtime_version"], "49.0.5", "{host}");
+        assert_eq!(
+            document["identity"]["function_revision"], "rev-synthetic-0003",
+            "{host}"
+        );
+        assert!(schemas.for_message("result").is_valid(&document), "{host}");
+        assert!(parse_result(&bytes(&document), &request).is_ok(), "{host}");
+    }
+}
+
+#[test]
+fn a_failure_result_cannot_claim_the_class_of_another_code() {
+    let schemas = Schemas::new();
+    let (mut document, _) = unwrap_result(&fixture("result/valid/failure-execution-uncertain"));
+    assert!(schemas.for_message("result").is_valid(&document));
+    document["class"] = json!("non_retryable");
+    assert!(!schemas.for_message("result").is_valid(&document));
+    let (mut document, _) = unwrap_result(&fixture("result/valid/failure-execution-failed"));
+    document["class"] = json!("uncertain");
+    assert!(!schemas.for_message("result").is_valid(&document));
+}
+
+#[test]
+fn a_successful_execution_is_the_legacy_envelope_with_the_pinned_identity() {
+    let request = request_fixture();
+    let schemas = Schemas::new();
+    let cases = [
+        (
+            br#"{"statusCode":201,"headers":{"x":"y"},"body":{"a":1}}"#.as_slice(),
+            json!({"statusCode": 201, "headers": {"x": "y"}, "body": {"a": 1}}),
+        ),
+        // Any other JSON value is the body of a 200.
+        (
+            br#"{"a":1}"#.as_slice(),
+            json!({"statusCode": 200, "body": {"a": 1}}),
+        ),
+        (b"null".as_slice(), json!({"statusCode": 200})),
+    ];
+    for (output, expected) in cases {
+        let result = api::ExecutionResult::success(&request, output, vec!["hi".into()], "49.0.5")
+            .expect("a valid handler output");
+        let document = serde_json::to_value(&result).unwrap();
+        assert_eq!(document["status"], "success");
+        assert_eq!(document["result"], expected);
+        assert_eq!(document["logs"], json!(["hi"]));
+        assert_eq!(document["identity"]["wasmtime_version"], "49.0.5");
+        assert!(document.get("class").is_none());
+        assert!(schemas.for_message("result").is_valid(&document));
+        assert!(parse_result(&bytes(&document), &request).is_ok());
+    }
+    // Not JSON, and a web-action object that breaks the contract, are not handler results.
+    for output in [b"not json".as_slice(), br#"{"statusCode":99}"#.as_slice()] {
+        assert!(api::ExecutionResult::success(&request, output, Vec::new(), "49.0.5").is_none());
+    }
+    // A pin other than the revision's is not an identity of this revision.
+    assert!(api::ExecutionResult::success(&request, b"{}", Vec::new(), "1.0.0").is_none());
+}
+
+#[test]
+fn a_refusal_result_answers_the_activation_with_empty_logs() {
+    let oci = fixture("request/refused/oci-mode");
+    let Err(Rejection::Refused(refused)) = parse_request(&bytes(&oci)) else {
+        panic!("oci is not refused");
+    };
+    let attribution = refused.attribution.expect("the activation is known");
+    let result = api::ExecutionResult::refused(&attribution, refused.refusal);
+    let document = serde_json::to_value(&result).unwrap();
+    assert_eq!(document["status"], "failure");
+    assert_eq!(document["result"]["code"], "runtime_mode_not_supported");
+    assert_eq!(document["class"], "non_retryable");
+    assert_eq!(document["logs"], json!([]));
+    assert_eq!(document["activation_id"], oci["activation_id"]);
+    assert!(Schemas::new().for_message("result").is_valid(&document));
 }

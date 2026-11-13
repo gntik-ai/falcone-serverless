@@ -100,7 +100,48 @@
             "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/failure"
           },
           "class": {
-            "const": "non_retryable"
+            "enum": [
+              "non_retryable",
+              "uncertain"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "result": {
+            "properties": {
+              "code": {
+                "const": "execution_uncertain"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "result"
+        ]
+      },
+      "then": {
+        "required": [
+          "class"
+        ],
+        "properties": {
+          "class": {
+            "const": "uncertain"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "class": {
+            "not": {
+              "const": "uncertain"
+            }
           }
         }
       }

@@ -132,9 +132,10 @@ pinned base without `base_digest`, a `base_digest` without a pinned base, and a 
 A failure `result` is `{status, code, message, detail: {reason}, retryable}`, shaped as the
 ErrorResponse of ctr-functions-api v1 without the request-correlation fields. The class is one of
 `retryable`, `non_retryable` and `uncertain`; `retryable` is true exactly for class `retryable`.
-Every v1 code is `non_retryable`, including on every retry: a retried attempt of the same
-activation gets the same status, reason and class. Later revisions add codes of the other classes
-without changing these. The machine-readable table is [failure-codes.v1.json](failure-codes.v1.json).
+Every v1 code is `non_retryable`, including on every retry, except `execution_uncertain`, which
+is `uncertain` (the outcome is not known and no state claims that external side effects were
+reversed): a retried attempt of the same activation gets the same status, reason and class. No
+v1 code is `retryable`. Later revisions add codes without changing these. The machine-readable table is [failure-codes.v1.json](failure-codes.v1.json).
 
 | `code` | HTTP status | `detail.reason` | Class | Origin |
 | --- | --- | --- | --- | --- |
@@ -144,6 +145,12 @@ without changing these. The machine-readable table is [failure-codes.v1.json](fa
 | `runtime_mode_not_supported` | 409 | `runtime_mode_not_wasm` | non_retryable | worker only |
 | `invalid_request` | 400 | `missing_path` or `non_json_body` | non_retryable | worker only |
 | `request_too_large` | 413 | `body_too_large` | non_retryable | worker only |
+| `invalid_input` | 400 | `invalid_input` | non_retryable | worker only |
+| `execution_cancelled` | 409 | `cancelled` | non_retryable | worker only |
+| `deadline_exceeded` | 504 | `deadline_exceeded` | non_retryable | worker only |
+| `guest_not_runnable` | 422 | `instantiation_failed`, `missing_handler_export`, `invalid_handler_signature`, `epoch_interruption_required` or `fuel_required` | non_retryable | worker only |
+| `execution_failed` | 502 | `handler_failed`, `handler_trapped`, `invalid_handler_result`, `buffer_limit_exceeded`, `guest_memory_limit_exceeded` or `unclassified` | non_retryable | worker only |
+| `execution_uncertain` | 502 | `uncertain` | uncertain | worker only |
 
 The three `GW_` codes are referenced, not defined: their names, statuses and reasons are those of
 the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The
@@ -264,15 +271,30 @@ value is the body of a `200`), `logs` are the guest's log lines after redaction,
 filled from the revision projection and the pinned Wasmtime version. A guest output that is not a
 valid handler result is `502 invalid_handler_result`.
 
-A guest that does not succeed is not a contract failure code yet (the code table above is closed):
-the service answers `{"error": <code>, "logs": [...]}` with `400 invalid_input`, `409 cancelled`,
-`504 deadline_exceeded`, `422` for an instantiation or export failure, and `502` for
-`handler_failed`, `handler_trapped`, `uncertain` and the limit codes. Guest failure text is not
-returned. Adding failure codes with classes for these outcomes is a follow-up to this contract.
+#### Failed executions
+
+An execution that was admitted and did not succeed (a cancellation, a deadline, a trap, a handler
+error, a guest that cannot be run as a handler, an invalid handler result, or an unknown outcome)
+answers with the same `result` message as a success: `status` `failure`, the failure and its
+`class` from the code table, the redacted `logs` the guest produced, the activation, attempt and
+the `identity` of the pinned revision. The HTTP status is the failure's own status:
+
+| Host outcome | `code` | HTTP status |
+| --- | --- | --- |
+| `invalid_input` | `invalid_input` | 400 |
+| `cancelled` | `execution_cancelled` | 409 |
+| `deadline_exceeded` | `deadline_exceeded` | 504 |
+| `instantiation_failed`, `missing_handler_export`, `invalid_handler_signature`, `epoch_interruption_required`, `fuel_required` | `guest_not_runnable` | 422 |
+| `handler_failed`, `handler_trapped`, `buffer_limit_exceeded`, `guest_memory_limit_exceeded`, a guest output that is not a handler result (`invalid_handler_result`) | `execution_failed` | 502 |
+| `uncertain` | `execution_uncertain` | 502 |
+
+A cancel that arrives before the guest starts (including during compilation) also answers
+`execution_cancelled`.
 
 The service-level errors above (`malformed_request`, `busy`, `undeclared_import`, `engine_version_mismatch`,
-`duplicate_attempt`, `artifact_*`, the guest codes, `not_found`, `execution_not_found`) are
-`{"error": <code>}` objects, not `result` messages.
+`duplicate_attempt`, `artifact_*`, `not_found`, `execution_not_found`) are
+`{"error": <code>}` objects, not `result` messages: nothing of the revision ran and no
+execution was attributed.
 
 ### Cancel and update (control listener)
 
@@ -321,9 +343,10 @@ The cases, by acceptance criterion: `envelope` (identity), `runtime-mode`, `cred
 `imports`, `redaction-load` (many credential strings and maximum log volume through the whole
 request lifecycle, the fail-closed path, and a slot that is released),
 `saturation` and `control-stall` (capacity, cancel under load, recovery),
-`cross-listener`, and `headers`, `request`, `action-body`, `silent`, `drip`, `stalled-body`
-(every size ceiling and deadline, each followed by a successful execute and a successful
-cancel). Cases synchronize on the worker's events and on responses.
+`cross-listener`, and `headers`, `request`, `action-body`, `silent`, `drip`, `stalled-body`, `body-drip`
+(every size ceiling and deadline; `body-drip` is a body that keeps arriving inside the idle
+limit and is closed by the separate 30 s total body deadline; each is followed by a successful
+execute and a successful cancel). Cases synchronize on the worker's events and on responses.
 
 ## Grant versions
 

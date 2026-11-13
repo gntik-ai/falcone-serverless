@@ -3,7 +3,9 @@
     "code": "GW_OCI_NOT_AUTHORIZED",
     "origin": "functions-api",
     "status": 403,
-    "reasons": ["oci_not_authorized"],
+    "reasons": [
+      "oci_not_authorized"
+    ],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -11,7 +13,9 @@
     "code": "GW_BASE_DISABLED",
     "origin": "functions-api",
     "status": 409,
-    "reasons": ["base_disabled"],
+    "reasons": [
+      "base_disabled"
+    ],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -19,7 +23,9 @@
     "code": "GW_BASE_MISMATCH",
     "origin": "functions-api",
     "status": 409,
-    "reasons": ["base_mismatch"],
+    "reasons": [
+      "base_mismatch"
+    ],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -27,7 +33,9 @@
     "code": "runtime_mode_not_supported",
     "origin": "worker",
     "status": 409,
-    "reasons": ["runtime_mode_not_wasm"],
+    "reasons": [
+      "runtime_mode_not_wasm"
+    ],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -35,7 +43,10 @@
     "code": "invalid_request",
     "origin": "worker",
     "status": 400,
-    "reasons": ["missing_path", "non_json_body"],
+    "reasons": [
+      "missing_path",
+      "non_json_body"
+    ],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -43,8 +54,79 @@
     "code": "request_too_large",
     "origin": "worker",
     "status": 413,
-    "reasons": ["body_too_large"],
+    "reasons": [
+      "body_too_large"
+    ],
     "retryable": false,
     "class": "non_retryable"
+  },
+  {
+    "code": "invalid_input",
+    "origin": "worker",
+    "status": 400,
+    "reasons": [
+      "invalid_input"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "execution_cancelled",
+    "origin": "worker",
+    "status": 409,
+    "reasons": [
+      "cancelled"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "deadline_exceeded",
+    "origin": "worker",
+    "status": 504,
+    "reasons": [
+      "deadline_exceeded"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "guest_not_runnable",
+    "origin": "worker",
+    "status": 422,
+    "reasons": [
+      "instantiation_failed",
+      "missing_handler_export",
+      "invalid_handler_signature",
+      "epoch_interruption_required",
+      "fuel_required"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "execution_failed",
+    "origin": "worker",
+    "status": 502,
+    "reasons": [
+      "handler_failed",
+      "handler_trapped",
+      "invalid_handler_result",
+      "buffer_limit_exceeded",
+      "guest_memory_limit_exceeded",
+      "unclassified"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "execution_uncertain",
+    "origin": "worker",
+    "status": 502,
+    "reasons": [
+      "uncertain"
+    ],
+    "retryable": false,
+    "class": "uncertain"
   }
 ]

@@ -1,0 +1,36 @@
+{
+  "pinned": "projection/valid/wasm-no-base",
+  "result": {
+    "version": "1",
+    "type": "result",
+    "activation_id": "act-synthetic-0001",
+    "attempt_id": "att-synthetic-0001",
+    "attempt_number": 1,
+    "status": "failure",
+    "result": {
+      "status": 400,
+      "code": "invalid_input",
+      "message": "The handler rejected its input.",
+      "detail": {
+        "reason": "invalid_input"
+      },
+      "retryable": false
+    },
+    "logs": [
+      "handler started",
+      "handler finished"
+    ],
+    "identity": {
+      "function_revision": "rev-synthetic-0003",
+      "runtime_mode": "wasm",
+      "artifact_digest": "sha256:f1ddc5e62e3a9cab94e751a7e89ff4c5e02c1cee8aac0e31e91bcdfaa6eb5a25",
+      "wasmtime_version": "49.0.5",
+      "language_profile": {
+        "name": "javascript-profile-synthetic",
+        "version": "2026.11.0"
+      },
+      "interface_version": "0.2.0"
+    },
+    "class": "non_retryable"
+  }
+}

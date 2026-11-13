@@ -215,7 +215,13 @@
             "GW_BASE_MISMATCH",
             "runtime_mode_not_supported",
             "invalid_request",
-            "request_too_large"
+            "request_too_large",
+            "invalid_input",
+            "execution_cancelled",
+            "deadline_exceeded",
+            "guest_not_runnable",
+            "execution_failed",
+            "execution_uncertain"
           ]
         },
         "message": {
@@ -233,10 +239,25 @@
                 "base_disabled",
                 "base_mismatch",
                 "body_too_large",
+                "buffer_limit_exceeded",
+                "cancelled",
+                "deadline_exceeded",
+                "epoch_interruption_required",
+                "fuel_required",
+                "guest_memory_limit_exceeded",
+                "handler_failed",
+                "handler_trapped",
+                "instantiation_failed",
+                "invalid_handler_result",
+                "invalid_handler_signature",
+                "invalid_input",
+                "missing_handler_export",
                 "missing_path",
                 "non_json_body",
                 "oci_not_authorized",
-                "runtime_mode_not_wasm"
+                "runtime_mode_not_wasm",
+                "uncertain",
+                "unclassified"
               ]
             }
           }
@@ -426,6 +447,201 @@
                   "reason": {
                     "enum": [
                       "body_too_large"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "invalid_input"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 400
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "invalid_input"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_cancelled"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 409
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "cancelled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "deadline_exceeded"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 504
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "deadline_exceeded"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "guest_not_runnable"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 422
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "instantiation_failed",
+                      "missing_handler_export",
+                      "invalid_handler_signature",
+                      "epoch_interruption_required",
+                      "fuel_required"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 502
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "handler_failed",
+                      "handler_trapped",
+                      "invalid_handler_result",
+                      "buffer_limit_exceeded",
+                      "guest_memory_limit_exceeded",
+                      "unclassified"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_uncertain"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 502
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "uncertain"
                     ]
                   }
                 }

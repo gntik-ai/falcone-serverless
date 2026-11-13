@@ -150,6 +150,30 @@ impl ExecutionResult {
         Some(result)
     }
 
+    /// An execution that did not succeed: the failure, the redacted logs it produced, and the
+    /// identity of the revision on the pinned Wasmtime. `None` when the logs exceed the schema.
+    pub fn failed(
+        request: &ExecuteRequest,
+        refusal: Refusal,
+        logs: Vec<String>,
+        wasmtime_version: &str,
+    ) -> Option<Self> {
+        let result = Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: request.activation_id().clone(),
+            attempt_id: request.attempt_id().clone(),
+            attempt_number: request.attempt_number(),
+            status: Status::Failure,
+            class: Some(refusal.class()),
+            result: Outcome::Failure(refusal),
+            logs: Logs::new(logs)?,
+            identity: Identity::of(&request.projection, wasmtime_version),
+        };
+        result.check(request).ok()?;
+        Some(result)
+    }
+
     /// A refusal: nothing ran. The identity describes the pinned revision as projected.
     pub fn refused(attribution: &Attribution, refusal: Refusal) -> Self {
         let projection = &attribution.projection;
