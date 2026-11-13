@@ -1,0 +1,45 @@
+(component
+  (type $bytes (list u8))
+  (type $error (variant (case "invalid-input" string) (case "failed" string)))
+  (type $result (result $bytes (error $error)))
+  (type $handle (func (param "params" $bytes) (result $result)))
+  (core module $guest
+    (memory (export "memory") 64)
+    (data (i32.const 0x200000) "{\"statusCode\":200,\"body\":\"")
+    (data (i32.const 0x200040) "0123456789abcdef")
+    (data (i32.const 0x200060) "\"}")
+    (global $heap (mut i32) (i32.const 64))
+    (func (export "realloc") (param i32 i32 i32) (param $size i32) (result i32)
+      (local $ptr i32)
+      global.get $heap local.tee $ptr local.get $size i32.add global.set $heap
+      local.get $ptr)
+    (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
+      (local $out i32) (local $i i32) (local $end i32) (local $b i32)
+      ;; Returns, as hex in a JSON body, every byte of linear memory the host has written:
+      ;; from address 0 to the end of the guest heap.
+      (local.set $end (global.get $heap))
+      (memory.copy (i32.const 0x100000) (i32.const 0x200000) (i32.const 26))
+      (local.set $out (i32.add (i32.const 0x100000) (i32.const 26)))
+      (loop $dump
+        (local.set $b (i32.load8_u (local.get $i)))
+        (i32.store8 (local.get $out) (i32.load8_u (i32.add (i32.const 0x200040) (i32.shr_u (local.get $b) (i32.const 4)))))
+        (i32.store8 (i32.add (local.get $out) (i32.const 1)) (i32.load8_u (i32.add (i32.const 0x200040) (i32.and (local.get $b) (i32.const 15)))))
+        (local.set $out (i32.add (local.get $out) (i32.const 2)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br_if $dump (i32.lt_u (local.get $i) (local.get $end))))
+      (memory.copy (local.get $out) (i32.const 0x200060) (i32.const 2))
+      (local.set $out (i32.add (local.get $out) (i32.const 2)))
+      (i32.store (i32.const 0) (i32.const 0))
+      (i32.store (i32.const 4) (i32.const 0x100000))
+      (i32.store (i32.const 8) (i32.sub (local.get $out) (i32.const 0x100000)))
+      i32.const 0
+    )
+  )
+  (core instance $guest (instantiate $guest))
+  (func $handle (type $handle) (canon lift (core func $guest "handle")
+    (memory $guest "memory") (realloc (func $guest "realloc")) string-encoding=utf8))
+  (instance $handler
+    (export "handler-error" (type $error))
+    (export "handle" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler))
+)

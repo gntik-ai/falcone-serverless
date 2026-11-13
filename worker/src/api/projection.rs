@@ -46,10 +46,10 @@ redacted!(LanguageProfile);
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
-    fuel: Positive,
-    memory_bytes: Positive,
-    timeout_ms: Positive,
-    max_host_calls: Positive,
+    pub(super) fuel: Positive,
+    pub(super) memory_bytes: Positive,
+    pub(super) timeout_ms: Positive,
+    pub(super) max_host_calls: Positive,
 }
 redacted!(Budgets);
 
@@ -71,9 +71,9 @@ pub struct Projection {
     pub(super) engine_version: Text,
     wasi_version: Text,
     pub(super) interface_version: InterfaceVersion,
-    imports: Vec<Text>,
-    budgets: Budgets,
-    grants: Vec<Grant>,
+    pub(super) imports: Vec<Text>,
+    pub(super) budgets: Budgets,
+    pub(super) grants: Vec<Grant>,
 }
 redacted!(Projection);
 

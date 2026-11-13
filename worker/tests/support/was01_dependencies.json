@@ -313,6 +313,7 @@
   },
   "worker": {
     "dependencies": {
+      "aho-corasick": "=1.1.5",
       "ring": "=0.17.14",
       "rustix": {
         "features": [

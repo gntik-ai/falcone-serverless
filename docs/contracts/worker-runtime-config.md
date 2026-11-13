@@ -3,8 +3,11 @@
 Contract version: v1
 
 This closed TOML contract provides `ctr-worker-runtime-config` for the Wasm worker,
-chart and controller. Adding a field requires v2. Unknown keys are rejected at every
-level. No runtime consumer, server, engine or cluster operation is implemented here.
+chart and controller. Adding a required field requires v2; an optional field with a default
+(`control_port`, added with the execution API) is additive. Unknown keys are rejected at every
+level. The parser starts no server, engine or cluster operation; `serve CONFIG` is the
+separate command that serves the execution API
+([execution-api-v1.md](worker-execution-api/execution-api-v1.md)).
 
 ## Fields
 
@@ -20,6 +23,7 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | listen_port | u16 | port | 8080 | false |
 | metrics_port | u16 | port | 9090 | false |
 | probe_port | u16 | port | 8081 | false |
+| control_port | u16 | port | 8082 | false |
 | startup_probe_path | string | path | /startupz | false |
 | readiness_probe_path | string | path | /readyz | false |
 | pool_id | string | none | none | true |
@@ -38,6 +42,12 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | falcone_api_endpoint | string | URL | none | true |
 | falcone_dispatcher_endpoint | string | URL | none | true |
 | dispatcher_key_path | string | path | /var/run/falcone/dispatcher-keys | false |
+
+`listen_port` is the execute listener (`POST /v1/execute`) and `control_port` is the pod-local
+control listener (cancel and execution update). They must differ from each other and from the
+metrics and probe ports; `0` asks the kernel for a free port and is meant for tests. Only the
+execute port belongs on the Service. The artifact store of the service is
+`<cache_path>/artifacts` and the trusted compile cache is `<cache_path>/compiled`.
 
 Each default budget must be at or below its configured maximum. The sum of
 `cancel_reserve_ms`, `checkpoint_reserve_ms` and `kill_grace_ms` must be at or
@@ -88,6 +98,7 @@ version = 1
 listen_port = 8080
 metrics_port = 9090
 probe_port = 8081
+control_port = 8082
 startup_probe_path = "/startupz"
 readiness_probe_path = "/readyz"
 pool_id = "tenant-a-interactive"

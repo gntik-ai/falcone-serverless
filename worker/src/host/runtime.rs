@@ -7,7 +7,7 @@ use super::{Bindings, Context, HostError, Level, Operation, Pair, Reply, import_
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -319,6 +319,9 @@ pub struct Host {
     contract: Limits,
     buffer_limited: AtomicBool,
     memory_limited: bool,
+    fuel_exhausted: AtomicBool,
+    host_calls: AtomicU64,
+    host_calls_exceeded: AtomicBool,
     ticker: Option<EpochTicker>,
     call_timeout: Duration,
     cancelled: Arc<AtomicBool>,
@@ -347,6 +350,9 @@ impl Host {
             contract,
             buffer_limited: AtomicBool::new(false),
             memory_limited: false,
+            fuel_exhausted: AtomicBool::new(false),
+            host_calls: AtomicU64::new(0),
+            host_calls_exceeded: AtomicBool::new(false),
             ticker: None,
             call_timeout: contract.duration(Field::HostCallDeadlineMs),
             cancelled: Arc::new(AtomicBool::new(false)),
@@ -364,6 +370,14 @@ impl Host {
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
+    }
+
+    /// Shares the caller's cancellation flag, so one flag stops compilation, the guest and
+    /// every host call of an invocation.
+    #[must_use]
+    pub fn with_cancellation(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancelled = flag;
+        self
     }
 
     pub fn uncertain_host_call(&self) -> bool {
@@ -393,6 +407,45 @@ impl Host {
     pub fn memory_limited(&self) -> bool {
         self.memory_limited
     }
+    /// The store's fuel for this invocation: the admitted `budgets.fuel`.
+    pub(super) fn fuel(&self) -> u64 {
+        self.contract.fuel()
+    }
+    /// Whether the guest ran out of its fuel budget.
+    pub fn fuel_exhausted(&self) -> bool {
+        self.fuel_exhausted.load(Ordering::Acquire)
+    }
+    /// Whether a guest-to-host call beyond `max_host_calls` was refused.
+    pub fn host_call_budget_exceeded(&self) -> bool {
+        self.host_calls_exceeded.load(Ordering::Acquire)
+    }
+    /// Records a trap that is a budget outcome. Only the typed engine trap counts; guest text
+    /// never selects an outcome.
+    pub(super) fn record_trap(&self, error: &wasmtime::Error) {
+        if matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::OutOfFuel)
+        ) {
+            self.fuel_exhausted.store(true, Ordering::Release);
+        }
+    }
+    /// Counts one guest-to-host call, at the top of every host function (and resource
+    /// destructor) the guest can reach. The call after `max_host_calls` is refused here, before
+    /// the function does anything, and the trap ends the execution. Calls already made are not
+    /// rolled back. The engine's call hook is not used for this: it also fires for the runtime's
+    /// own libcalls (epoch ticks, memory growth), which are not guest calls to the host.
+    pub(super) fn count_host_call(&self) -> wasmtime::Result<()> {
+        let made = self
+            .host_calls
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        if made > self.contract.max_host_calls() {
+            self.host_calls_exceeded.store(true, Ordering::Release);
+            return Err(wasmtime::Error::msg("host-call-budget-exceeded"));
+        }
+        Ok(())
+    }
+
     pub fn buffer_limited(&self) -> bool {
         self.buffer_limited.load(Ordering::Acquire)
     }
@@ -500,12 +553,14 @@ fn storage_resource<T: Send + 'static>(
     checkpoint: bool,
 ) -> wasmtime::Result<()> {
     linker.resource(names[0], ResourceType::host::<T>(), |mut store, rep| {
+        store.data().count_host_call()?;
         store.data_mut().keys.remove(&rep);
         Ok(())
     })?;
     linker.func_wrap(
         names[1],
         move |mut store: StoreContextMut<'_, Host>, (key,): (WasmStr,)| {
+            store.data().count_host_call()?;
             let result: Result<Resource<T>, HostError> = (|| {
                 let key = key.to_str(&store).map_err(|_| HostError::Denied)?;
                 let mut bytes = Bytes::new(store.data().input_limit());
@@ -529,6 +584,7 @@ fn storage_resource<T: Send + 'static>(
     linker.func_wrap(
         names[2],
         move |store: StoreContextMut<'_, Host>, (handle,): (Resource<T>,)| {
+            store.data().count_host_call()?;
             let result: Result<Vec<u8>, HostError> = (|| {
                 let key = store.data().key(handle.rep(), checkpoint)?;
                 let Reply::Data(data) = store.data().call(Operation::Read { key, checkpoint })?
@@ -548,6 +604,7 @@ fn storage_resource<T: Send + 'static>(
         names[3],
         move |mut store: StoreContextMut<'_, Host>,
               (handle, data_arg): (Resource<T>, WasmList<u8>)| {
+            store.data().count_host_call()?;
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[], &[&data_arg], None, 4)?;
                 let key = store.data().key(handle.rep(), checkpoint)?;
@@ -611,6 +668,7 @@ pub(super) fn instantiate_in_store(
         .func_wrap(
             "is-cancelled",
             |store: StoreContextMut<'_, Host>, (): ()| {
+                store.data().count_host_call()?;
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
@@ -618,15 +676,18 @@ pub(super) fn instantiate_in_store(
     context.func_wrap(
         "invocation-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().count_host_call()?;
             Ok((store.data().context.invocation_key.clone(),))
         },
     )?;
     context.func_wrap("attempt-id", |store: StoreContextMut<'_, Host>, (): ()| {
+        store.data().count_host_call()?;
         Ok((store.data().context.attempt_id.clone(),))
     })?;
     context.func_wrap(
         "idempotency-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().count_host_call()?;
             Ok((store.data().context.idempotency_key.clone(),))
         },
     )?;
@@ -635,6 +696,7 @@ pub(super) fn instantiate_in_store(
         "checkpoint",
         ResourceType::host::<Checkpoint>(),
         |mut store, rep| {
+            store.data().count_host_call()?;
             store.data_mut().keys.remove(&rep);
             Ok(())
         },
@@ -642,6 +704,7 @@ pub(super) fn instantiate_in_store(
     progress.func_wrap(
         "report",
         |store: StoreContextMut<'_, Host>, (completed, total, message): (u64, u64, WasmStr)| {
+            store.data().count_host_call()?;
             let result: Result<(), HostError> = (|| {
                 let mut bytes = Bytes::new(store.data().input_limit());
                 bytes.add(16)?;
@@ -659,6 +722,7 @@ pub(super) fn instantiate_in_store(
     progress.func_wrap(
         "report-checkpoint",
         |store: StoreContextMut<'_, Host>, (handle,): (Resource<Checkpoint>,)| {
+            store.data().count_host_call()?;
             let result: Result<(), HostError> = (|| {
                 let key = store.data().key(handle.rep(), true)?;
                 empty(store.data().call(Operation::ProgressCheckpoint { key })?)
@@ -672,6 +736,7 @@ pub(super) fn instantiate_in_store(
             "publish",
             |mut store: StoreContextMut<'_, Host>,
              (destination, payload): (WasmStr, WasmList<u8>)| {
+                store.data().count_host_call()?;
                 let result = (|| {
                     preflight(&mut store, &[&destination], &[&payload], None, 0)?;
                     let mut bytes = Bytes::new(store.data().input_limit());
@@ -702,6 +767,7 @@ pub(super) fn instantiate_in_store(
         "log",
         |mut store: StoreContextMut<'_, Host>,
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
+            store.data().count_host_call()?;
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[&message], &[], Some(&fields), 1)?;
                 let mut bytes = Bytes::new(store.data().input_limit());
@@ -751,6 +817,7 @@ pub(super) fn instantiate_in_store(
             "execution",
             ResourceType::host::<Execution>(),
             |mut store, rep| {
+                store.data().count_host_call()?;
                 store.data_mut().executions.remove(&rep);
                 Ok(())
             },
@@ -758,6 +825,7 @@ pub(super) fn instantiate_in_store(
         workflows.func_wrap(
             "start",
             |mut store: StoreContextMut<'_, Host>, (workflow, input): (WasmStr, WasmList<u8>)| {
+                store.data().count_host_call()?;
                 let result: Result<Resource<Execution>, HostError> = (|| {
                     preflight(&mut store, &[&workflow], &[&input], None, 0)?;
                     if workflow
@@ -808,6 +876,7 @@ pub(super) fn instantiate_in_store(
             "signal",
             |mut store: StoreContextMut<'_, Host>,
              (handle, name, payload): (Resource<Execution>, WasmStr, WasmList<u8>)| {
+                store.data().count_host_call()?;
                 let result: Result<(), HostError> = (|| {
                     preflight(&mut store, &[&name], &[&payload], None, 4)?;
                     let mut bytes = Bytes::new(store.data().input_limit());
@@ -845,6 +914,7 @@ pub(super) fn instantiate_in_store(
             "request",
             |mut store: StoreContextMut<'_, Host>,
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
+        store.data().count_host_call()?;
                 let result: Result<super::net::Response, HostError> = (|| {
                     preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
                     let mut bytes = Bytes::new(store.data().input_limit());

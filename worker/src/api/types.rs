@@ -127,6 +127,11 @@ impl Id {
     pub(crate) fn same_as(&self, other: &NonEmpty) -> bool {
         self.0 == other.0
     }
+
+    /// The identifier, a bounded string over a safe alphabet; never a secret.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 string_type!(
@@ -139,6 +144,10 @@ impl Text {
     pub(crate) fn fixed(value: &str) -> Self {
         Self(value.to_owned())
     }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 string_type!(
@@ -146,11 +155,22 @@ string_type!(
     NonEmpty,
     |value| !value.is_empty()
 );
+impl NonEmpty {
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 string_type!(
     /// `sha256:` followed by 64 lowercase hex digits.
     Digest,
     digest
 );
+impl Digest {
+    /// The 64 lowercase hex digits without the `sha256:` prefix.
+    pub(crate) fn hex(&self) -> &str {
+        &self.0["sha256:".len()..]
+    }
+}
 string_type!(
     /// A catalog base name; the concrete part of `id@version`.
     CatalogId,
@@ -166,6 +186,30 @@ string_type!(
     Deadline,
     timestamp
 );
+impl Deadline {
+    /// Milliseconds since the Unix epoch, truncating below a millisecond. The text was
+    /// validated as a real calendar timestamp when it was parsed.
+    pub(crate) fn unix_millis(&self) -> u64 {
+        let number = |range: std::ops::Range<usize>| self.0[range].parse::<i64>().unwrap_or(0);
+        let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+        // Days from civil (Howard Hinnant): proleptic Gregorian, valid for every year >= 1.
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let year_of_era = year.rem_euclid(400);
+        let month_index = (month + 9) % 12;
+        let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        let seconds = days * 86_400 + number(11..13) * 3_600 + number(14..16) * 60 + number(17..19);
+        let fraction = self.0[19..self.0.len() - 1]
+            .strip_prefix('.')
+            .map_or(0, |digits| {
+                let millis: String = digits.chars().chain("000".chars()).take(3).collect();
+                millis.parse::<i64>().unwrap_or(0)
+            });
+        u64::try_from(seconds * 1_000 + fraction).unwrap_or(0)
+    }
+}
 
 /// The largest integer the contract carries: 2^53 - 1, exactly representable in any JSON reader.
 const MAX_WHOLE: u64 = 9_007_199_254_740_991;
@@ -194,6 +238,12 @@ fn whole<'de, D: Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Positive(u64);
+
+impl Positive {
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
 
 impl<'de> Deserialize<'de> for Positive {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
@@ -272,3 +322,19 @@ impl<'de> Deserialize<'de> for Logs {
     }
 }
 redacted!(Logs);
+
+impl Logs {
+    /// Worker-captured lines, clipped to the contract: at most 1000 lines of 8192 characters.
+    pub(crate) fn clipped(lines: Vec<String>) -> Self {
+        Self(
+            lines
+                .into_iter()
+                .take(1000)
+                .map(|line| match line.char_indices().nth(8192) {
+                    Some((end, _)) => line[..end].to_owned(),
+                    None => line,
+                })
+                .collect(),
+        )
+    }
+}

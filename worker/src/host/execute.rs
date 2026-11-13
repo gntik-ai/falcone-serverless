@@ -54,13 +54,16 @@ impl Prepared {
             if !engine.get_epoch_interruption() {
                 return Err(error("epoch_interruption_required"));
             }
-            // The trusted engine enables fuel. Guest time is bounded by the
-            // invocation's epoch deadline, independently of compilation budgets.
+            // The trusted engine enables fuel. The store runs on the admitted fuel budget;
+            // guest time is also bounded, independently, by the invocation's epoch deadline.
             store
-                .set_fuel(u64::MAX)
+                .set_fuel(store.data().fuel())
                 .map_err(|_| error("fuel_required"))?;
             let instance = runtime::instantiate_in_store(engine, component, &mut store, deadline)
-                .map_err(|_| error("instantiation_failed"))?;
+                .map_err(|trap| {
+                store.data().record_trap(&trap);
+                error("instantiation_failed")
+            })?;
             let (_, handler) = instance
                 .get_export(&mut store, None, HANDLER_EXPORT)
                 .ok_or_else(|| error("missing_handler_export"))?;
@@ -127,6 +130,7 @@ impl Prepared {
                 )
             }
             Err(trap) => {
+                self.store.data().record_trap(&trap);
                 // 49.0.5 keeps HostcallFuelExhausted private. Match its exact,
                 // pinned engine diagnostic; never classify arbitrary guest text.
                 if trap.root_cause().to_string()
@@ -177,6 +181,8 @@ fn finish(
         InvocationOutcome::Uncertain => Err(error("uncertain")),
         InvocationOutcome::GuestInterrupted => Err(error("deadline_exceeded")),
         InvocationOutcome::GuestMemoryLimit => Err(error("guest_memory_limit_exceeded")),
+        InvocationOutcome::FuelExhausted => Err(error("fuel_exhausted")),
+        InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::BufferLimit => Err(error("buffer_limit_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };

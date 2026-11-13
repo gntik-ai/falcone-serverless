@@ -42,6 +42,11 @@ pub struct UpdateMessage {
 redacted!(UpdateMessage);
 
 impl UpdateMessage {
+    /// The activation and attempt the update is for.
+    pub(crate) fn key(&self) -> (&str, &str) {
+        (self.activation_id.as_str(), self.attempt_id.as_str())
+    }
+
     pub(super) fn check(&self) -> Result<(), Malformed> {
         match &self.update {
             Update::Progress {
@@ -74,3 +79,30 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+impl CancelMessage {
+    /// The activation and attempt to cancel.
+    pub(crate) fn key(&self) -> (&str, &str) {
+        (self.activation_id.as_str(), self.attempt_id.as_str())
+    }
+
+    /// Whether this is a dispatcher request, the only direction the control listener accepts.
+    pub(crate) fn is_request(&self) -> bool {
+        matches!(self.cancel, Cancel::Requested {})
+    }
+
+    /// The worker's answer: `uncertain` when the outcome of the cancellation is not known.
+    pub(crate) fn answer(&self, uncertain: bool) -> Self {
+        Self {
+            version: self.version,
+            message: self.message,
+            activation_id: self.activation_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            cancel: if uncertain {
+                Cancel::Uncertain {}
+            } else {
+                Cancel::Acknowledged {}
+            },
+        }
+    }
+}

@@ -7,6 +7,8 @@ pub enum InvocationOutcome {
     Success,
     GuestInterrupted,
     GuestMemoryLimit,
+    FuelExhausted,
+    HostCallBudget,
     BufferLimit,
     Cancelled,
     Uncertain,
@@ -20,6 +22,12 @@ pub fn classify(host: &Host, result: Result<(), &engine::Error>) -> InvocationOu
     }
     if host.memory_limited() {
         return InvocationOutcome::GuestMemoryLimit;
+    }
+    if host.fuel_exhausted() {
+        return InvocationOutcome::FuelExhausted;
+    }
+    if host.host_call_budget_exceeded() {
+        return InvocationOutcome::HostCallBudget;
     }
     if result.is_err_and(|error| {
         matches!(

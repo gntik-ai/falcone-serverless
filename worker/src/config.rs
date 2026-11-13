@@ -13,6 +13,8 @@ pub struct RuntimeConfig {
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
     pub probe_port: u16,
+    #[serde(default = "default_u16::<8082>")]
+    pub control_port: u16,
     #[serde(default = "startup_probe_path")]
     pub startup_probe_path: String,
     #[serde(default = "readiness_probe_path")]
@@ -108,6 +110,15 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
             return Err(format!("{field}: must not be empty"));
         }
     }
+    // Port 0 asks the kernel for a free port (tests); only fixed ports can collide.
+    if config.control_port != 0
+        && [config.listen_port, config.metrics_port, config.probe_port]
+            .contains(&config.control_port)
+    {
+        return Err(
+            "control_port must differ from listen_port, metrics_port and probe_port".into(),
+        );
+    }
     if config.default_wall_clock_ms > config.max_wall_clock_ms {
         return Err("default_wall_clock_ms must not exceed max_wall_clock_ms".into());
     }
@@ -131,11 +142,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     const DOC: &str = include_str!("../../docs/contracts/worker-runtime-config.md");
-    const FIELDS: [[&str; 5]; 22] = [
+    const FIELDS: [[&str; 5]; 23] = [
         ["version", "u32", "none", "1", "false"],
         ["listen_port", "u16", "port", "8080", "false"],
         ["metrics_port", "u16", "port", "9090", "false"],
         ["probe_port", "u16", "port", "8081", "false"],
+        ["control_port", "u16", "port", "8082", "false"],
         ["startup_probe_path", "string", "path", "/startupz", "false"],
         ["readiness_probe_path", "string", "path", "/readyz", "false"],
         ["pool_id", "string", "none", "none", "true"],
@@ -291,6 +303,7 @@ mod tests {
                 "listen_port": 8080,
                 "metrics_port": 9090,
                 "probe_port": 8081,
+                "control_port": 8082,
                 "startup_probe_path": "/startupz",
                 "readiness_probe_path": "/readyz",
                 "pool_id": "tenant-a-interactive",

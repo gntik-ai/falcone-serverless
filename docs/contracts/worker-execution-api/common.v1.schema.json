@@ -215,7 +215,14 @@
             "GW_BASE_MISMATCH",
             "runtime_mode_not_supported",
             "invalid_request",
-            "request_too_large"
+            "request_too_large",
+            "undeclared_import",
+            "busy",
+            "execution_timeout",
+            "execution_failed",
+            "execution_uncertain",
+            "not_found",
+            "method_not_allowed"
           ]
         },
         "message": {
@@ -230,13 +237,39 @@
           "properties": {
             "reason": {
               "enum": [
+                "artifact_rejected",
+                "artifact_unavailable",
+                "at_capacity",
                 "base_disabled",
                 "base_mismatch",
                 "body_too_large",
+                "budget_above_worker_ceiling",
+                "buffer_limit_exceeded",
+                "cancelled",
+                "deadline_exceeded",
+                "duplicate_attempt",
+                "engine_version_mismatch",
+                "fuel_exhausted",
+                "handler_failed",
+                "handler_trapped",
+                "headers_too_large",
+                "host_call_budget_exceeded",
+                "host_call_outcome_unknown",
+                "import_not_allowed",
+                "import_not_declared",
+                "instantiation_failed",
+                "invalid_handler_output",
+                "malformed_http",
+                "malformed_message",
+                "memory_budget_exceeded",
+                "method_not_allowed",
                 "missing_path",
                 "non_json_body",
                 "oci_not_authorized",
-                "runtime_mode_not_wasm"
+                "request_body_too_large",
+                "runtime_mode_not_wasm",
+                "unknown_execution",
+                "unknown_path"
               ]
             }
           }
@@ -394,7 +427,12 @@
                   "reason": {
                     "enum": [
                       "missing_path",
-                      "non_json_body"
+                      "non_json_body",
+                      "malformed_message",
+                      "malformed_http",
+                      "budget_above_worker_ceiling",
+                      "engine_version_mismatch",
+                      "duplicate_attempt"
                     ]
                   }
                 }
@@ -425,7 +463,238 @@
                 "properties": {
                   "reason": {
                     "enum": [
-                      "body_too_large"
+                      "body_too_large",
+                      "headers_too_large",
+                      "request_body_too_large"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "undeclared_import"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 422
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "import_not_declared",
+                      "import_not_allowed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "busy"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 503
+              },
+              "retryable": {
+                "const": true
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "at_capacity"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_timeout"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 504
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "deadline_exceeded"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_failed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 500
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "memory_budget_exceeded",
+                      "fuel_exhausted",
+                      "host_call_budget_exceeded",
+                      "buffer_limit_exceeded",
+                      "handler_failed",
+                      "handler_trapped",
+                      "invalid_handler_output",
+                      "instantiation_failed",
+                      "artifact_unavailable",
+                      "artifact_rejected",
+                      "cancelled"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "execution_uncertain"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 502
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "host_call_outcome_unknown"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 404
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "unknown_path",
+                      "unknown_execution"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "method_not_allowed"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 405
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "method_not_allowed"
                     ]
                   }
                 }

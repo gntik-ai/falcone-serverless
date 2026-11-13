@@ -21,8 +21,8 @@ const MAX_BODY_BYTES: usize = 1_048_576;
 pub struct Credential {
     iss: NonEmpty,
     aud: NonEmpty,
-    tenant: NonEmpty,
-    workspace: NonEmpty,
+    pub(super) tenant: NonEmpty,
+    pub(super) workspace: NonEmpty,
     pool_profile: NonEmpty,
     revision: NonEmpty,
     activation: NonEmpty,
@@ -33,17 +33,38 @@ pub struct Credential {
 }
 redacted!(Credential);
 
+impl Credential {
+    /// Every string of the claims. The execution credential stays in the host binding layer;
+    /// the service redacts these strings from anything it emits.
+    pub(super) fn strings(&self) -> Vec<&str> {
+        let mut strings = vec![
+            self.iss.as_str(),
+            self.aud.as_str(),
+            self.tenant.as_str(),
+            self.workspace.as_str(),
+            self.pool_profile.as_str(),
+            self.revision.as_str(),
+            self.activation.as_str(),
+            self.attempt.as_str(),
+        ];
+        for grant in &self.allowed_capabilities {
+            strings.extend(grant.strings());
+        }
+        strings
+    }
+}
+
 /// The invocation identity (`falcone:host/invocation-context`); `attempt-id` is `attempt_id`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invocation {
-    invocation_key: Id,
+    pub(super) invocation_key: Id,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    idempotency_key: Option<Id>,
+    pub(super) idempotency_key: Option<Id>,
     #[serde(
         default,
         deserialize_with = "present",
@@ -56,7 +77,7 @@ redacted!(Invocation);
 /// The legacy `main(params)` object: `__ow_*` request fields beside the action parameters.
 #[derive(Clone, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct Params(Map<String, Value>);
+pub struct Params(pub(super) Map<String, Value>);
 redacted!(Params);
 
 impl<'de> Deserialize<'de> for Params {
@@ -127,11 +148,11 @@ pub struct ExecuteRequest {
     activation_id: Id,
     attempt_id: Id,
     attempt_number: Positive,
-    deadline: Deadline,
-    invocation: Invocation,
-    credential: Credential,
+    pub(super) deadline: Deadline,
+    pub(super) invocation: Invocation,
+    pub(super) credential: Credential,
     pub(super) projection: Projection,
-    params: Params,
+    pub(super) params: Params,
 }
 redacted!(ExecuteRequest);
 
@@ -148,7 +169,7 @@ impl ExecuteRequest {
         self.attempt_number
     }
 
-    fn attribution(&self) -> Attribution {
+    pub(crate) fn attribution(&self) -> Attribution {
         Attribution {
             activation_id: self.activation_id.clone(),
             attempt_id: self.attempt_id.clone(),

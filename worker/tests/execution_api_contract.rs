@@ -4,7 +4,14 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
+// The service-facing half of `api` (limits, import checks, result construction) is not used by
+// the conformance checks, and reaches the typed limits through `crate::limits`.
+#[path = "../src/limits/mod.rs"]
+#[allow(dead_code)]
+mod limits;
+
 #[path = "../src/api/mod.rs"]
+#[allow(dead_code, unused_imports)]
 mod api;
 
 use api::{
@@ -1033,7 +1040,8 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
         .map(String::from)
         .into()
     );
-    // The only worker-only codes: the non-wasm refusal and the two legacy rejections.
+    // The worker-only codes: the contract refusals (the non-wasm refusal and the two legacy
+    // rejections) and the codes of the execution service.
     let worker_only: BTreeSet<_> = table
         .iter()
         .filter(|row| row["origin"] == "worker")
@@ -1042,16 +1050,31 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
     assert_eq!(
         worker_only,
         [
+            "busy",
+            "execution_failed",
+            "execution_timeout",
+            "execution_uncertain",
             "invalid_request",
+            "method_not_allowed",
+            "not_found",
             "request_too_large",
-            "runtime_mode_not_supported"
+            "runtime_mode_not_supported",
+            "undeclared_import",
         ]
         .map(String::from)
         .into()
     );
+    // A retry never changes the class of a code. `busy` is the only retryable code and
+    // `execution_uncertain` the only uncertain one; every other code is non_retryable. The
+    // `retryable` flag is true exactly for class `retryable`.
     for row in &table {
-        assert_eq!(row["retryable"], false, "{}", row["code"]);
-        assert_eq!(row["class"], "non_retryable", "{}", row["code"]);
+        let expected = match row["code"].as_str().unwrap() {
+            "busy" => "retryable",
+            "execution_uncertain" => "uncertain",
+            _ => "non_retryable",
+        };
+        assert_eq!(row["class"], expected, "{}", row["code"]);
+        assert_eq!(row["retryable"], expected == "retryable", "{}", row["code"]);
     }
 }
 
@@ -1087,7 +1110,10 @@ fn the_code_table_matches_the_schema_the_spec_and_the_fixtures() {
             .find(|line| line.starts_with(&format!("| `{code}` |")))
             .unwrap_or_else(|| panic!("{code} is not in the spec table"));
         assert!(line.contains(&format!("| {} |", row["status"])), "{code}");
-        assert!(line.contains("non_retryable"), "{code}");
+        assert!(
+            line.contains(&format!("| {} |", row["class"].as_str().unwrap())),
+            "{code}"
+        );
         for reason in row["reasons"].as_array().unwrap() {
             assert!(line.contains(reason.as_str().unwrap()), "{code}");
         }

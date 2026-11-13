@@ -26,6 +26,10 @@ toml = { workspace = true }
 wasmtime = { workspace = true, features = ["call-hook"] }
 
 wasmparser = { workspace = true }
+# Multi-pattern matcher for credential redaction (RUN-01.t3); already locked as a transitive
+# dependency, so no new crate enters the build.
+aho-corasick = "=1.1.5"
+
 sha2 = { workspace = true }
 # Already locked; authenticates only process-local trusted compiler output.
 ring = "=0.17.14"

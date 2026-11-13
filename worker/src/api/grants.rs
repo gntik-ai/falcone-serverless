@@ -106,6 +106,42 @@ pub struct Grant {
 redacted!(Grant);
 
 impl Grant {
+    /// The family and the names of its one scope field, for the host's verified scopes.
+    pub(super) fn scope(&self) -> (Family, &[String]) {
+        let names = match self.family {
+            Family::Storage => &self.scope.prefixes,
+            Family::Http => &self.scope.hosts,
+            Family::Event => &self.scope.topics,
+            Family::Workflow => &self.scope.targets,
+        };
+        (
+            self.family,
+            names.as_ref().map_or(&[][..], |names| &names.0),
+        )
+    }
+
+    /// Every string of the grant, for credential redaction.
+    pub(super) fn strings(&self) -> Vec<&str> {
+        let mut strings = vec![self.interface.as_str()];
+        for names in [
+            &self.scope.prefixes,
+            &self.scope.hosts,
+            &self.scope.topics,
+            &self.scope.targets,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            strings.extend(names.0.iter().map(String::as_str));
+        }
+        if let Some(secret) = &self.secret_ref {
+            strings.push(secret.name.as_str());
+            strings.extend(secret.version.iter().map(NonEmpty::as_str));
+        }
+        strings.extend(self.guest_grant_id.iter().map(NonEmpty::as_str));
+        strings
+    }
+
     /// The family selects both the interface string for `version` and the scope field.
     fn valid(&self, version: GrantVersion) -> bool {
         let (interface, scope_field) = match self.family {

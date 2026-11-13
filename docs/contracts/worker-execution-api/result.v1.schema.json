@@ -98,9 +98,111 @@
         "properties": {
           "result": {
             "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/failure"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
           },
+          "result": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "busy",
+                  "execution_uncertain"
+                ]
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "else": {
+        "if": {
+          "properties": {
+            "status": {
+              "const": "failure"
+            }
+          },
+          "required": [
+            "status"
+          ]
+        },
+        "then": {
+          "properties": {
+            "class": {
+              "const": "non_retryable"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "busy"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
           "class": {
-            "const": "non_retryable"
+            "const": "retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "execution_uncertain"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "uncertain"
           }
         }
       }

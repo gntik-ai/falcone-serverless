@@ -41,7 +41,8 @@ impl Field {
             Self::TerminationBudgetMs => "termination_budget_ms",
         }
     }
-    const fn ceiling(self) -> u64 {
+    /// The largest value a validated limits document or an admitted budget may carry.
+    pub const fn ceiling(self) -> u64 {
         match self {
             Self::CompilerCpuSeconds => 120,
             Self::CompilerMemoryBytes => 4 * 1024 * 1024 * 1024,
@@ -75,9 +76,14 @@ impl std::fmt::Display for ValidationError {
 }
 impl std::error::Error for ValidationError {}
 
+/// The eight validated fields plus the two per-invocation budgets that no limits document
+/// carries: guest fuel and the host-call count. Both are unbounded in the compatibility
+/// profile and only an admitted revision budget sets them.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     values: [u64; 8],
+    fuel: u64,
+    max_host_calls: u64,
 }
 impl Limits {
     /// Compatibility with the previous host ceilings, not implicit parsing defaults.
@@ -93,7 +99,34 @@ impl Limits {
                 CALL_CAP_MS,
                 500,
             ],
+            fuel: u64::MAX,
+            max_host_calls: u64::MAX,
         }
+    }
+    /// Replaces one field. The caller is trusted server code that has already applied the
+    /// field's ceiling or an admitted budget; documents go through `parse`.
+    #[must_use]
+    pub const fn with(mut self, field: Field, value: u64) -> Self {
+        self.values[field as usize] = value;
+        self
+    }
+    /// The store's fuel for one invocation.
+    #[must_use]
+    pub const fn with_fuel(mut self, fuel: u64) -> Self {
+        self.fuel = fuel;
+        self
+    }
+    /// The most guest-to-host calls one invocation may make.
+    #[must_use]
+    pub const fn with_max_host_calls(mut self, calls: u64) -> Self {
+        self.max_host_calls = calls;
+        self
+    }
+    pub const fn fuel(self) -> u64 {
+        self.fuel
+    }
+    pub const fn max_host_calls(self) -> u64 {
+        self.max_host_calls
     }
     pub const fn value(self, field: Field) -> u64 {
         self.values[field as usize]
@@ -144,7 +177,10 @@ impl Limits {
             }
             values[field as usize] = number;
         }
-        Ok(Self { values })
+        Ok(Self {
+            values,
+            ..Self::compatibility()
+        })
     }
 }
 
