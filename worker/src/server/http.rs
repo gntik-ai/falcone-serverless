@@ -1,6 +1,6 @@
 use super::{Connection, Listener, Phase, State, run};
 use crate::api::Refusal;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Arc;
@@ -38,16 +38,19 @@ pub(super) fn serve(mut stream: TcpStream, state: Arc<State>, permit: Connection
             None
         };
         let (status, value) = if !execute && !control {
-            (404, json!({"code":"not_found"}))
+            (404, serde_json::to_value(Refusal::not_found()).unwrap())
         } else if execute && header.non_wasm {
             (
                 409,
-                json!({"status":409,"code":"runtime_mode_not_supported","message":"This worker runs only revisions in runtime mode wasm.","detail":{"reason":"runtime_mode_not_wasm"},"retryable":false}),
+                serde_json::to_value(Refusal::runtime_mode_not_supported()).unwrap(),
             )
         } else if execute && _execution.is_none() {
             (503, serde_json::to_value(Refusal::busy()).unwrap())
         } else if header.length > 8 * 1024 * 1024 || (control && header.length > 16384) {
-            (413, json!({"code":"request_too_large"}))
+            (
+                413,
+                serde_json::to_value(Refusal::payload_too_large()).unwrap(),
+            )
         } else {
             state.event(listener, Phase::Body);
             let mut body = vec![0; header.length];

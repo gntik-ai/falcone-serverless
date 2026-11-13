@@ -100,6 +100,11 @@ fn contract_imports_must_be_declared_and_globally_allowed() {
             false,
         ),
         (
+            "falcone:host/secrets@0.2.0",
+            vec!["falcone:host/secrets@0.2.0"],
+            false,
+        ),
+        (
             "wasi:cli/environment@0.2.6",
             vec!["wasi:cli/environment@0.2.6"],
             false,
@@ -250,6 +255,10 @@ fn contract_credential_redaction_covers_overlaps_prefixes_and_short_secrets() {
     value["credential"]["aud"] = json!("秘密尾");
     let request = api::parse_request(&serde_json::to_vec(&value).unwrap()).unwrap();
     assert_eq!(request.redact_logs(&["é秘密尾".into()]), vec!["<redacted>"]);
+    assert_eq!(
+        request.redact_logs(&["☃é秘密🦀秘密尾中".into()]),
+        vec!["☃<redacted>🦀<redacted>中"]
+    );
 }
 
 #[test]
@@ -301,4 +310,23 @@ fn contract_timeout_selection_and_timeout_envelope_are_contract_values() {
         assert_eq!(envelope["result"]["code"], "timeout");
         api::parse_result(&serde_json::to_vec(&envelope).unwrap(), &request).unwrap();
     }
+}
+
+#[test]
+fn contract_redaction_matcher_near_all_limits_finishes_within_two_seconds() {
+    cases::matcher_redaction();
+}
+
+#[test]
+fn contract_disallowed_falcone_fixture_matches_source_and_is_refused() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/qualification/execution_api_fixtures");
+    let bytes = include_bytes!("../src/qualification/execution_api_fixtures/disallowed.wasm");
+    assert_eq!(wat::parse_file(root.join("disallowed.wat")).unwrap(), bytes);
+    assert_eq!(
+        falcone_serverless_worker::artifact::validate::validate(bytes, 65536)
+            .unwrap_err()
+            .code,
+        "undeclared_import"
+    );
 }

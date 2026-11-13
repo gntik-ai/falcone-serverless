@@ -1839,3 +1839,33 @@ fn a_304_result_with_a_body_is_malformed_in_schema_and_parser() {
     assert!(schema);
     assert!(matches!(verdict, Verdict::Accepted(_)));
 }
+
+#[test]
+fn transport_and_control_refusals_use_the_typed_failure_envelope() {
+    for (status, code, reason, message) in [
+        (
+            400,
+            "invalid_request",
+            "malformed_request",
+            "The request is malformed.",
+        ),
+        (
+            404,
+            "not_found",
+            "not_found",
+            "The operation or attempt was not found.",
+        ),
+        (
+            409,
+            "stale_update",
+            "stale_update",
+            "The update sequence is stale.",
+        ),
+    ] {
+        let value = json!({"status":status,"code":code,"message":message,
+            "detail":{"reason":reason},"retryable":false});
+        let refusal: api::Refusal = serde_json::from_value(value.clone()).expect("typed refusal");
+        assert_eq!(refusal.status(), status);
+        assert_eq!(serde_json::to_value(refusal).unwrap(), value);
+    }
+}

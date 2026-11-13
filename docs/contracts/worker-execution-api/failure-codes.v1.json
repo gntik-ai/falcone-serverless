@@ -45,7 +45,8 @@
     "status": 400,
     "reasons": [
       "missing_path",
-      "non_json_body"
+      "non_json_body",
+      "malformed_request"
     ],
     "retryable": false,
     "class": "non_retryable"
@@ -106,6 +107,26 @@
     "status": 500,
     "reasons": [
       "execution_failed"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "not_found",
+    "origin": "worker-service",
+    "status": 404,
+    "reasons": [
+      "not_found"
+    ],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "stale_update",
+    "origin": "worker-service",
+    "status": 409,
+    "reasons": [
+      "stale_update"
     ],
     "retryable": false,
     "class": "non_retryable"

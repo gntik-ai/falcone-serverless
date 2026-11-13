@@ -31,6 +31,7 @@ const CASES: &[&str] = &[
     "declared-imports",
     "credential-isolation",
     "redaction-budget",
+    "redaction-matcher",
     "listener-routes",
     "saturation",
     "http-ceilings-deadlines",

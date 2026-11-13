@@ -46,6 +46,10 @@ pub enum Code {
     Cancelled,
     #[serde(rename = "execution_failed")]
     ExecutionFailed,
+    #[serde(rename = "not_found")]
+    NotFound,
+    #[serde(rename = "stale_update")]
+    StaleUpdate,
 }
 unit_debug!(
     Code: OciNotAuthorized,
@@ -53,7 +57,7 @@ unit_debug!(
     BaseMismatch,
     RuntimeModeNotSupported,
     InvalidRequest,
-    RequestTooLarge, Timeout, Busy, UndeclaredImport, Cancelled, ExecutionFailed,
+    RequestTooLarge, Timeout, Busy, UndeclaredImport, Cancelled, ExecutionFailed, NotFound, StaleUpdate,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +67,9 @@ pub enum Reason {
     BaseDisabled,
     BaseMismatch,
     RuntimeModeNotWasm,
+    MalformedRequest,
+    NotFound,
+    StaleUpdate,
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
@@ -73,7 +80,7 @@ pub enum Reason {
     ExecutionFailed,
 }
 unit_debug!(
-    Reason: OciNotAuthorized,
+    Reason: MalformedRequest, NotFound, StaleUpdate, OciNotAuthorized,
     BaseDisabled,
     BaseMismatch,
     RuntimeModeNotWasm,
@@ -88,6 +95,8 @@ impl Code {
             Self::OciNotAuthorized => 403,
             Self::BaseDisabled | Self::BaseMismatch | Self::RuntimeModeNotSupported => 409,
             Self::InvalidRequest => 400,
+            Self::NotFound => 404,
+            Self::StaleUpdate => 409,
             Self::RequestTooLarge => 413,
             Self::Timeout => 504,
             Self::Busy => 503,
@@ -106,6 +115,8 @@ impl Code {
                 "This worker runs only revisions in runtime mode wasm."
             }
             Self::InvalidRequest => "The request is malformed.",
+            Self::NotFound => "The operation or attempt was not found.",
+            Self::StaleUpdate => "The update sequence is stale.",
             Self::RequestTooLarge => "The request body exceeds the size budget.",
             Self::Timeout => "The execution deadline expired.",
             Self::Busy => "Worker capacity is occupied.",
@@ -129,7 +140,7 @@ impl Code {
                 | (Self::RuntimeModeNotSupported, Reason::RuntimeModeNotWasm)
                 | (
                     Self::InvalidRequest,
-                    Reason::MissingPath | Reason::NonJsonBody
+                    Reason::MissingPath | Reason::NonJsonBody | Reason::MalformedRequest
                 )
                 | (Self::RequestTooLarge, Reason::BodyTooLarge)
                 | (Self::Timeout, Reason::ExecutionTimeout)
@@ -137,6 +148,8 @@ impl Code {
                 | (Self::UndeclaredImport, Reason::UndeclaredImport)
                 | (Self::Cancelled, Reason::Cancelled)
                 | (Self::ExecutionFailed, Reason::ExecutionFailed)
+                | (Self::NotFound, Reason::NotFound)
+                | (Self::StaleUpdate, Reason::StaleUpdate)
         )
     }
 }
@@ -159,6 +172,18 @@ pub struct Refusal {
 }
 
 impl Refusal {
+    pub fn runtime_mode_not_supported() -> Self {
+        Self::new(Code::RuntimeModeNotSupported, Reason::RuntimeModeNotWasm)
+    }
+    pub fn invalid_request() -> Self {
+        Self::new(Code::InvalidRequest, Reason::MalformedRequest)
+    }
+    pub fn not_found() -> Self {
+        Self::new(Code::NotFound, Reason::NotFound)
+    }
+    pub fn stale_update() -> Self {
+        Self::new(Code::StaleUpdate, Reason::StaleUpdate)
+    }
     pub fn payload_too_large() -> Self {
         Self::new(Code::RequestTooLarge, Reason::BodyTooLarge)
     }

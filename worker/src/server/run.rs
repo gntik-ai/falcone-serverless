@@ -131,7 +131,12 @@ pub(super) fn execute(state: &State, body: &[u8]) -> (u16, Value) {
             let status = refused.refusal.status();
             return (status, serde_json::to_value(refused.refusal).unwrap());
         }
-        Err(_) => return (400, json!({"code":"invalid_request"})),
+        Err(_) => {
+            return (
+                400,
+                serde_json::to_value(api::Refusal::invalid_request()).unwrap(),
+            );
+        }
     };
     let logs = Arc::new(Mutex::new(Vec::new()));
     let bindings = Arc::new(HostBindings {
@@ -252,10 +257,18 @@ pub(super) fn control(state: &State, path: &str, body: &[u8]) -> (u16, Value) {
             .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
         "/v1/update" => api::parse_update(body)
             .and_then(|value| serde_json::to_value(value).map_err(Into::into)),
-        _ => return (404, json!({"code":"not_found"})),
+        _ => {
+            return (
+                404,
+                serde_json::to_value(api::Refusal::not_found()).unwrap(),
+            );
+        }
     };
     let Ok(mut value) = value else {
-        return (400, json!({"code":"invalid_request"}));
+        return (
+            400,
+            serde_json::to_value(api::Refusal::invalid_request()).unwrap(),
+        );
     };
     let key = (
         value["activation_id"].as_str().unwrap().to_owned(),
@@ -264,18 +277,27 @@ pub(super) fn control(state: &State, path: &str, body: &[u8]) -> (u16, Value) {
     let active = state.active.lock().unwrap().get(&key).cloned();
     if path == "/v1/update" {
         let Some(active) = active else {
-            return (404, json!({"code":"not_found"}));
+            return (
+                404,
+                serde_json::to_value(api::Refusal::not_found()).unwrap(),
+            );
         };
         let mut sequence = active.sequence.lock().unwrap();
         let next = value["sequence"].as_u64().unwrap();
         if next <= *sequence {
-            return (409, json!({"code":"stale_update"}));
+            return (
+                409,
+                serde_json::to_value(api::Refusal::stale_update()).unwrap(),
+            );
         }
         *sequence = next;
         return (200, value);
     }
     if value["cancel"]["state"] != "requested" {
-        return (400, json!({"code":"invalid_request"}));
+        return (
+            400,
+            serde_json::to_value(api::Refusal::invalid_request()).unwrap(),
+        );
     }
     let acknowledged = active.is_some_and(|active| {
         active.cancelled.store(true, Ordering::Release);

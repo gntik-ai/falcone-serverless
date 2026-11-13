@@ -141,18 +141,22 @@ without changing these. The machine-readable table is [failure-codes.v1.json](fa
 | `GW_BASE_DISABLED` | 409 | `base_disabled` | non_retryable | ctr-functions-api v1 |
 | `GW_BASE_MISMATCH` | 409 | `base_mismatch` | non_retryable | ctr-functions-api v1 |
 | `runtime_mode_not_supported` | 409 | `runtime_mode_not_wasm` | non_retryable | worker only |
-| `invalid_request` | 400 | `missing_path` or `non_json_body` | non_retryable | worker only |
+| `invalid_request` | 400 | `missing_path`, `non_json_body` or `malformed_request` | non_retryable | worker only |
 | `request_too_large` | 413 | `body_too_large` | non_retryable | worker only |
 | `timeout` | 504 | `execution_timeout` | non_retryable | worker service |
 | `busy` | 503 | `capacity_exhausted` | non_retryable | worker service |
 | `undeclared_import` | 422 | `undeclared_import` | non_retryable | worker service |
 | `cancelled` | 499 | `cancelled` | non_retryable | worker service |
 | `execution_failed` | 500 | `execution_failed` | non_retryable | worker service |
+| `not_found` | 404 | `not_found` | non_retryable | worker service |
+| `stale_update` | 409 | `stale_update` | non_retryable | worker service |
 
 The three `GW_` codes are referenced, not defined: their names, statuses and reasons are those of
-the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The original three worker-only admission codes remain unchanged. The five worker-service
+the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The original three worker-only admission codes remain unchanged. The worker-service
 codes add bounded service admission and execution outcomes; `busy` is an attempt refusal,
-and retry policy remains with Falcone. Adding `GW_` equivalents to the functions API is a
+and retry policy remains with Falcone. In v1 `retryable: false` describes this
+attempt; it does not authorize worker retries or prohibit Falcone from admitting
+a new attempt after capacity recovers. Adding `GW_` equivalents to the functions API is a
 follow-up. A request this worker refuses carries no request value in its message.
 
 ### The non-wasm refusal
@@ -257,7 +261,10 @@ there is no keep-alive, pipelining, transfer encoding or content encoding. At mo
 writing. A complete execute header gets 503 `busy` before reading its body when
 execution permits are occupied. Overflow connections beyond the listener ceiling
 receive an immediate best-effort nonblocking 503 and close, without parsing or
-allocating a connection thread. Existing connections are never evicted.
+allocating a connection thread. Existing connections are never evicted. Accept errors (including descriptor or memory
+exhaustion and aborted connections) emit value-free listener/error-kind diagnostics
+and retry after a fixed 50 ms backoff. Neither listener silently exits on an accept
+error; recovery requires the external resource condition to clear.
 
 For refusal precedence before a body can be admitted, the dispatcher supplies
 `X-Falcone-Runtime-Mode` with the projection's mode (and `X-Falcone-Image` for an
@@ -310,8 +317,12 @@ External capability bindings fail closed pending their platform integrations.
 The effective guest timeout is **min(request timeout_ms, projection budgets.timeout_ms,
 worker wall clock)**. The worker wall clock is min(RuntimeConfig default_wall_clock_ms,
 max_wall_clock_ms, the existing engine's 30000 ms hard ceiling). Trusted validation and
-compilation have their separate, existing 300 s supervised budget; the guest clock
-starts at preparation/instantiation, before any guest start code. Expiry returns
+compilation have their separate, existing 300 s supervised budget. A single
+process-owned trusted cache serializes compilation and cache lookup; a cold compile
+can delay other requests, including cache hits, while they hold execution permits.
+The queue wait precedes the guest clock and is not charged to timeout_ms; a cancel
+in that phase can report uncertain. This is separate from the qualified guest timeout;
+the guest clock starts at preparation/instantiation, before any guest start code. Expiry returns
 HTTP 504 with `timeout`, reason `execution_timeout`, activation and attempt attribution
 and runtime identity, and releases capacity. Tests warm compilation outside the
 measured guest invocation and require 1000 ms to finish in [900, 3000) ms. Blocked
@@ -325,8 +336,12 @@ Building costs O(256 * secret bytes), scanning O(log bytes). Per execution the f
 bounds are 262144 serialized credential bytes, 16384 states and 33554432 work units
 (including construction, traversal and truncated text). Exceeding any bound drops
 all logs and returns exactly `["<redacted>"]`. At most 1000 output lines are retained.
-The maximum-size adversarial request with 1000 full log lines must redact within
-2 s (debug and release); full service qualification also asserts slot recovery.
+Qualification covers both the 8 MiB early fail-closed case and a matcher-path case
+with 15 shared-prefix secrets of lengths 15900..15914, under 256 KiB serialized
+credentials and 16384 states, and 1000 8192-character lines (14192 bytes each,
+over 32 million work units including construction). The latter must return 1000
+redacted lines, proving that it did not take a budget fallback. Each case must
+redact within 2 s (debug and release); full service qualification also asserts slot recovery.
 No dependency was added for the matcher. The already pinned rustix 1.1.5 enables
 its `net` feature to bound send queues and to set a 16 KiB receive buffer for
 slow-reader qualification; this avoids depending on host TCP autotuning defaults.

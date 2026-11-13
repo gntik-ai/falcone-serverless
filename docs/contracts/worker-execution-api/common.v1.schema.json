@@ -220,7 +220,9 @@
             "busy",
             "undeclared_import",
             "cancelled",
-            "execution_failed"
+            "execution_failed",
+            "not_found",
+            "stale_update"
           ]
         },
         "message": {
@@ -246,7 +248,10 @@
                 "capacity_exhausted",
                 "undeclared_import",
                 "cancelled",
-                "execution_failed"
+                "execution_failed",
+                "malformed_request",
+                "not_found",
+                "stale_update"
               ]
             }
           }
@@ -404,7 +409,8 @@
                   "reason": {
                     "enum": [
                       "missing_path",
-                      "non_json_body"
+                      "non_json_body",
+                      "malformed_request"
                     ]
                   }
                 }
@@ -591,6 +597,68 @@
                   "reason": {
                     "enum": [
                       "execution_failed"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 404
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "not_found"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "const": "stale_update"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          },
+          "then": {
+            "properties": {
+              "status": {
+                "const": 409
+              },
+              "retryable": {
+                "const": false
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "stale_update"
                     ]
                   }
                 }

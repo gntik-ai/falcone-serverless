@@ -220,6 +220,7 @@ mod tests {
             "false",
         ],
     ];
+    const SERVICE_FIELDS: [[&str; 5]; 1] = [["control_port", "u16", "port", "none", "true"]];
     const POSTURE: [[&str; 2]; 7] = [
         ["readOnlyRootFilesystem", "true"],
         ["runAsNonRoot", "true"],
@@ -291,6 +292,13 @@ mod tests {
                 &["name", "type", "unit", "default", "required"],
             )?,
             &FIELDS,
+        )?;
+        check_rows(
+            table(
+                section(doc, "Service configuration v2")?,
+                &["name", "type", "unit", "default", "required"],
+            )?,
+            &SERVICE_FIELDS,
         )?;
         check_rows(
             table(

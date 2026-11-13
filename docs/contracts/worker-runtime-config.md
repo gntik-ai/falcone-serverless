@@ -124,6 +124,12 @@ operator approval before merge (`AGENTS.md:34`).
 
 ## Service configuration v2
 
+The following field is required only in v2, in addition to the unchanged v1 fields above.
+
+| name | type | unit | default | required |
+| --- | --- | --- | --- | --- |
+| control_port | u16 | port | none | true |
+
 `version = 2` retains all v1 fields and adds `control_port` (u16, required, no
 default). It rejects missing, zero or equal execute/control ports, concurrency
 outside 1..1024 and zero wall-clock limits. v1 still rejects `control_port`.

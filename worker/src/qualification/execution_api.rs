@@ -50,10 +50,8 @@ impl Fixture {
             compiler: binaries.join("artifact-compile-child"),
         })
         .unwrap();
-        let mut request: Value = serde_json::from_str(include_str!(
-            "../../tests/fixtures/contract/request/valid/wasm-no-base.json"
-        ))
-        .unwrap();
+        let mut request: Value =
+            serde_json::from_str(include_str!("execution_api_fixtures/request.json")).unwrap();
         request["projection"]["component_digest"] = digest.into();
         request["projection"]["imports"] = json!([]);
         request["projection"]["grants"] = json!([]);
@@ -131,6 +129,9 @@ pub fn saturation() {
         request(fixture.server.control_addr(), "/v1/update", &update).0,
         409
     );
+    // Both update responses reached EOF; also observe their server-side closes
+    // before any later control-close accounting begins.
+    wait(&fixture, Listener::Control, Phase::Closed, 2);
     for (selector, expected) in [("wasm", 503), ("unknown", 409)] {
         let mut stalled_body = TcpStream::connect(fixture.server.execute_addr()).unwrap();
         stalled_body
@@ -164,15 +165,27 @@ pub fn saturation() {
         Some("acknowledged" | "uncertain")
     ));
     assert!(start.elapsed() < Duration::from_secs(2));
-    let controls: Vec<_> = (0..CONTROL_CONNECTIONS)
+    // Consume the cancel's own close before starting the full-control phase.
+    wait(&fixture, Listener::Control, Phase::Closed, 1);
+    let mut controls: Vec<_> = (0..CONTROL_CONNECTIONS)
         .map(|_| TcpStream::connect(fixture.server.control_addr()).unwrap())
         .collect();
     wait(
         &fixture,
         Listener::Control,
         Phase::Accepted,
-        CONTROL_CONNECTIONS + 1,
+        CONTROL_CONNECTIONS,
     );
+    let mut overflow = TcpStream::connect(fixture.server.control_addr()).unwrap();
+    overflow
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    assert_eq!(
+        response(&mut overflow).0,
+        503,
+        "full control listener must refuse overflow"
+    );
+    // Keep every client open: only server deadlines can recover these slots.
     // Wait for the server's deadline events, never a guessed scheduling delay.
     wait(
         &fixture,
@@ -180,8 +193,22 @@ pub fn saturation() {
         Phase::Closed,
         CONTROL_CONNECTIONS,
     );
-    drop(controls);
+    assert!(
+        !executions[1].1.is_finished(),
+        "control stalls must not stop an execution"
+    );
     assert_eq!(cancel(&fixture, &executions[1].0).0, 200);
+    for stream in &mut controls {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        assert_eq!(
+            stream.read(&mut [0]).unwrap(),
+            0,
+            "server must close the stalled client"
+        );
+    }
+    drop(controls);
     for (_, thread) in executions {
         assert_eq!(thread.join().unwrap().0, 499);
     }
@@ -227,7 +254,19 @@ pub fn response(stream: &mut TcpStream) -> (u16, Value) {
         .unwrap();
     let header = std::str::from_utf8(&bytes[..split]).unwrap();
     let status = header.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, serde_json::from_slice(&bytes[split + 4..]).unwrap())
+    let value: Value = serde_json::from_slice(&bytes[split + 4..]).unwrap();
+    if status >= 400 {
+        let failure = if value["status"] == "failure" {
+            &value["result"]
+        } else {
+            &value
+        };
+        let refusal: api::Refusal =
+            serde_json::from_value(failure.clone()).expect("contract refusal envelope");
+        assert_eq!(refusal.status(), status);
+        assert!(!failure["message"].as_str().unwrap().is_empty());
+    }
+    (status, value)
 }
 
 fn recovery(fixture: &Fixture) {
@@ -600,6 +639,11 @@ pub fn declared_imports() {
             422,
         ),
         (
+            include_bytes!("execution_api_fixtures/disallowed.wasm").as_slice(),
+            json!(["falcone:host/secrets@0.2.0"]),
+            422,
+        ),
+        (
             include_bytes!("execution_api_fixtures/context.wasm").as_slice(),
             json!(["falcone:host/invocation-context@0.2.0"]),
             200,
@@ -662,11 +706,62 @@ pub fn credential_isolation() {
     }
 }
 
+/// Near both construction ceilings, with shared prefixes keeping the state count bounded.
+fn matcher_credential(request: &mut Value) {
+    request["credential"]["iss"] = json!("a");
+    request["credential"]["allowed_capabilities"][0]["scope"]["hosts"] =
+        json!((15900..15915).map(|n| "a".repeat(n)).collect::<Vec<_>>());
+    let size = serde_json::to_vec(&request["credential"]).unwrap().len();
+    assert!((238_000..262_144).contains(&size));
+}
+
+pub fn matcher_redaction() {
+    let mut value: Value =
+        serde_json::from_str(include_str!("execution_api_fixtures/request.json")).unwrap();
+    matcher_credential(&mut value);
+    let request = api::parse_request(&serde_json::to_vec(&value).unwrap()).unwrap();
+    // 14,192 bytes per line: scanning plus the nearly full automaton consumes
+    // over 32 million of the 33,554,432 work units, without taking a fallback.
+    let logs = vec![format!("{}{}", "a".repeat(6192), "🦀".repeat(2000)); 1000];
+    let start = std::time::Instant::now();
+    let redacted = request.redact_logs(&logs);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert_eq!(
+        redacted.len(),
+        1000,
+        "must run the matcher, not fail closed"
+    );
+    let expected = format!("<redacted>{}", "🦀".repeat(2000));
+    assert!(redacted.iter().all(|line| line == &expected));
+    // Same admissible secret set, but UTF-8 text exceeds the work ceiling
+    // after many lines: discard even the lines already processed successfully.
+    let start = std::time::Instant::now();
+    assert_eq!(
+        request.redact_logs(&vec!["🦀".repeat(8192); 1000]),
+        vec!["<redacted>"]
+    );
+    assert!(start.elapsed() < Duration::from_secs(2));
+}
+
 pub fn redaction_budget() {
     let mut fixture = Fixture::new(include_bytes!("execution_api_fixtures/logs.wasm"), 1, 30000);
     fixture.request["projection"]["imports"] = json!(["falcone:host/logging@0.2.0"]);
     assert_eq!(fixture.execute().0, 200);
     let small = fixture.request.clone();
+    matcher_credential(&mut fixture.request);
+    fixture.request["credential"]["iss"] = json!("z");
+    let (status, value) = fixture.execute();
+    assert_eq!(status, 200);
+    assert_eq!(value["logs"].as_array().unwrap().len(), 1000);
+    assert!(
+        value["logs"].as_array().unwrap().iter().all(|line| line
+            .as_str()
+            .unwrap()
+            .contains("<redacted>")
+            && !line.as_str().unwrap().contains("zz"))
+    );
+    fixture.request = small.clone();
+    recovery(&fixture);
     fixture.request["credential"]["allowed_capabilities"][0]["scope"]["hosts"] = json!([]);
     let baseline = serde_json::to_vec(&fixture.request).unwrap().len();
     let count = (8 * 1024 * 1024 - baseline + 1) / 12;
@@ -688,6 +783,7 @@ pub const CASES: &[(&str, fn())] = &[
     ("declared-imports", declared_imports),
     ("credential-isolation", credential_isolation),
     ("redaction-budget", redaction_budget),
+    ("redaction-matcher", matcher_redaction),
     ("listener-routes", listener_routes),
     ("saturation", saturation),
     ("http-ceilings-deadlines", ceilings_and_transfer_deadlines),

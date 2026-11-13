@@ -4,6 +4,7 @@ mod run;
 
 use crate::{api, cache::Cache};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
 use std::sync::{
@@ -25,6 +26,7 @@ pub enum Listener {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
     Accepted,
+    AcceptError,
     Headers,
     Body,
     GuestStarted,
@@ -175,7 +177,15 @@ impl Server {
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::park_timeout(Duration::from_millis(2))
                         }
-                        Err(_) => break,
+                        Err(error) => {
+                            state.event(listener, Phase::AcceptError);
+                            let _ = writeln!(
+                                std::io::stderr().lock(),
+                                "listener_accept_failed listener={listener:?} kind={:?}",
+                                error.kind()
+                            );
+                            std::thread::park_timeout(Duration::from_millis(50));
+                        }
                     }
                 }
             }));

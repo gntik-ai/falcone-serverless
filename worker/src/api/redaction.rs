@@ -130,27 +130,33 @@ impl Matcher {
             cover[end - self.nodes[state].depth] += 1;
             cover[end] -= 1;
         }
-        let mut output = String::new();
+        let mut output = String::with_capacity(line.len());
         let mut active = 0;
         let mut hidden = false;
-        for (at, ch) in line.char_indices() {
-            // Match boundaries are UTF-8 boundaries; accumulate all byte deltas
-            // since the preceding character, including continuation bytes.
-            active += cover[at];
-            if active > 0 {
-                if !hidden {
-                    output.push_str(MARKER);
-                }
+        let mut visible = 0;
+        // Match boundaries are UTF-8 boundaries. Copy each visible span once
+        // rather than rebuilding every character and its continuation bytes.
+        for (at, delta) in cover[..line.len()].iter().enumerate() {
+            active += delta;
+            if active > 0 && !hidden {
+                output.push_str(&line[visible..at]);
+                output.push_str(MARKER);
                 hidden = true;
-            } else {
-                output.push(ch);
+            } else if active == 0 && hidden {
+                visible = at;
                 hidden = false;
             }
-            for delta in &cover[at + 1..at + ch.len_utf8()] {
-                active += delta;
-            }
         }
-        Ok(output.chars().take(8192).collect())
+        if !hidden {
+            output.push_str(&line[visible..]);
+        }
+        let end = output
+            .char_indices()
+            .nth(8192)
+            .map(|(at, _)| at)
+            .unwrap_or(output.len());
+        output.truncate(end);
+        Ok(output)
     }
 }
 impl ExecuteRequest {
