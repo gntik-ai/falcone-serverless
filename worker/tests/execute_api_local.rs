@@ -34,6 +34,7 @@ local_cases! {
     http_limits,
     body_deadline,
     slow_reader,
+    adversarial_redaction,
 }
 
 /// The in-pod runner serves exactly the cases run here: a case added to one and not the other

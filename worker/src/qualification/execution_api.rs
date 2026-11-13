@@ -34,6 +34,7 @@ const HOST_CALLS_11: &[u8] = include_bytes!("api_fixtures/host-calls-11.wasm");
 const LOG_THEN_SPIN: &[u8] = include_bytes!("api_fixtures/log-then-spin.wasm");
 const LOG_ECHO: &[u8] = include_bytes!("api_fixtures/log-echo.wasm");
 const MAX_LOGS: &[u8] = include_bytes!("api_fixtures/max-logs.wasm");
+const LOG_PARAMS_1000: &[u8] = include_bytes!("api_fixtures/log-params-1000.wasm");
 const MEMORY_DUMP: &[u8] = include_bytes!("api_fixtures/memory-dump.wasm");
 const CONTEXT_IMPORT: &[u8] = include_bytes!("api_fixtures/context-import.wasm");
 
@@ -1403,6 +1404,82 @@ pub fn slow_reader() {
     worker.recovers(&spin, &echo, "slow");
 }
 
+/// Adversarial redaction through the service: the credential carries 4 MiB of distinct strings
+/// and the guest logs 1000 maximum-length lines made of them. Every line is fully redacted,
+/// redaction finishes within its bound, and with `concurrency` 1 the slot is free again: the
+/// next execute is admitted (never `busy`), and a cancel still works afterwards.
+pub fn adversarial_redaction() {
+    // 4 MiB of 8-byte strings: the documented maximum the redaction budget is sized for.
+    const SECRETS: usize = 4 * 1024 * 1024 / 8;
+    // What fits in one maximum-length line after the log prefix: about 900 whole strings.
+    const LOGGED: usize = 900;
+    let worker = Worker::start(Settings {
+        concurrency: 1,
+        ..Settings::default()
+    });
+    let echo = worker.publish(ECHO);
+    let spin = worker.publish(SPIN);
+    let logs = worker.publish(LOG_PARAMS_1000);
+    let secrets: Vec<String> = (0..SECRETS).map(|n| format!("k{n:07x}")).collect();
+
+    let mut request = Req::new(&logs, "act-adversarial").imports(&[LOGGING]);
+    request.params = json!({"__ow_path": "/leak", "text": secrets[..LOGGED].join(" ")});
+    let mut request = request.json();
+    request["credential"]["allowed_capabilities"][0]["scope"]["prefixes"] = json!(secrets);
+    let size = request.to_string().len();
+    assert!(
+        size > 5 * 1024 * 1024 && size < 8 * 1024 * 1024,
+        "the request is large but within the 8 MiB ceiling: {size}"
+    );
+
+    let from = worker.events.len();
+    let body = expect_success(&worker.execute(&request));
+    let (_, started_at, _) = worker
+        .events
+        .wait(from, event_is("guest_started", "act-adversarial"));
+    let (_, finished_at, _) = worker
+        .events
+        .wait(from, event_is("execution_finished", "act-adversarial"));
+    // Guest run, redaction and the structured copy together: the release bound of the redaction
+    // alone is 1 s (asserted in `execute_api_local`); this adds 1000 host calls and slack.
+    let bound = Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 5 });
+    assert!(
+        finished_at.duration_since(started_at) < bound,
+        "redaction through the service took {:?}",
+        finished_at.duration_since(started_at)
+    );
+
+    let lines = body["logs"].as_array().unwrap();
+    assert_eq!(lines.len(), 1000);
+    for line in lines {
+        let line = line.as_str().unwrap();
+        assert_eq!(line.chars().count(), 8192);
+        // The redacted line is clipped again at 8192 characters: at most 8192 / 11 markers fit.
+        assert!(line.matches("<redacted>").count() >= 700, "{line:.200}");
+        // No whole credential string is left: they are the only 8-character words starting
+        // with `k`; a string cut by the line limit is shorter.
+        assert!(
+            !line
+                .split_whitespace()
+                .any(|word| word.len() == 8 && word.starts_with('k')),
+            "a credential string survived: {line:.200}"
+        );
+    }
+    // The structured worker log carries none of the strings the guest logged.
+    let all = worker.events.lines();
+    for secret in &secrets[..LOGGED] {
+        assert!(
+            !all.contains(secret.as_str()),
+            "the worker log holds a credential string"
+        );
+    }
+
+    // The slot is free: the next execute is admitted at once, not `busy`.
+    let normal = worker.execute(&Req::new(&echo, "act-adversarial-next").json());
+    assert_eq!(normal.status, 200, "the slot was not released");
+    worker.recovers(&spin, &echo, "adversarial");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------------------------
@@ -1422,6 +1499,7 @@ pub const CASES: &[Case] = &[
     ("http-limits", http_limits),
     ("body-deadline", body_deadline),
     ("slow-reader", slow_reader),
+    ("adversarial-redaction", adversarial_redaction),
 ];
 
 /// Runs one case, or `all`, in this process (the restricted pod) and reports each as a JSON

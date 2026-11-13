@@ -75,6 +75,7 @@ cluster_cases! {
     http_limits => "http-limits",
     body_deadline => "body-deadline",
     slow_reader => "slow-reader",
+    adversarial_redaction => "adversarial-redaction",
 }
 
 #[test]

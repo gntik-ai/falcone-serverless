@@ -30,9 +30,10 @@ hang into a failure.
 | `http-limits` | oversized headers, request and action body are refused without guest code; no-bytes, dripped-header and stalled-body connections close within their bounds; after each case a normal execute and a cancel succeed |
 | `body-deadline` | a body trickled a byte a second, never quiet for the 5 s inactivity bound, is closed at the absolute 30 s body deadline (`body_deadline`); a normal execute and a cancel succeed afterwards |
 | `slow-reader` | a one-byte-at-a-time reader is cut off at the absolute response deadline; its slot is released and a normal execute and a cancel succeed |
+| `adversarial-redaction` | with `concurrency` 1, a credential carrying 4 MiB of distinct strings and a guest that logs 1000 maximum-length lines of them: every line fully redacted, none of the strings in the response or the structured log, guest run plus redaction within the bound (5 s in release), the slot released (the next execute is admitted, not `busy`), and a cancel and a normal execute succeed afterwards |
 
-The redaction adversarial set (maximum distinct secrets and 1000 maximum-length lines in under 1 s
-in release; overlapping and prefix-sharing secrets; over budget returns only `<redacted>`) is in
+The matcher's own adversarial set (maximum distinct secrets and 1000 maximum-length lines in under
+1 s in release; overlapping and prefix-sharing secrets; over budget returns only `<redacted>`) is in
 `worker/tests/execute_api_local.rs`, and the `execution_limits` unit tests (every field, not only
 the timeout) are in `worker/src/api/tests.rs`.
 
