@@ -60,6 +60,8 @@ cluster_cases! {
     envelope => "envelope",
     runtime_mode => "runtime-mode",
     credential => "credential",
+    credential_memory => "credential-memory",
+    credential_files => "credential-files",
     imports => "imports",
     redaction_load => "redaction-load",
     saturation => "saturation",

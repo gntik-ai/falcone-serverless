@@ -339,7 +339,12 @@ one second.
 `worker/tests/execute_api_local.rs` starts the real `serve` binary and runs each case over
 loopback TCP; the same cases (`worker/src/qualification/execution_api.rs`) run in the restricted
 `fs-test-run01-*` pod through `worker/tests/cluster_execute_api.rs` (gated by `FS_TEST_CLUSTER`).
-The cases, by acceptance criterion: `envelope` (identity), `runtime-mode`, `credential`,
+The cases, by acceptance criterion: `envelope` (identity), `runtime-mode`, `credential`
+(params and logs), `credential-memory` (a guest that scans its whole linear memory for credential
+strings finds none, after a positive control proves it can see them; a component with an extra
+memory-bearing export is refused `422 missing_handler_export`), `credential-files` (components
+importing the WASI environment, preopens or filesystem interfaces are refused
+`422 undeclared_import`, declared or not, so the guest has no environment or preopen to read),
 `imports`, `redaction-load` (many credential strings and maximum log volume through the whole
 request lifecycle, the fail-closed path, and a slot that is released),
 `saturation` and `control-stall` (capacity, cancel under load, recovery),

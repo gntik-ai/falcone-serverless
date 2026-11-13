@@ -25,6 +25,10 @@ const CONTEXT: &[u8] = include_bytes!("execute_fixtures/api-context.wasm");
 const LOGGER: &[u8] = include_bytes!("execute_fixtures/api-log.wasm");
 const LOG_MANY: &[u8] = include_bytes!("execute_fixtures/api-log-many.wasm");
 const WASI: &[u8] = include_bytes!("execute_fixtures/wasi-import.wasm");
+const WASI_PREOPENS: &[u8] = include_bytes!("execute_fixtures/wasi-preopens.wasm");
+const WASI_FILESYSTEM: &[u8] = include_bytes!("execute_fixtures/wasi-filesystem.wasm");
+const MEMORY_PROBE: &[u8] = include_bytes!("execute_fixtures/api-memory-probe.wasm");
+const MEMORY_EXPORT: &[u8] = include_bytes!("execute_fixtures/api-memory-export.wasm");
 
 const CONTEXT_IMPORT: &str = "falcone:host/invocation-context@0.2.0";
 const LOGGING_IMPORT: &str = "falcone:host/logging@0.2.0";
@@ -113,7 +117,18 @@ impl Worker {
         ));
         let artifacts = root.join("cache/artifacts");
         std::fs::create_dir_all(&artifacts).map_err(|e| format!("scratch: {}", e.kind()))?;
-        for component in [ECHO, BLOCK, CONTEXT, LOGGER, LOG_MANY, WASI] {
+        for component in [
+            ECHO,
+            BLOCK,
+            CONTEXT,
+            LOGGER,
+            LOG_MANY,
+            WASI,
+            WASI_PREOPENS,
+            WASI_FILESYSTEM,
+            MEMORY_PROBE,
+            MEMORY_EXPORT,
+        ] {
             let hex = digest(component).replace("sha256:", "");
             std::fs::write(artifacts.join(format!("{hex}.wasm")), component)
                 .map_err(|e| format!("stage: {}", e.kind()))?;
@@ -794,6 +809,107 @@ fn credential_boundary(binary: &Path) -> Check {
 }
 
 // ---------------------------------------------------------------------------------------------
+// AC3: the guest sees no credential bytes in memory, environment, files or exports
+
+/// The number of credential-bearing needles the memory probe found in its linear memory.
+fn probe_hits(response: &Response) -> Result<u64, String> {
+    ensure(response.status == 200, "the memory probe runs")?;
+    let result = response.json()?;
+    ensure(
+        result["status"] == "success",
+        "the memory probe finishes successfully",
+    )?;
+    result["result"]["body"]["hits"]
+        .as_u64()
+        .ok_or_else(|| format!("the probe reports a hit count: {result}"))
+}
+
+fn credential_memory(binary: &Path) -> Check {
+    let worker = Worker::start(binary, &Config::default())?;
+    // Positive control: the probe scans the whole linear memory (params included) for the
+    // text every synthetic credential string contains, so it must see params that carry it.
+    let control = request(
+        "mem-control",
+        MEMORY_PROBE,
+        &[],
+        json!({ "__ow_path": "/m", "note": "control-marker" }),
+    );
+    ensure(
+        probe_hits(&worker.execute(&control)?)? >= 1,
+        "the probe can see credential-like bytes in guest memory",
+    )?;
+    // The real run: the credential is verified by the worker and handed to the host layer;
+    // no copy of it, or of any string it holds, is ever written into the guest.
+    let clean = request(
+        "mem-clean",
+        MEMORY_PROBE,
+        &[],
+        json!({ "__ow_path": "/m", "note": "plain" }),
+    );
+    ensure(
+        probe_hits(&worker.execute(&clean)?)? == 0,
+        "no credential string is present anywhere in guest memory",
+    )?;
+    // Not even after the same component ran before, with the same credential strings.
+    let again = request(
+        "mem-again",
+        MEMORY_PROBE,
+        &[],
+        json!({ "__ow_path": "/m", "note": "plain" }),
+    );
+    ensure(
+        probe_hits(&worker.execute(&again)?)? == 0,
+        "a second instance holds no credential string either",
+    )?;
+    // Memory export boundary: a component that exports anything besides the handler, such as
+    // a module carrying a memory, is refused and never instantiated.
+    let started = worker.count("execution_started");
+    let exported = worker.execute(&request(
+        "mem-export",
+        MEMORY_EXPORT,
+        &[],
+        json!({ "__ow_path": "/m" }),
+    ))?;
+    ensure(
+        exported.status == 422 && exported.json()?["error"] == "missing_handler_export",
+        "an extra memory-bearing export is refused with 422 missing_handler_export",
+    )?;
+    ensure(
+        worker.count("execution_started") == started,
+        "no guest code ran for the refused export",
+    )?;
+    worker.recovered("credential-memory")
+}
+
+fn credential_files(binary: &Path) -> Check {
+    let worker = Worker::start(binary, &Config::default())?;
+    // No WASI interface reaches the guest, so it has no environment and no preopened
+    // directory or file to read a credential from. A component that imports one is refused
+    // before it is compiled, whether or not the revision declares the import.
+    let params = json!({ "__ow_path": "/f" });
+    for (component, import) in [
+        (WASI, "wasi:cli/environment@0.2.0"),
+        (WASI_PREOPENS, "wasi:filesystem/preopens@0.2.0"),
+        (WASI_FILESYSTEM, "wasi:filesystem/types@0.2.0"),
+    ] {
+        for (name, declared) in [("undeclared", Vec::new()), ("declared", vec![import])] {
+            let message = request(
+                &format!("files-{name}-{}", &import[5..9]),
+                component,
+                &declared,
+                params.clone(),
+            );
+            undeclared(&worker.execute(&message)?, import)?;
+        }
+    }
+    ensure(
+        worker.count("execution_started") == 0,
+        "no guest code ran for an environment or filesystem import",
+    )?;
+    worker.recovered("credential-files")
+}
+
+// ---------------------------------------------------------------------------------------------
 // AC5 end to end: bounded redaction inside the execution lifecycle
 
 /// Distinct credential strings and the wall-clock bound for the whole request. The release
@@ -1355,6 +1471,8 @@ pub const CASES: &[Case] = &[
     ("envelope", execute_envelope),
     ("runtime-mode", runtime_mode),
     ("credential", credential_boundary),
+    ("credential-memory", credential_memory),
+    ("credential-files", credential_files),
     ("imports", declared_imports),
     ("redaction-load", redaction_load),
     ("saturation", saturation),

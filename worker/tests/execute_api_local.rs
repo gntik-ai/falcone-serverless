@@ -26,6 +26,8 @@ cases! {
     legacy_envelope_carries_the_runtime_identity => "envelope",
     runtime_mode_is_refused_first_and_refusals_pass_through => "runtime-mode",
     credential_is_absent_from_the_guest_and_redacted_from_logs => "credential",
+    credential_is_absent_from_guest_memory_and_exports => "credential-memory",
+    credential_is_absent_from_environment_and_files => "credential-files",
     imports_must_be_declared_and_allowed => "imports",
     redaction_under_load_is_bounded_and_releases_the_slot => "redaction-load",
     saturated_execute_listener_still_cancels_and_answers_busy => "saturation",
@@ -45,5 +47,26 @@ fn every_case_has_a_local_test() {
     let source = include_str!("execute_api_local.rs");
     for (name, _) in execution_api::CASES {
         assert!(source.contains(&format!("=> \"{name}\"")), "{name}");
+    }
+}
+
+/// The qualification fixtures are the committed binaries of their `.wat` sources.
+#[test]
+fn memory_and_filesystem_fixtures_match_their_sources() {
+    let dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/qualification/execute_fixtures");
+    for name in [
+        "api-memory-probe",
+        "api-memory-export",
+        "wasi-preopens",
+        "wasi-filesystem",
+    ] {
+        let source = std::fs::read_to_string(dir.join(format!("{name}.wat"))).unwrap();
+        let built = wat::parse_str(&source).unwrap();
+        assert_eq!(
+            built,
+            std::fs::read(dir.join(format!("{name}.wasm"))).unwrap(),
+            "{name}"
+        );
     }
 }
