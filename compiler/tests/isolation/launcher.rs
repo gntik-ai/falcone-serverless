@@ -148,6 +148,24 @@ fn transport_binds_only_abstract_name_closes_second_connection_and_exits_on_drop
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
 }
 
+/// A concurrent test's fork can hold a copy of the closed owner descriptor until its exec, so the
+/// owner's EOF may reach the server on a later tick; bound the wait by time and by tick count.
+fn wait_until_exited(server: &mut ControlServer<MockKernel, AbstractControl>) {
+    use std::time::{Duration, Instant};
+    let deadline = Instant::now() + Duration::from_secs(5);
+    for _ in 0..5000 {
+        if !server.tick().unwrap() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server still running 5s after the owner closed"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    panic!("server still running after 5000 ticks since the owner closed");
+}
+
 #[test]
 fn abstract_transport_closes_second_connection_without_disturbing_owner() {
     use std::io::{Read, Write};
@@ -188,7 +206,7 @@ fn abstract_transport_closes_second_connection_without_disturbing_owner() {
     owner.read_exact(&mut started).unwrap();
     assert_eq!(&started, b"started\n");
     drop(owner);
-    assert!(!server.tick().unwrap());
+    wait_until_exited(&mut server);
     let (launcher, _) = server.into_parts();
     assert!(launcher.exited());
     assert_eq!(launcher.kernel().spawned.len(), 1);
