@@ -70,5 +70,9 @@ from OpenBao through the existing External Secrets.
 
 Every case prints one JSON line `{"check":"execution_api","case":"<name>","status":"passed",
 "elapsed_ms":<n>}` and, when all selected cases passed, `{"check":"execution_api","status":"passed"}`.
-The operator retains the pod log of each run as evidence, referenced by artifact ID and SHA-256 on
-the RUN-01 issue; nothing here claims a cluster run happened until that evidence exists.
+Before the namespace is cleaned up, on success and on failure, the harness writes the structured
+records of each pod (only JSON lines with a `check` field; free-form log lines are dropped) to
+`<pod>.jsonl` with `<pod>.jsonl.sha256` beside it, in `FS_TEST_EVIDENCE_DIR` (default: the cargo test
+scratch directory), and prints `EVIDENCE: records <path> sha256 <digest>`. The operator references
+those files by artifact ID and SHA-256 on the RUN-01 issue; nothing here claims a cluster run
+happened until that evidence exists.

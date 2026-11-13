@@ -366,14 +366,25 @@ impl Cluster for RealCluster {
                 .status
                 .and_then(|status| status.phase)
                 .unwrap_or_default();
-            if phase == "Failed" {
-                return Err("WAS-02 qualification pod failed".into());
-            }
-            if phase == "Succeeded" {
+            if phase == "Failed" || phase == "Succeeded" {
+                // Retain the sanitized records before the caller cleans the namespace up, on
+                // success and on failure alike. A failed pod's logs are best effort.
                 let logs = self
                     .runtime
                     .block_on(pods.logs(name, &LogParams::default()))
-                    .map_err(api_error)?;
+                    .map_err(api_error);
+                let retained = match &logs {
+                    Ok(logs) => retain_records(name, logs),
+                    Err(error) => Err(error.clone()),
+                };
+                if phase == "Failed" {
+                    return Err(match retained {
+                        Ok(digest) => format!("WAS-02 qualification pod failed; {digest}"),
+                        Err(_) => "WAS-02 qualification pod failed".into(),
+                    });
+                }
+                let logs = logs?;
+                retained?;
                 return if logs.lines().any(|line| {
                     serde_json::from_str::<serde_json::Value>(line).is_ok_and(|record| {
                         record == serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})
@@ -390,6 +401,92 @@ impl Cluster for RealCluster {
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
     }
+}
+
+/// Keeps only the structured qualification records of a pod log: JSON objects with a string
+/// `check` field. Free-form lines (which could carry anything a process printed) are dropped.
+fn sanitized_records(logs: &str) -> String {
+    let mut kept = String::new();
+    for line in logs.lines() {
+        let record = serde_json::from_str::<serde_json::Value>(line).ok();
+        if record
+            .as_ref()
+            .is_some_and(|record| record["check"].is_string() && record.is_object())
+        {
+            kept.push_str(line.trim());
+            kept.push('\n');
+        }
+    }
+    kept
+}
+
+fn records_digest(records: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(records.as_bytes()))
+}
+
+/// Persists the sanitized records of one pod as `<pod>.jsonl` with its `.sha256` next to it, in
+/// `FS_TEST_EVIDENCE_DIR` (default: the cargo test scratch directory), and reports the path and
+/// digest on stdout so the operator can reference the evidence by artifact and SHA256.
+fn retain_records(pod_name: &str, logs: &str) -> Result<String, String> {
+    let dir = std::env::var_os("FS_TEST_EVIDENCE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")));
+    let summary = write_records(&dir, pod_name, logs)?;
+    println!("EVIDENCE: {summary}");
+    Ok(summary)
+}
+
+fn write_records(dir: &std::path::Path, pod_name: &str, logs: &str) -> Result<String, String> {
+    let records = sanitized_records(logs);
+    let digest = records_digest(&records);
+    let failed = |_| "qualification records not retained".to_string();
+    std::fs::create_dir_all(dir).map_err(failed)?;
+    let file = dir.join(format!("{pod_name}.jsonl"));
+    std::fs::write(&file, &records).map_err(failed)?;
+    std::fs::write(
+        dir.join(format!("{pod_name}.jsonl.sha256")),
+        format!("{digest}  {pod_name}.jsonl\n"),
+    )
+    .map_err(failed)?;
+    Ok(format!("records {} sha256 {digest}", file.display()))
+}
+
+#[test]
+fn retained_records_keep_only_structured_checks_and_carry_a_digest() {
+    let logs = "starting\n{\"check\":\"execution_api\",\"case\":\"identity\",\"status\":\"passed\"}\n\
+                {\"unrelated\":1}\nsecret-looking free text\n[1,2]\n\
+                {\"check\":\"execution_api\",\"status\":\"passed\"}\n";
+    let kept = sanitized_records(logs);
+    assert_eq!(
+        kept,
+        "{\"check\":\"execution_api\",\"case\":\"identity\",\"status\":\"passed\"}\n\
+         {\"check\":\"execution_api\",\"status\":\"passed\"}\n"
+    );
+    // SHA-256 of the empty input, a known literal.
+    assert_eq!(
+        records_digest(""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    );
+    assert_eq!(sanitized_records("no records here\n"), "");
+}
+
+#[test]
+fn records_are_written_with_a_digest_file_that_matches_them() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("retain-records-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let logs = "noise\n{\"check\":\"execution_api\",\"case\":\"saturation\",\"status\":\"failed\"}\n";
+    let summary = write_records(&dir, "run01-abc", logs).unwrap();
+    let written = std::fs::read_to_string(dir.join("run01-abc.jsonl")).unwrap();
+    assert_eq!(
+        written,
+        "{\"check\":\"execution_api\",\"case\":\"saturation\",\"status\":\"failed\"}\n"
+    );
+    let sidecar = std::fs::read_to_string(dir.join("run01-abc.jsonl.sha256")).unwrap();
+    let digest = sidecar.split_whitespace().next().unwrap();
+    assert_eq!(digest.len(), 64);
+    assert!(summary.ends_with(digest));
+    assert_eq!(digest, records_digest(&written));
 }
 
 #[test]
