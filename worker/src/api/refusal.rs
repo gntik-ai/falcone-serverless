@@ -183,7 +183,7 @@ impl Code {
 
     /// Retries never change the class: a retried attempt of a code stays in its class. Only
     /// `busy` may be retried; only `execution_uncertain` leaves an external effect unknown.
-    pub(crate) fn class(self) -> Class {
+    pub fn class(self) -> Class {
         match self {
             Self::Busy => Class::Retryable,
             Self::ExecutionUncertain => Class::Uncertain,
@@ -259,7 +259,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn new(code: Code, reason: Reason) -> Self {
+    pub fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
             status: Count::from(code.status()),
@@ -271,7 +271,7 @@ impl Refusal {
     }
 
     /// A parsed envelope must carry the status, reason and retryability of its code.
-    pub(crate) fn check(&self) -> Result<(), Malformed> {
+    pub fn check(&self) -> Result<(), Malformed> {
         if self.status.is(self.code.status())
             && self.code.allows(self.detail.reason)
             && self.retryable == (self.code.class() == Class::Retryable)
@@ -282,17 +282,17 @@ impl Refusal {
         }
     }
 
-    pub(crate) fn class(&self) -> Class {
+    pub fn class(&self) -> Class {
         self.code.class()
     }
 
     /// The HTTP status of the refusal.
-    pub(crate) fn http_status(&self) -> u16 {
+    pub fn http_status(&self) -> u16 {
         self.code.status()
     }
 
     /// The bare failure envelope, the HTTP body when there is no activation to attribute.
-    pub(crate) fn to_json(&self) -> Vec<u8> {
+    pub fn to_json(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
     }
 }

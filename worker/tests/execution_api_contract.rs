@@ -4,17 +4,7 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-// The service-facing half of `api` (limits, import checks, result construction) is not used by
-// the conformance checks, and reaches the typed limits through `crate::limits`.
-#[path = "../src/limits/mod.rs"]
-#[allow(dead_code)]
-mod limits;
-
-#[path = "../src/api/mod.rs"]
-#[allow(dead_code, unused_imports)]
-mod api;
-
-use api::{
+use falcone_serverless_worker::api::{
     Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,
 };
 use jsonschema::{Draft, Registry, Validator};

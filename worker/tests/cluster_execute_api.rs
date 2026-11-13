@@ -73,6 +73,7 @@ cluster_cases! {
     saturation => "saturation",
     control_stall => "control-stall",
     http_limits => "http-limits",
+    body_deadline => "body-deadline",
     slow_reader => "slow-reader",
 }
 

@@ -254,9 +254,14 @@ deadline is not renewed by each write.
 ### Capacity
 
 - **Execute listener.** At most `concurrency` executions run, and at most 8 more connections are
-  in admission (reading, or writing a response). An execute beyond that is answered at once with
-  `503 busy` (`at_capacity`, retryable) and its body is not read. A request refused before it
-  runs (for example a non-wasm mode) takes no running slot.
+  in admission (reading, or writing a response). An execute connection beyond that is answered
+  at once with `503 busy` (`at_capacity`, retryable) and its body is not read. A connection in
+  admission while every execution slot is running is read in full, so that the order of checks
+  below holds under load: a request that is refused before it runs (for example a non-wasm mode,
+  409 `runtime_mode_not_supported`) gets its refusal and takes no running slot, and only a request
+  that would run is answered `503 busy`. The worker reports each connection as it is admitted
+  (`connection_admitted`), refused for want of capacity (`connection_rejected`) and finished
+  (`connection_finished`).
 - **Control listener.** A fixed 16 connections, with its own header, body and response deadlines.
   Execute traffic cannot consume them: it is a different socket with a different counter, so a
   cancel is accepted with every execute slot held and the execute listener full of stalled
@@ -265,11 +270,12 @@ deadline is not renewed by each write.
 
 ### Order of checks
 
-1. HTTP: head, path and method, capacity (above).
+1. HTTP: head, path and method, and the connection limit (above).
 2. Parse. The runtime mode is checked first: a mode other than `wasm`, or an image reference
    (`runtime_mode` `oci`), is refused with 409 `runtime_mode_not_supported` before anything else,
-   before a slot is taken, and creates no instance. Then malformed messages (400), the credential
-   binding, and the legacy inputs.
+   before a slot is taken, and creates no instance, whether or not every execution slot is running.
+   Then malformed messages (400), the credential binding, and the legacy inputs. Only then is an
+   execution slot taken: with none free the answer is `503 busy`.
 3. Engine: `projection.engine_version` must equal the Wasmtime this worker embeds (`49.0.5`), or
    400 `engine_version_mismatch`. The identity of a result therefore always names the engine that ran.
 4. Budgets: a `memory_bytes` above the worker's `max_memory_bytes` is 400 `invalid_request`

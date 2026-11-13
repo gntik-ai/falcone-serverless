@@ -1,6 +1,5 @@
 //! Unit tests over inline messages. The fixture-driven conformance suite is the integration
-//! test `execution_api_contract`; these run in the binary's test build, where every item of
-//! this module must be reachable.
+//! test `execution_api_contract`; these run in the library's test build.
 
 use super::*;
 use serde_json::{Value, json};

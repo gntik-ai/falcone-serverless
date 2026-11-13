@@ -169,7 +169,7 @@ impl ExecuteRequest {
         self.attempt_number
     }
 
-    pub(crate) fn attribution(&self) -> Attribution {
+    pub fn attribution(&self) -> Attribution {
         Attribution {
             activation_id: self.activation_id.clone(),
             attempt_id: self.attempt_id.clone(),

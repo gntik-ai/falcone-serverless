@@ -12,6 +12,14 @@ pub mod artifact;
 #[path = "../cache/mod.rs"]
 pub mod cache;
 
+// The execution API's messages and parsers (RUN-01) and the credential redactor. They are part
+// of the library so that the service and the conformance tests share one compiled copy.
+#[path = "../api/mod.rs"]
+pub mod api;
+
+#[path = "../server/redact.rs"]
+pub mod redact;
+
 use serde_json::Value;
 
 const RULE_IDS: [&str; 12] = [

@@ -3,7 +3,9 @@
 //! - The **execute listener** serves `POST /v1/execute` and answers every other path with 404.
 //!   At most `concurrency` executions run; at most [`ADMISSION_ALLOWANCE`] more connections are
 //!   in admission (reading headers or body, or writing a response). Anything beyond that is
-//!   answered at once with `503 busy`, without its body being read.
+//!   answered at once with `503 busy`, without its body being read. A request in admission while
+//!   every execution slot runs is read in full: a contract refusal keeps its precedence, and
+//!   only a request that would run is answered `503 busy`.
 //! - The **control listener** serves `POST /v1/cancel` and `POST /v1/update` and answers every
 //!   other path, including execute, with 404. It has its own fixed connection limit
 //!   ([`CONTROL_CONNECTIONS`]) and its own deadlines, and no execute traffic can consume it by
@@ -15,12 +17,12 @@
 
 mod http;
 mod log;
-mod redact;
 mod run;
 
 use crate::api::{self, Code, Reason, Refusal, WorkerCeilings};
 use falcone_serverless_worker::cache::Cache;
 use falcone_serverless_worker::host::Bindings;
+use falcone_serverless_worker::redact;
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -197,6 +199,7 @@ pub fn start(config: ServerConfig, bindings: Arc<dyn Bindings>) -> std::io::Resu
         .name("execute-listener".into())
         .spawn(move || {
             accept(
+                "execute",
                 &execute,
                 concurrency + ADMISSION_ALLOWANCE,
                 move |stream, permit| execute_connection(&for_execute, stream, permit),
@@ -205,9 +208,12 @@ pub fn start(config: ServerConfig, bindings: Arc<dyn Bindings>) -> std::io::Resu
     std::thread::Builder::new()
         .name("control-listener".into())
         .spawn(move || {
-            accept(&control, CONTROL_CONNECTIONS, move |stream, permit| {
-                control_connection(&for_control, stream, permit)
-            });
+            accept(
+                "control",
+                &control,
+                CONTROL_CONNECTIONS,
+                move |stream, permit| control_connection(&for_control, stream, permit),
+            );
         })?;
     log::event(
         "listening",
@@ -228,7 +234,12 @@ pub fn run(config: ServerConfig, bindings: Arc<dyn Bindings>) -> std::io::Result
     }
 }
 
+/// Accepts connections until the process ends. Each one is reported as it is admitted
+/// (`connection_admitted`), refused for want of capacity (`connection_rejected`) and, once its
+/// handler has returned and released its slot, finished (`connection_finished`): the events let
+/// a test (or an operator) know exactly how many connections the listener holds.
 fn accept(
+    name: &'static str,
     listener: &TcpListener,
     limit: usize,
     handler: impl Fn(TcpStream, Permit) + Clone + Send + 'static,
@@ -241,15 +252,26 @@ fn accept(
             continue;
         };
         let Some(permit) = acquire(&connections, limit) else {
+            log::event(
+                "connection_rejected",
+                &[
+                    ("listener", json!(name)),
+                    ("reason", json!("listener_full")),
+                ],
+            );
             reject_busy(stream);
             continue;
         };
+        log::event("connection_admitted", &[("listener", json!(name))]);
         let handler = handler.clone();
         // A guest runs on this thread: give it room beyond the platform default.
         let spawned = std::thread::Builder::new()
             .name("connection".into())
             .stack_size(8 * 1024 * 1024)
-            .spawn(move || handler(stream, permit));
+            .spawn(move || {
+                handler(stream, permit);
+                log::event("connection_finished", &[("listener", json!(name))]);
+            });
         if spawned.is_err() {
             log::event("connection_spawn_failed", &[]);
         }
@@ -360,11 +382,11 @@ fn execute_connection(shared: &Arc<Shared>, mut stream: TcpStream, _connection: 
         let answer = bare(Code::MethodNotAllowed, Reason::MethodNotAllowed);
         return respond("execute", &mut stream, &deadlines, answer);
     }
-    // At capacity: refuse before the body is read.
-    if shared.running.load(Ordering::Acquire) >= shared.config.concurrency.max(1) {
-        let answer = bare(Code::Busy, Reason::AtCapacity);
-        return respond("execute", &mut stream, &deadlines, answer);
-    }
+    // A connection that holds an admission slot reads its request even when every execution
+    // slot is running: the contract refusals (`runtime_mode_not_supported` first) keep their
+    // precedence, and only a request that would run is answered `busy` (in `run::handle`, when
+    // it asks for an execution slot). A connection beyond the admission allowance never gets
+    // here: `accept` answers it `busy` without reading anything.
     let body = match http::read_body(&mut stream, &mut head, &deadlines) {
         Ok(body) => body,
         Err(why) => return failed("execute", &mut stream, &deadlines, why),

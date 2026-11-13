@@ -2,20 +2,14 @@
 //!
 //! Explicit local handler execution and the execution API service (`serve`); no platform routing.
 
-// The service uses the execute, cancel and update halves of the API. The parsers only the
-// dispatcher calls (`parse_projection`, `parse_result`) stay unused until it adopts the API; the
-// dispatcher issue that first calls them removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
+// The execution API's parsers live in the library, shared with the conformance tests; the service
+// reaches them through this path.
+use falcone_serverless_worker::api;
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
 mod config;
-
-// The service runs on the lib's engine, cache, host and limits; `api` reaches the typed limits
-// through this path.
-use falcone_serverless_worker::limits;
 
 mod server;
 

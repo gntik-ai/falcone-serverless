@@ -124,12 +124,12 @@ string_type!(
     id
 );
 impl Id {
-    pub(crate) fn same_as(&self, other: &NonEmpty) -> bool {
+    pub fn same_as(&self, other: &NonEmpty) -> bool {
         self.0 == other.0
     }
 
     /// The identifier, a bounded string over a safe alphabet; never a secret.
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -141,11 +141,11 @@ string_type!(
 );
 impl Text {
     /// Library-authored text, never request data.
-    pub(crate) fn fixed(value: &str) -> Self {
+    pub fn fixed(value: &str) -> Self {
         Self(value.to_owned())
     }
 
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -156,7 +156,7 @@ string_type!(
     |value| !value.is_empty()
 );
 impl NonEmpty {
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         &self.0
     }
 }
@@ -167,7 +167,7 @@ string_type!(
 );
 impl Digest {
     /// The 64 lowercase hex digits without the `sha256:` prefix.
-    pub(crate) fn hex(&self) -> &str {
+    pub fn hex(&self) -> &str {
         &self.0["sha256:".len()..]
     }
 }
@@ -189,7 +189,7 @@ string_type!(
 impl Deadline {
     /// Milliseconds since the Unix epoch, truncating below a millisecond. The text was
     /// validated as a real calendar timestamp when it was parsed.
-    pub(crate) fn unix_millis(&self) -> u64 {
+    pub fn unix_millis(&self) -> u64 {
         let number = |range: std::ops::Range<usize>| self.0[range].parse::<i64>().unwrap_or(0);
         let (year, month, day) = (number(0..4), number(5..7), number(8..10));
         // Days from civil (Howard Hinnant): proleptic Gregorian, valid for every year >= 1.
@@ -240,7 +240,7 @@ fn whole<'de, D: Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
 pub struct Positive(u64);
 
 impl Positive {
-    pub(crate) fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0
     }
 }
@@ -275,16 +275,16 @@ impl From<u16> for Count {
 
 impl Count {
     /// Whether this count is more than `total`.
-    pub(crate) fn exceeds(self, total: Positive) -> bool {
+    pub fn exceeds(self, total: Positive) -> bool {
         self.0 > total.0
     }
 
     /// Whether this count is an HTTP status in `low..=high`.
-    pub(crate) fn within(self, low: u64, high: u64) -> bool {
+    pub fn within(self, low: u64, high: u64) -> bool {
         (low..=high).contains(&self.0)
     }
 
-    pub(crate) fn is(self, value: u16) -> bool {
+    pub fn is(self, value: u16) -> bool {
         self.0 == u64::from(value)
     }
 }
@@ -325,7 +325,7 @@ redacted!(Logs);
 
 impl Logs {
     /// Worker-captured lines, clipped to the contract: at most 1000 lines of 8192 characters.
-    pub(crate) fn clipped(lines: Vec<String>) -> Self {
+    pub fn clipped(lines: Vec<String>) -> Self {
         Self(
             lines
                 .into_iter()

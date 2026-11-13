@@ -25,17 +25,17 @@ pub struct Scopes {
 
 impl ExecuteRequest {
     /// The activation and attempt, the key of the running execution.
-    pub(crate) fn key(&self) -> (&str, &str) {
+    pub fn key(&self) -> (&str, &str) {
         (self.activation_id().as_str(), self.attempt_id().as_str())
     }
 
     /// The raw artifact digest as 64 hex digits: the name of the artifact in the store.
-    pub(crate) fn artifact_hex(&self) -> &str {
+    pub fn artifact_hex(&self) -> &str {
         self.projection.artifact_digest.hex()
     }
 
     /// The `sha256:` digest of the raw artifact.
-    pub(crate) fn artifact_digest(&self) -> [u8; 32] {
+    pub fn artifact_digest(&self) -> [u8; 32] {
         let mut digest = [0; 32];
         let hex = self.artifact_hex().as_bytes();
         for (byte, pair) in digest.iter_mut().zip(hex.chunks(2)) {
@@ -50,7 +50,7 @@ impl ExecuteRequest {
 
     /// The activation runtime identity reports the Wasmtime this worker embeds. A revision
     /// pinned to another engine is refused, never reported as if it had run on this one.
-    pub(crate) fn check_engine(&self, pinned: &str) -> Result<(), Refusal> {
+    pub fn check_engine(&self, pinned: &str) -> Result<(), Refusal> {
         if self.projection.engine_version.as_str() == pinned {
             Ok(())
         } else {
@@ -73,7 +73,7 @@ impl ExecuteRequest {
     ///   `budgets.max_host_calls`.
     ///
     /// Every other field keeps its compatibility value.
-    pub(crate) fn execution_limits(
+    pub fn execution_limits(
         &self,
         worker: WorkerCeilings,
         now_unix_ms: u64,
@@ -109,7 +109,7 @@ impl ExecuteRequest {
 
     /// Every import of the component must be one the projection declares. Whether the import
     /// is also one the worker allows is checked by artifact validation.
-    pub(crate) fn check_imports(&self, component: &[String]) -> Result<(), Refusal> {
+    pub fn check_imports(&self, component: &[String]) -> Result<(), Refusal> {
         let declared = |import: &String| {
             self.projection
                 .imports
@@ -127,40 +127,40 @@ impl ExecuteRequest {
     }
 
     /// The action parameters, as the bytes the guest handler receives.
-    pub(crate) fn params_json(&self) -> Vec<u8> {
+    pub fn params_json(&self) -> Vec<u8> {
         serde_json::to_vec(&self.params).unwrap_or_default()
     }
 
     /// Every string of the execution credential, for redaction.
-    pub(crate) fn credential_strings(&self) -> Vec<&str> {
+    pub fn credential_strings(&self) -> Vec<&str> {
         self.credential.strings()
     }
 
-    pub(crate) fn tenant(&self) -> &str {
+    pub fn tenant(&self) -> &str {
         self.credential.tenant.as_str()
     }
 
-    pub(crate) fn workspace(&self) -> &str {
+    pub fn workspace(&self) -> &str {
         self.credential.workspace.as_str()
     }
 
-    pub(crate) fn invocation_key(&self) -> &str {
+    pub fn invocation_key(&self) -> &str {
         self.invocation.invocation_key.as_str()
     }
 
-    pub(crate) fn idempotency_key(&self) -> &str {
+    pub fn idempotency_key(&self) -> &str {
         self.invocation
             .idempotency_key
             .as_ref()
             .map_or("", |key| key.as_str())
     }
 
-    pub(crate) fn attempt(&self) -> &str {
+    pub fn attempt(&self) -> &str {
         self.attempt_id().as_str()
     }
 
     /// The scopes of the projection's grants.
-    pub(crate) fn scopes(&self) -> Scopes {
+    pub fn scopes(&self) -> Scopes {
         let mut scopes = Scopes::default();
         for grant in &self.projection.grants {
             let (family, names) = grant.scope();

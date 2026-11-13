@@ -5,18 +5,20 @@
 
 #![cfg(target_os = "linux")]
 
-// `CASES` and `run` serve the in-pod runner; the cases are called directly here.
 #[path = "../src/qualification/execution_api.rs"]
-#[allow(dead_code)]
 mod cases;
 
 macro_rules! local_cases {
-    ($($name:ident),* $(,)?) => {$(
-        #[test]
-        fn $name() {
-            cases::$name();
-        }
-    )*};
+    ($($name:ident),* $(,)?) => {
+        /// The names of the cases run here.
+        const LOCAL: &[&str] = &[$(stringify!($name)),*];
+        $(
+            #[test]
+            fn $name() {
+                cases::$name();
+            }
+        )*
+    };
 }
 
 local_cases! {
@@ -30,17 +32,33 @@ local_cases! {
     saturation,
     control_stall,
     http_limits,
+    body_deadline,
     slow_reader,
+}
+
+/// The in-pod runner serves exactly the cases run here: a case added to one and not the other
+/// is caught.
+#[test]
+fn the_pod_runner_and_the_local_run_have_the_same_cases() {
+    let served: Vec<String> = cases::CASES
+        .iter()
+        .map(|(name, _)| name.replace('-', "_"))
+        .collect();
+    assert_eq!(served, LOCAL);
+}
+
+#[test]
+fn the_pod_runner_refuses_an_unknown_case() {
+    assert_eq!(
+        format!("{:?}", cases::run("no-such-case")),
+        format!("{:?}", std::process::ExitCode::FAILURE)
+    );
 }
 
 // The redactor is a pure module: its adversarial set runs here, where the release-mode bound is
 // asserted (`cargo test --release`); debug builds get a generous bound instead.
-#[path = "../src/server/redact.rs"]
-#[allow(dead_code)]
-mod redact;
-
 mod redaction {
-    use super::redact::{MARKER, MAX_LINE_CHARS, MAX_LINES, Redactor};
+    use falcone_serverless_worker::redact::{MARKER, MAX_LINE_CHARS, MAX_LINES, Redactor};
     use std::time::{Duration, Instant};
 
     #[test]

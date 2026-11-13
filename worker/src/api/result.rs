@@ -46,7 +46,7 @@ impl HandlerResult {
     /// Reads what the guest returned. A JSON object carrying `statusCode` is the handler result
     /// itself and must satisfy its rules; any other JSON value is the action's result, wrapped
     /// as the body of a 200. Anything that is not JSON is not a result.
-    pub(crate) fn from_output(output: &[u8]) -> Option<Self> {
+    pub fn from_output(output: &[u8]) -> Option<Self> {
         let value: Value = serde_json::from_slice(output).ok()?;
         if value.get("statusCode").is_some() {
             let handler: Self = serde_json::from_value(value).ok()?;
@@ -152,12 +152,12 @@ impl ExecutionResult {
     }
 
     /// A success carrying the legacy handler result and the (already redacted) logs.
-    pub(crate) fn success(at: &Attribution, handler: HandlerResult, logs: Vec<String>) -> Self {
+    pub fn success(at: &Attribution, handler: HandlerResult, logs: Vec<String>) -> Self {
         Self::new(at, Status::Success, Outcome::Handler(handler), None, logs)
     }
 
     /// A failure with its refusal envelope and the (already redacted) logs.
-    pub(crate) fn failure(at: &Attribution, refusal: Refusal, logs: Vec<String>) -> Self {
+    pub fn failure(at: &Attribution, refusal: Refusal, logs: Vec<String>) -> Self {
         let class = refusal.class();
         Self::new(
             at,
@@ -169,14 +169,14 @@ impl ExecutionResult {
     }
 
     /// The HTTP status of the response: 200 for a result, the refusal's status for a failure.
-    pub(crate) fn http_status(&self) -> u16 {
+    pub fn http_status(&self) -> u16 {
         match &self.result {
             Outcome::Failure(refusal) => refusal.http_status(),
             Outcome::Handler(_) => 200,
         }
     }
 
-    pub(crate) fn to_json(&self) -> Vec<u8> {
+    pub fn to_json(&self) -> Vec<u8> {
         serde_json::to_vec(self).unwrap_or_default()
     }
 }

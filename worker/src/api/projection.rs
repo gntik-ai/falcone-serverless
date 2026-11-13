@@ -79,7 +79,7 @@ redacted!(Projection);
 
 impl Projection {
     /// The rules a schema cannot attach to one field.
-    pub(crate) fn check(&self) -> Result<(), Malformed> {
+    pub fn check(&self) -> Result<(), Malformed> {
         if all_valid(&self.grants, GrantVersion::V020) {
             Ok(())
         } else {
@@ -87,7 +87,7 @@ impl Projection {
         }
     }
 
-    pub(crate) fn base_digest(&self) -> Option<&Digest> {
+    pub fn base_digest(&self) -> Option<&Digest> {
         self.base.as_ref().map(Base::digest)
     }
 }

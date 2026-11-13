@@ -7,7 +7,7 @@ use super::wire::{present, redacted, unit_debug};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GrantVersion {
+pub enum GrantVersion {
     V010,
     V020,
 }
@@ -167,6 +167,6 @@ impl Grant {
 }
 
 /// Whether every grant names the interface of `version` and the scope of its family.
-pub(crate) fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
+pub fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
     grants.iter().all(|grant| grant.valid(version))
 }

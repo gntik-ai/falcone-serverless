@@ -44,9 +44,12 @@ const PINNED_WASMTIME: &str = "49.0.5";
 // The documented bounds (execution-api-v1.md), as literals.
 const HEADER_DEADLINE: Duration = Duration::from_secs(5);
 const BODY_INACTIVITY: Duration = Duration::from_secs(5);
+const BODY_ABSOLUTE: Duration = Duration::from_secs(30);
 const RESPONSE_DEADLINE: Duration = Duration::from_secs(5);
 const ADMISSION_ALLOWANCE: usize = 8;
 const CONTROL_CONNECTIONS: usize = 16;
+/// `cancel_reserve_ms` (execution-api-v1.md, "Cancel"): the most a cancel waits for the end.
+const CANCEL_DEADLINE: Duration = Duration::from_secs(5);
 /// Slack for scheduling on a loaded machine; a bound, never a synchronization.
 const TOLERANCE: Duration = Duration::from_secs(3);
 /// A hang becomes a failure after this long.
@@ -84,6 +87,31 @@ impl Events {
                 .expect("fail-safe: the expected worker event never came");
             log = self.changed.wait_timeout(log, left).unwrap().0;
         }
+    }
+
+    /// Waits until the whole log so far satisfies `state`.
+    fn until(&self, state: impl Fn(&[(Instant, Value)]) -> bool) {
+        let deadline = Instant::now() + FAILSAFE;
+        let mut log = self.log.lock().unwrap();
+        while !state(&log) {
+            let left = deadline
+                .checked_duration_since(Instant::now())
+                .expect("fail-safe: the worker never reached the expected state");
+            log = self.changed.wait_timeout(log, left).unwrap().0;
+        }
+    }
+
+    /// Waits until the listener holds exactly `held` connections, by its own events:
+    /// admitted and not yet finished.
+    fn until_held(&self, listener: &'static str, held: usize) {
+        self.until(|log| {
+            let of = |name: &str| {
+                log.iter()
+                    .filter(|(_, e)| e["event"] == name && e["listener"] == listener)
+                    .count()
+            };
+            of("connection_admitted") - of("connection_finished") == held
+        });
     }
 
     fn count(&self, pred: impl Fn(&Value) -> bool) -> usize {
@@ -894,8 +922,8 @@ pub fn timeouts() {
 }
 
 /// With `concurrency` guests blocked and the execute listener full of stalled connections, a
-/// cancel on the control listener takes effect; an extra execute gets 503 busy; each listener
-/// refuses the other's operations.
+/// cancel on the control listener takes effect within its deadline; an extra execute gets 503
+/// busy; each listener refuses the other's operations.
 pub fn saturation() {
     let worker = Worker::start(Settings {
         concurrency: 2,
@@ -903,7 +931,7 @@ pub fn saturation() {
     });
     let spin = worker.publish(SPIN);
     let echo = worker.publish(ECHO);
-    // Compile once so that the stalled connections below are opened close to the checks.
+    // Compile once, so that nothing below waits on the compiler.
     let warm = Req::new(&spin, "act-saturation-warm").budget("fuel", 5_000);
     expect_failure(
         &worker.execute(&warm.json()),
@@ -911,53 +939,34 @@ pub fn saturation() {
         "execution_failed",
         "fuel_exhausted",
     );
-
-    // Connections stalled in the body: headers arrived, the body did not. They are kept alive
-    // by a trickle so they last as long as the case needs (the absolute body deadline is 30 s).
-    let stop = Arc::new(AtomicBool::new(false));
-    let mut trickle = Vec::new();
-    for _ in 0..4 {
-        let mut stream = TcpStream::connect(worker.execute).unwrap();
-        stream
-            .write_all(b"POST /v1/execute HTTP/1.1\r\nHost: w\r\nContent-Length: 1000000\r\n\r\n{")
-            .unwrap();
-        let stop = stop.clone();
-        trickle.push(std::thread::spawn(move || {
-            while !stop.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(500));
-                if stream.write_all(b" ").is_err() {
-                    break;
-                }
-            }
-        }));
-    }
     let first = worker.start_blocking(&spin, "act-saturation-1");
     let second = worker.start_blocking(&spin, "act-saturation-2");
-    // The rest of the execute listener: stalled headers. Two running guests, four stalled
-    // bodies and these four fill the 2 + 8 connections.
-    let mut held = Vec::new();
-    for _ in 0..ADMISSION_ALLOWANCE - 4 {
-        let mut stream = TcpStream::connect(worker.execute).unwrap();
-        stream
-            .write_all(b"POST /v1/execute HTTP/1.1\r\nHost: w\r\n")
-            .unwrap();
-        held.push(stream);
-    }
-    // Every connection is held on the server (the guests report themselves; the stalled ones
-    // are connected and accepted in order, so a request now meets a full listener).
-    let reply = worker.execute(&Req::new(&echo, "act-saturation-extra").json());
-    let body = expect_failure(&reply, 503, "busy", "at_capacity");
-    assert_eq!(body["retryable"], true);
 
-    // The cancel takes effect, on the control listener, while the execute listener is full.
-    let cancelled = worker.cancel("act-saturation-1");
-    assert_eq!(cancelled.status, 200);
-    assert_eq!(cancelled.json()["cancel"]["state"], "acknowledged");
-    let result = first.join().unwrap();
-    expect_failure(&result, 500, "execution_failed", "cancelled");
-    let cancelled = worker.cancel("act-saturation-2");
-    assert_eq!(cancelled.json()["cancel"]["state"], "acknowledged");
-    second.join().unwrap();
+    // Every execution slot is running and admission has room: the contract refusal still comes
+    // first for a request whose headers and body arrived, and only a request that would run is
+    // answered busy.
+    let mut oci = Req::new(&echo, "act-saturation-oci");
+    oci.mode = "oci".into();
+    oci.extra_projection = json!({"base": {"kind": "byo", "image_digest": echo,
+        "signer_identity": "signer", "attestation_ref": "attestation"}});
+    expect_failure(
+        &worker.execute(&oci.json()),
+        409,
+        "runtime_mode_not_supported",
+        "runtime_mode_not_wasm",
+    );
+    let body = expect_failure(
+        &worker.execute(&Req::new(&echo, "act-saturation-would-run").json()),
+        503,
+        "busy",
+        "at_capacity",
+    );
+    assert_eq!(body["retryable"], true);
+    assert_eq!(
+        worker.events.count(|e| e["event"] == "connection_rejected"),
+        0,
+        "the listener was not full: the request was answered busy by the running count"
+    );
 
     // Each listener refuses the other's operations.
     let reply = post(worker.execute, "/v1/cancel", b"{}");
@@ -975,6 +984,84 @@ pub fn saturation() {
         404,
         "not_found",
         "unknown_execution",
+    );
+
+    // The requests above have all released their connections: the listener holds the two
+    // running executions and nothing else. Only then fill the rest of it.
+    worker.events.until_held("execute", 2);
+    let mark = worker.events.len();
+    // Connections stalled in the body: headers arrived, the body did not. A trickle keeps them
+    // alive past the inactivity bound (the absolute body deadline is 30 s).
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut trickle = Vec::new();
+    for _ in 0..ADMISSION_ALLOWANCE / 2 {
+        let mut stream = TcpStream::connect(worker.execute).unwrap();
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nHost: w\r\nContent-Length: 1000000\r\n\r\n{")
+            .unwrap();
+        let stop = stop.clone();
+        trickle.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(500));
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+    // And connections stalled in the headers.
+    let mut held = Vec::new();
+    for _ in 0..ADMISSION_ALLOWANCE / 2 {
+        let mut stream = TcpStream::connect(worker.execute).unwrap();
+        stream
+            .write_all(b"POST /v1/execute HTTP/1.1\r\nHost: w\r\n")
+            .unwrap();
+        held.push(stream);
+    }
+    // The server holds all of them: two running executions and the whole admission allowance.
+    worker.events.until_held("execute", 2 + ADMISSION_ALLOWANCE);
+
+    // The listener is full: an extra execute meets it and is answered busy at once.
+    let reply = worker.execute(&Req::new(&echo, "act-saturation-extra").json());
+    let body = expect_failure(&reply, 503, "busy", "at_capacity");
+    assert_eq!(body["retryable"], true);
+    assert_eq!(
+        worker.events.count(|e| e["event"] == "connection_rejected"
+            && e["listener"] == "execute"
+            && e["reason"] == "listener_full"),
+        1,
+        "the extra execute did not meet a full listener"
+    );
+
+    // The cancel takes effect, on the control listener, within its deadline, while the execute
+    // listener is full.
+    for (id, running) in [("act-saturation-1", first), ("act-saturation-2", second)] {
+        let asked = Instant::now();
+        let cancelled = worker.cancel(id);
+        assert!(
+            asked.elapsed() <= CANCEL_DEADLINE + TOLERANCE,
+            "{id}: the cancel outlasted its deadline ({:?})",
+            asked.elapsed()
+        );
+        assert_eq!(cancelled.status, 200);
+        assert_eq!(cancelled.json()["cancel"]["state"], "acknowledged");
+        expect_failure(
+            &running.join().unwrap(),
+            500,
+            "execution_failed",
+            "cancelled",
+        );
+    }
+    // The stalled connections stayed stalled throughout: the server closed none of them.
+    assert_eq!(
+        worker
+            .events
+            .lock_slice(mark)
+            .iter()
+            .filter(|e| { e["event"] == "connection_closed" && e["listener"] == "execute" })
+            .count(),
+        0,
+        "a stalled connection ended before the cancel was answered"
     );
 
     stop.store(true, Ordering::Release);
@@ -1032,6 +1119,8 @@ pub fn control_stall() {
             .unwrap();
         held.push(stream);
     }
+    // The server holds every one of them: the listener is full.
+    worker.events.until_held("control", CONTROL_CONNECTIONS);
     // The control listener is full: an extra control request is answered busy at once.
     let body = expect_failure(
         &worker.cancel("act-stall-running"),
@@ -1165,6 +1254,64 @@ pub fn http_limits() {
     worker.recovers(&spin, &echo, "limits-slow");
 }
 
+/// A body that never goes quiet (a byte every second, well inside the inactivity bound) is
+/// still cut off at the absolute body deadline; afterwards a normal execute and a cancel work.
+pub fn body_deadline() {
+    let worker = Worker::start(Settings {
+        concurrency: 2,
+        ..Settings::default()
+    });
+    let echo = worker.publish(ECHO);
+    let spin = worker.publish(SPIN);
+    let from = worker.events.len();
+    let mut stream = TcpStream::connect(worker.execute).unwrap();
+    let opened = Instant::now();
+    stream
+        .write_all(b"POST /v1/execute HTTP/1.1\r\nHost: w\r\nContent-Length: 100000\r\n\r\n{")
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let trickler = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut sent = 0usize;
+            while !stop.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_secs(1));
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            (stream, sent)
+        })
+    };
+    // The server ends it by the absolute deadline, not by inactivity: the reason is the
+    // event's, and nothing arrived late enough to be quiet for the inactivity bound.
+    let (_, closed, event) = worker.events.wait(from, |e| {
+        e["event"] == "connection_closed" && e["listener"] == "execute"
+    });
+    stop.store(true, Ordering::Release);
+    let (mut stream, sent) = trickler.join().unwrap();
+    assert_eq!(event["reason"], "body_deadline", "{event}");
+    let lasted = closed.duration_since(opened);
+    assert!(
+        lasted >= BODY_ABSOLUTE - Duration::from_secs(1),
+        "the body deadline fired early ({lasted:?})"
+    );
+    assert!(
+        lasted <= BODY_ABSOLUTE + TOLERANCE,
+        "the body deadline did not hold ({lasted:?})"
+    );
+    // It was fed all along: the bytes were not what ended it.
+    assert!(sent >= 20, "the trickle stopped early ({sent} bytes)");
+    stream.set_read_timeout(Some(TOLERANCE)).unwrap();
+    let mut sink = [0u8; 16];
+    assert!(
+        !matches!(stream.read(&mut sink), Ok(n) if n > 0),
+        "a closed connection answered"
+    );
+    worker.recovers(&spin, &echo, "body-deadline");
+}
+
 /// A reader that takes one byte at a time is cut off at the absolute response deadline, its
 /// slot is released, and with `concurrency` such readers a normal execute and a cancel still work.
 pub fn slow_reader() {
@@ -1273,6 +1420,7 @@ pub const CASES: &[Case] = &[
     ("saturation", saturation),
     ("control-stall", control_stall),
     ("http-limits", http_limits),
+    ("body-deadline", body_deadline),
     ("slow-reader", slow_reader),
 ];
 
