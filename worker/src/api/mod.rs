@@ -12,20 +12,21 @@
 mod grants;
 mod messages;
 mod projection;
+mod redaction;
 mod refusal;
 mod request;
 mod result;
+mod service;
 mod types;
 mod wire;
 
 pub use messages::{CancelMessage, UpdateMessage};
 pub use projection::Projection;
 pub use refusal::Refusal;
-pub use request::ExecuteRequest;
+pub use request::{Credential, ExecuteRequest};
 pub use result::{ExecutionResult, Pinned};
 
 use refusal::{Code, Reason};
-use serde::Deserialize;
 use std::fmt;
 use types::{Id, Positive};
 
@@ -166,18 +167,18 @@ pub fn parse_request(bytes: &[u8]) -> Result<ExecuteRequest, Rejection> {
     }
 }
 
-/// Whether the message names a runtime mode that is a string other than `wasm`.
+/// Probe refusal selectors before schema, credential, or legacy-input checks.
 fn other_runtime_mode(bytes: &[u8]) -> bool {
-    #[derive(Deserialize)]
-    struct Probe {
-        projection: ProbeProjection,
-    }
-    #[derive(Deserialize)]
-    struct ProbeProjection {
-        runtime_mode: String,
-    }
-    serde_json::from_slice::<Probe>(bytes)
-        .is_ok_and(|probe| probe.projection.runtime_mode != "wasm")
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return false;
+    };
+    let projection = &value["projection"];
+    projection
+        .get("runtime_mode")
+        .is_some_and(|mode| mode != "wasm")
+        || ["image", "image_ref", "image_reference"]
+            .iter()
+            .any(|field| value.get(field).is_some() || projection.get(field).is_some())
 }
 
 /// Parses a revision projection of either runtime mode, without admission.

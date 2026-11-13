@@ -1,11 +1,7 @@
 //! Falcone serverless execution worker.
 //!
-//! Explicit local handler execution; no runtime adapter or platform routing.
-
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
+//! Pod-local execution service and explicit local handler execution.
+//! Dispatcher authentication and platform routing remain INV-01 work.
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
@@ -58,6 +54,36 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let config = config::load_from_str(&input)?;
             serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
         }
+        [command, path] if command == "serve" => {
+            let input = std::fs::read_to_string(path).map_err(|_| "config_unavailable")?;
+            let config = config::load_from_str(&input)?;
+            if config.version != 2 {
+                return Err("service_requires_v2".into());
+            }
+            let root = std::path::Path::new(&config.cache_path);
+            let compiler = std::env::current_exe()
+                .map_err(|_| "compiler_unavailable")?
+                .with_file_name("artifact-compile-child");
+            let _server = falcone_serverless_worker::server::Server::start(
+                falcone_serverless_worker::server::Settings {
+                    execute_addr: ([127, 0, 0, 1], config.listen_port).into(),
+                    control_addr: (
+                        [127, 0, 0, 1],
+                        config.control_port.ok_or("control_port_required")?,
+                    )
+                        .into(),
+                    concurrency: config.concurrency as usize,
+                    wall_clock_ms: config.default_wall_clock_ms.min(config.max_wall_clock_ms),
+                    artifact_directory: root.join("components"),
+                    cache_directory: root.join("native"),
+                    compiler,
+                },
+            )
+            .map_err(str::to_owned)?;
+            loop {
+                std::thread::park();
+            }
+        }
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
         }
@@ -66,7 +92,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve CONFIG | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };

@@ -4,7 +4,7 @@ Contract version: v1
 
 This closed TOML contract provides `ctr-worker-runtime-config` for the Wasm worker,
 chart and controller. Adding a field requires v2. Unknown keys are rejected at every
-level. No runtime consumer, server, engine or cluster operation is implemented here.
+level. The v1 parser remains side-effect free. RuntimeConfig v2 below enables the pod-local service.
 
 ## Fields
 
@@ -120,3 +120,35 @@ arbitrary-UID restricted posture and no automatic API token at lines 159,312
 host-held credentials at line 356. Proposed ADRs 0004–0007 provide context,
 without changing their approval status. R3 requires a second reviewer and
 operator approval before merge (`AGENTS.md:34`).
+
+
+## Service configuration v2
+
+`version = 2` retains all v1 fields and adds `control_port` (u16, required, no
+default). It rejects missing, zero or equal execute/control ports, concurrency
+outside 1..1024 and zero wall-clock limits. v1 still rejects `control_port`.
+Set e.g. `version = 2`, `listen_port = 8080`, `control_port = 8082` beside the
+existing required identity/endpoints, then run `falcone-serverless-worker serve CONFIG`.
+Both addresses are pod-local loopback (127.0.0.1); INV-01 owns dispatcher access.
+The execute listener serves only /v1/execute; the control address
+127.0.0.1:<control_port> serves /v1/cancel and /v1/update. Metrics and probes are
+not added by this change.
+
+Execute connections are bounded at concurrency + 4 admission connections, with
+at most concurrency execution permits through response completion. Control has
+8 independent slots. Busy is 503, undeclared imports 422, guest timeout 504.
+Headers are bounded at 16 KiB and 5 s absolute; bodies at 8 MiB execute/16 KiB
+control, 2 s inactivity and 10 s absolute. The response header plus body has a
+single absolute 5 s write deadline. Cancellation observes for at most 1 s;
+qualification allows 2 s scheduling/transport tolerance. Guest time is the
+minimum of request timeout_ms (default 30000), projection budgets.timeout_ms and
+worker min(default_wall_clock_ms, max_wall_clock_ms, existing 30000 ms engine
+ceiling). The separate trusted compile budget is unchanged.
+
+Redaction truncates each line to 8192 characters first and uses one linear
+multi-pattern matcher: 256 KiB serialized secrets, 16384 states, 32 Mi work
+units per execution, 1000 lines maximum. Any exceeded budget produces only
+<redacted>; maximum-size adversarial qualification has a 2 s redaction bound.
+See [execution API](worker-execution-api/execution-api-v1.md) for the full wire,
+credential, raw artifact-store, timing and retained-evidence contract. v2 does
+not configure standing credentials or weaken any v1 egress/posture gate.

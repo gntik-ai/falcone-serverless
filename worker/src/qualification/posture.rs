@@ -12,6 +12,12 @@ pub mod artifact;
 #[path = "../cache/mod.rs"]
 pub mod cache;
 
+#[path = "../api/mod.rs"]
+pub mod api;
+
+#[path = "../server/mod.rs"]
+pub mod server;
+
 use serde_json::Value;
 
 const RULE_IDS: [&str; 12] = [

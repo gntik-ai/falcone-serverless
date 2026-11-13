@@ -124,14 +124,20 @@ pub struct ExecuteRequest {
     version: Version,
     #[serde(rename = "type")]
     message: ExecuteType,
-    activation_id: Id,
-    attempt_id: Id,
+    pub(super) activation_id: Id,
+    pub(super) attempt_id: Id,
     attempt_number: Positive,
     deadline: Deadline,
-    invocation: Invocation,
-    credential: Credential,
+    pub(super) invocation: Invocation,
+    pub(super) credential: Credential,
     pub(super) projection: Projection,
-    params: Params,
+    pub(super) params: Params,
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(super) timeout_ms: Option<Positive>,
 }
 redacted!(ExecuteRequest);
 

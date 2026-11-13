@@ -4,9 +4,9 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
+`ctr-worker-execution-api` under ADR 0010 D1. The worker serves these messages on two pod-local HTTP listeners through
+`falcone-serverless-worker serve CONFIG` (runtime configuration v2). The dispatcher integration
+and authentication remain INV-01 work; this service reads no credential store. The
 [OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
@@ -42,6 +42,7 @@ consume this shape.
 | `invocation` | `invocation_key`, optional `idempotency_key` and `correlation_id`: the invocation identity of `falcone:host/invocation-context`. `attempt-id` of that interface is `attempt_id`. |
 | `credential` | The ctr-execution-credential v1 claims object, not an opaque string. Its schema is the vendored [claims schema](vendor/execution-credential.v1.claims.schema.json). Signing and transport encoding belong to that contract. |
 | `projection` | The pinned revision projection below. |
+| `timeout_ms` | Optional positive guest wall-clock limit in milliseconds; default 30000. Explicit null is malformed. |
 | `params` | The legacy `main(params)` object: `__ow_*` request fields beside the action parameters. |
 
 The credential must be bound to the request: `credential.activation`, `credential.attempt` and
@@ -142,11 +143,16 @@ without changing these. The machine-readable table is [failure-codes.v1.json](fa
 | `runtime_mode_not_supported` | 409 | `runtime_mode_not_wasm` | non_retryable | worker only |
 | `invalid_request` | 400 | `missing_path` or `non_json_body` | non_retryable | worker only |
 | `request_too_large` | 413 | `body_too_large` | non_retryable | worker only |
+| `timeout` | 504 | `execution_timeout` | non_retryable | worker service |
+| `busy` | 503 | `capacity_exhausted` | non_retryable | worker service |
+| `undeclared_import` | 422 | `undeclared_import` | non_retryable | worker service |
+| `cancelled` | 499 | `cancelled` | non_retryable | worker service |
+| `execution_failed` | 500 | `execution_failed` | non_retryable | worker service |
 
 The three `GW_` codes are referenced, not defined: their names, statuses and reasons are those of
-the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The
-worker-only codes are exactly the last three: the non-wasm refusal, and the two refusals the
-operator allowed for the legacy inputs below. Adding `GW_` equivalents to the functions API is a
+the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The original three worker-only admission codes remain unchanged. The five worker-service
+codes add bounded service admission and execution outcomes; `busy` is an attempt refusal,
+and retry policy remains with Falcone. Adding `GW_` equivalents to the functions API is a
 follow-up. A request this worker refuses carries no request value in its message.
 
 ### The non-wasm refusal
@@ -208,7 +214,7 @@ no guest code and no network access:
 - the vendored schemas and the pinned functions-api error fixtures have their sha256 values pinned;
 - the failure code table is compared with the pinned functions-api error fixtures: every worker
   code of origin `functions-api` appears there with the same status, reason and retryability, and
-  the worker-only codes are exactly the three above;
+  the original worker-only codes remain exactly the three admission codes above;
 - the legacy fixtures of the inventory are used byte for byte, with sha256 values equal to the
   inventory, and valid ones round-trip through the worker types unchanged.
 
@@ -229,3 +235,112 @@ pinned excerpts were supplied by the operator (issue #124, 2026-11-08 and 2026-1
 The legacy envelope and invocation-identity fixtures are those of
 `docs/contracts/falcone-contract-inventory.md` (MIG-01.t3, #278); their sources and hashes are
 recorded there. This task does not edit the inventory.
+
+
+## Pod-local service (RUN-01.t3)
+
+RuntimeConfig v2 configures `listen_port` (execute, default 8080) and the required,
+distinct `control_port` (example 8082). Both bind **127.0.0.1**, inside the pod network
+namespace, with no host-network listener. The dispatcher uses the pod-local control
+address `127.0.0.1:<control_port>` through its future INV-01 transport integration.
+Remote dispatcher reachability and authentication are not implemented or qualified here.
+Runtime-config v1 parsing stays closed and cannot enable this service.
+
+| Listener | Operations | Fixed connection ceiling |
+| --- | --- | --- |
+| Execute | `POST /v1/execute` only | concurrency + 4 admission connections |
+| Control | `POST /v1/cancel`, `POST /v1/update` only | 8, independent of execute |
+
+Each listener returns 404 for the other's operations. Connections carry one request;
+there is no keep-alive, pipelining, transfer encoding or content encoding. At most
+`concurrency` execution permits exist, including execute body transfer and response
+writing. A complete execute header gets 503 `busy` before reading its body when
+execution permits are occupied. Overflow connections beyond the listener ceiling
+receive an immediate best-effort nonblocking 503 and close, without parsing or
+allocating a connection thread. Existing connections are never evicted.
+
+For refusal precedence before a body can be admitted, the dispatcher supplies
+`X-Falcone-Runtime-Mode` with the projection's mode (and `X-Falcone-Image` for an
+image reference). An arrived non-wasm selector gets 409 before capacity, size or
+credential checks. The JSON projection is independently checked before every
+other request check, including unknown and non-string modes and image references.
+Connections refused before any headers arrive cannot have body-dependent precedence.
+An optional absent runtime header never authorizes a non-wasm JSON projection.
+
+| Transfer bound (both listeners) | Value |
+| --- | --- |
+| Headers, including request line and terminator | 16 KiB |
+| Execute JSON request | 8 MiB |
+| Control JSON request | 16 KiB |
+| Legacy action body (`__ow_body`) | 1 MiB UTF-8 bytes |
+| Encoded legacy params, including metadata (existing WIT ceiling) | 1 MiB |
+| Absolute header deadline (also idle connection) | 5 s |
+| Body inactivity deadline | 2 s |
+| Absolute body transfer deadline | 10 s |
+| Absolute response write deadline, header plus body | 5 s |
+| Requested per-socket send buffer (kernel may double it) | 64 KiB |
+| Cancellation observation window | 1 s |
+| Qualification scheduling/transport tolerance | 2 s |
+
+Oversized requests receive 413; malformed or oversized headers and expired transfers
+may close without a response. Each partial read is limited by the remaining absolute
+budget. Response writes use **one Instant deadline**, recomputed before each partial
+write across both header and body; progress never resets it. Deadline expiry closes
+the socket and drops both connection and execution permits. A stalled connection
+cannot retain a thread past its transfer deadline plus the 2 s qualification tolerance.
+Cancellation returns `acknowledged` only after the guest reports cancellation;
+unknown, raced or unobserved completion is `uncertain`, without claiming reversal
+of effects. Updates are validated heartbeat/progress/checkpoint-reference messages
+for a currently registered attempt, with increasing sequence numbers; unknown
+attempts get 404 and stale sequences get 409. No update mutates platform state.
+
+The platform stages **raw validated components** at
+`<cache_path>/components/<64-lowercase-hex-component-digest>`. The service reads at
+most 64 MiB, verifies the component digest and validates imports before asking the
+existing supervised trusted compiler/cache to compile it. No HTTP request selects a
+filesystem path, compiler binary or native cache. Every import must be in both
+`projection.imports` (empty means none) and `ALLOWED_IMPORTS`, otherwise the result
+is 422 `undeclared_import` before instantiation, even on a compile-cache hit.
+The pinned engine must match 49.0.5. Identity uses the projection's artifact digest,
+revision, base, profile and interface, and the worker's pinned Wasmtime version.
+The host retains the credential; params and invocation context are the only guest
+input. No WASI environment, preopens or credential-bearing memory exports are linked.
+External capability bindings fail closed pending their platform integrations.
+
+The effective guest timeout is **min(request timeout_ms, projection budgets.timeout_ms,
+worker wall clock)**. The worker wall clock is min(RuntimeConfig default_wall_clock_ms,
+max_wall_clock_ms, the existing engine's 30000 ms hard ceiling). Trusted validation and
+compilation have their separate, existing 300 s supervised budget; the guest clock
+starts at preparation/instantiation, before any guest start code. Expiry returns
+HTTP 504 with `timeout`, reason `execution_timeout`, activation and attempt attribution
+and runtime identity, and releases capacity. Tests warm compilation outside the
+measured guest invocation and require 1000 ms to finish in [900, 3000) ms. Blocked
+host-call deadline enforcement and RUN-02 lifecycle work remain outside this change.
+
+Structured log lines are truncated to 8192 characters **before** redaction. One
+byte-alphabet Aho-Corasick automaton covers raw and JSON-escaped credential strings,
+including one-character secrets. The union of overlapping matches prevents a suffix
+from leaking behind a shorter match; a secret prefix cut by truncation is covered.
+Building costs O(256 * secret bytes), scanning O(log bytes). Per execution the fixed
+bounds are 262144 serialized credential bytes, 16384 states and 33554432 work units
+(including construction, traversal and truncated text). Exceeding any bound drops
+all logs and returns exactly `["<redacted>"]`. At most 1000 output lines are retained.
+The maximum-size adversarial request with 1000 full log lines must redact within
+2 s (debug and release); full service qualification also asserts slot recovery.
+No dependency was added for the matcher. The already pinned rustix 1.1.5 enables
+its `net` feature to bound send queues and to set a 16 KiB receive buffer for
+slow-reader qualification; this avoids depending on host TCP autotuning defaults.
+
+`worker/tests/execute_api_local.rs` exercises the public admission/redaction seams and
+real TCP service behavior. `worker/tests/cluster_execute_api.rs` runs matching cases
+in `fs-test-run01-<run-id>` with the restricted pod harness when `FS_TEST_CLUSTER=1`,
+using the pinned `FS_TEST_WAS02_IMAGE`, `KUBECONFIG`, and `FS_TEST_EVIDENCE_DIR`.
+Create mode creates/deletes its dedicated namespace; shared mode uses only run-owned
+objects and never creates/deletes a namespace. Cases include identity, refusals,
+credential isolation, all four declared-import combinations, saturation, control
+recovery, every size/transfer bound, slow readers and each timeout precedence variant.
+Retained evidence contains only allow-listed case records, namespace/run/image, and
+an artifact ID with SHA256. An unset cluster gate explicitly reports UNVERIFIED.
+The PR must record three consecutive green Rust CI runs of its head, listing and
+excluding only the separately tracked compiler launcher flake. This source change
+claims neither those runs nor live cluster qualification or ADR 0006 acceptance.

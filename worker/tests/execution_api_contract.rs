@@ -4,8 +4,7 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-#[path = "../src/api/mod.rs"]
-mod api;
+use falcone_serverless_worker::api;
 
 use api::{
     Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,

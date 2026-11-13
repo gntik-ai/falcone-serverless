@@ -85,6 +85,9 @@
       "required": [
         "__ow_path"
       ]
+    },
+    "timeout_ms": {
+      "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/positive"
     }
   }
 }

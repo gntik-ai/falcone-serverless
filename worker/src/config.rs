@@ -4,11 +4,21 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+/// v2 service: loopback listen_port and distinct required control_port. Execute
+/// connections <= concurrency + 4, control <= 8; no overflow eviction. Header
+/// deadline 5 s, body idle 2 s/absolute 10 s, whole-response deadline 5 s, cancel
+/// observation 1 s (qualification tolerance 2 s). 503 busy, 422 undeclared_import,
+/// 504 timeout; guest time is min(request, projection, worker, engine ceiling).
+/// Logs: truncate 8192 chars first; 256 KiB secrets/16384 automaton states/32 Mi
+/// work units, fail closed to one marker. See execution-api-v1.md for all bounds.
 pub struct RuntimeConfig {
     #[serde(default = "default_u32::<1>")]
     pub version: u32,
     #[serde(default = "default_u16::<8080>")]
     pub listen_port: u16,
+    /// v2 only: pod-local control listener. Execute is always loopback listen_port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_port: Option<u16>,
     #[serde(default = "default_u16::<9090>")]
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
@@ -93,8 +103,23 @@ fn resolver_path() -> String {
 pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
     let config: RuntimeConfig =
         toml::from_str(input).map_err(|error: toml::de::Error| error.message().to_owned())?;
-    if config.version != 1 {
-        return Err("version: only v1 (version = 1) is supported".into());
+    if !matches!(config.version, 1 | 2) {
+        return Err("version: only v1 and v2 are supported".into());
+    }
+    if config.version == 1 && config.control_port.is_some() {
+        return Err("control_port requires version = 2".into());
+    }
+    if config.version == 2
+        && (config
+            .control_port
+            .is_none_or(|port| port == 0 || port == config.listen_port)
+            || config.listen_port == 0
+            || config.concurrency == 0
+            || config.concurrency > 1024
+            || config.default_wall_clock_ms == 0
+            || config.max_wall_clock_ms == 0)
+    {
+        return Err("version = 2 requires distinct nonzero listener ports, concurrency 1..1024 and positive wall-clock limits".into());
     }
     for (field, value) in [
         ("pool_id", &config.pool_id),
@@ -129,6 +154,16 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    #[test]
+    fn service_configuration_has_independent_ports_without_relaxing_v1() {
+        let base = "pool_id='p'\nfalcone_api_endpoint='https://api.invalid'\nfalcone_dispatcher_endpoint='https://dispatcher.invalid'\n";
+        let v2 = format!("{base}version=2\ncontrol_port=8082\n");
+        assert!(super::load_from_str(&v2).is_ok());
+        assert!(super::load_from_str(&format!("{base}control_port=8082\n")).is_err());
+        assert!(super::load_from_str(&format!("{base}version=2\ncontrol_port=8080\n")).is_err());
+        assert!(super::load_from_str(&format!("{v2}concurrency=0\n")).is_err());
+    }
 
     const DOC: &str = include_str!("../../docs/contracts/worker-runtime-config.md");
     const FIELDS: [[&str; 5]; 22] = [

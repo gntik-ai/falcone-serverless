@@ -2,7 +2,8 @@
 //!
 //! The three `GW_` codes are named and meant exactly as in ctr-functions-api v1 and are only
 //! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`
-//! and `request_too_large`. Nothing in this module reads a request field.
+//! and `request_too_large`; service outcomes add bounded admission and execution
+//! failures. Nothing in this module reads a request field.
 
 use super::types::{Count, Text};
 use super::wire::unit_debug;
@@ -35,6 +36,16 @@ pub enum Code {
     InvalidRequest,
     #[serde(rename = "request_too_large")]
     RequestTooLarge,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "busy")]
+    Busy,
+    #[serde(rename = "undeclared_import")]
+    UndeclaredImport,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "execution_failed")]
+    ExecutionFailed,
 }
 unit_debug!(
     Code: OciNotAuthorized,
@@ -42,7 +53,7 @@ unit_debug!(
     BaseMismatch,
     RuntimeModeNotSupported,
     InvalidRequest,
-    RequestTooLarge,
+    RequestTooLarge, Timeout, Busy, UndeclaredImport, Cancelled, ExecutionFailed,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +66,11 @@ pub enum Reason {
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    ExecutionTimeout,
+    CapacityExhausted,
+    UndeclaredImport,
+    Cancelled,
+    ExecutionFailed,
 }
 unit_debug!(
     Reason: OciNotAuthorized,
@@ -63,7 +79,7 @@ unit_debug!(
     RuntimeModeNotWasm,
     MissingPath,
     NonJsonBody,
-    BodyTooLarge,
+    BodyTooLarge, ExecutionTimeout, CapacityExhausted, UndeclaredImport, Cancelled, ExecutionFailed,
 );
 
 impl Code {
@@ -73,6 +89,11 @@ impl Code {
             Self::BaseDisabled | Self::BaseMismatch | Self::RuntimeModeNotSupported => 409,
             Self::InvalidRequest => 400,
             Self::RequestTooLarge => 413,
+            Self::Timeout => 504,
+            Self::Busy => 503,
+            Self::UndeclaredImport => 422,
+            Self::Cancelled => 499,
+            Self::ExecutionFailed => 500,
         }
     }
 
@@ -86,6 +107,11 @@ impl Code {
             }
             Self::InvalidRequest => "The request is malformed.",
             Self::RequestTooLarge => "The request body exceeds the size budget.",
+            Self::Timeout => "The execution deadline expired.",
+            Self::Busy => "Worker capacity is occupied.",
+            Self::UndeclaredImport => "The component imports are not declared and allowed.",
+            Self::Cancelled => "The execution was cancelled.",
+            Self::ExecutionFailed => "The execution failed.",
         }
     }
 
@@ -106,6 +132,11 @@ impl Code {
                     Reason::MissingPath | Reason::NonJsonBody
                 )
                 | (Self::RequestTooLarge, Reason::BodyTooLarge)
+                | (Self::Timeout, Reason::ExecutionTimeout)
+                | (Self::Busy, Reason::CapacityExhausted)
+                | (Self::UndeclaredImport, Reason::UndeclaredImport)
+                | (Self::Cancelled, Reason::Cancelled)
+                | (Self::ExecutionFailed, Reason::ExecutionFailed)
         )
     }
 }
@@ -128,6 +159,28 @@ pub struct Refusal {
 }
 
 impl Refusal {
+    pub fn payload_too_large() -> Self {
+        Self::new(Code::RequestTooLarge, Reason::BodyTooLarge)
+    }
+    pub fn timeout() -> Self {
+        Self::new(Code::Timeout, Reason::ExecutionTimeout)
+    }
+    pub fn busy() -> Self {
+        Self::new(Code::Busy, Reason::CapacityExhausted)
+    }
+    pub fn undeclared_import() -> Self {
+        Self::new(Code::UndeclaredImport, Reason::UndeclaredImport)
+    }
+    pub fn cancelled() -> Self {
+        Self::new(Code::Cancelled, Reason::Cancelled)
+    }
+    pub fn execution_failed() -> Self {
+        Self::new(Code::ExecutionFailed, Reason::ExecutionFailed)
+    }
+    pub fn status(&self) -> u16 {
+        self.code.status()
+    }
+
     pub(crate) fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
