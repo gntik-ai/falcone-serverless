@@ -12,11 +12,10 @@
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 const ECHO: &[u8] = include_bytes!("execute_fixtures/handler.wasm");
@@ -63,22 +62,43 @@ fn digest(bytes: &[u8]) -> String {
 // ---------------------------------------------------------------------------------------------
 // The worker process and its events
 
+/// The worker's structured events. They are read straight from the file the worker's stderr
+/// is redirected to, on every query, and not by a consumer thread: the worker writes an event
+/// before it answers the request the event belongs to, so once a response has arrived every
+/// event it implies is already readable. A count taken then can neither be stale nor miss an
+/// unexpected event, however the scheduler orders the client and the worker.
 struct Events {
-    seen: Mutex<Vec<Value>>,
-    changed: Condvar,
+    path: PathBuf,
 }
 
 impl Events {
+    /// Every complete event written so far. A line without its newline is still being
+    /// written and is not an event yet.
+    fn seen(&self) -> Vec<Value> {
+        let bytes = std::fs::read(&self.path).unwrap_or_default();
+        parse_events(&bytes)
+    }
+
     fn matching(&self, name: &str, listener: Option<&str>) -> usize {
-        self.seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.seen()
             .iter()
             .filter(|event| {
                 event["event"] == name && listener.is_none_or(|l| event["listener"] == l)
             })
             .count()
     }
+}
+
+/// The JSON events among the complete (newline-terminated) lines of `bytes`.
+fn parse_events(bytes: &[u8]) -> Vec<Value> {
+    let complete = bytes
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |end| end + 1);
+    String::from_utf8_lossy(&bytes[..complete])
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
 }
 
 pub struct Config {
@@ -104,7 +124,7 @@ struct Worker {
     root: PathBuf,
     execute: SocketAddr,
     control: SocketAddr,
-    events: Arc<Events>,
+    events: Events,
 }
 
 impl Worker {
@@ -153,40 +173,23 @@ impl Worker {
             ),
         )
         .map_err(|e| format!("config: {}", e.kind()))?;
-        let mut child = Command::new(binary)
+        let log = root.join("events.log");
+        let stderr = std::fs::File::create(&log).map_err(|e| format!("events: {}", e.kind()))?;
+        let child = Command::new(binary)
             .arg("serve")
             .arg(&file)
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::from(stderr))
             .spawn()
             .map_err(|e| format!("spawn worker: {}", e.kind()))?;
-        let stderr = child.stderr.take().ok_or("worker stderr")?;
-        let events = Arc::new(Events {
-            seen: Mutex::new(Vec::new()),
-            changed: Condvar::new(),
-        });
-        let reader = Arc::clone(&events);
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                if let Ok(event) = serde_json::from_str::<Value>(&line) {
-                    reader
-                        .seen
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(event);
-                    reader.changed.notify_all();
-                }
-            }
-            reader.changed.notify_all();
-        });
         let mut worker = Self {
             child,
             root,
             execute: ([127, 0, 0, 1], 0).into(),
             control: ([127, 0, 0, 1], 0).into(),
-            events,
+            events: Events { path: log },
         };
         worker.wait("listening", None, 1)?;
         let listening = worker.event("listening")?;
@@ -203,12 +206,9 @@ impl Worker {
 
     fn event(&self, name: &str) -> Result<Value, String> {
         self.events
-            .seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
+            .seen()
+            .into_iter()
             .find(|event| event["event"] == name)
-            .cloned()
             .ok_or_else(|| format!("no {name} event"))
     }
 
@@ -216,34 +216,21 @@ impl Worker {
         self.events.matching(name, None)
     }
 
-    /// Waits for at least `count` events named `name` (of `listener`, when given).
+    /// Waits for at least `count` events named `name` (of `listener`, when given). The poll
+    /// interval only bounds how soon a satisfied wait notices; it is never an assertion.
     fn wait(&self, name: &str, listener: Option<&str>, count: usize) -> Check {
         let deadline = Instant::now() + WAIT;
-        let mut seen = self
-            .events
-            .seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         loop {
-            let have = seen
-                .iter()
-                .filter(|e| e["event"] == name && listener.is_none_or(|l| e["listener"] == l))
-                .count();
+            let have = self.events.matching(name, listener);
             if have >= count {
                 return Ok(());
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            if Instant::now() >= deadline {
                 return Err(format!(
                     "timed out waiting for {count} {name} events, saw {have}"
                 ));
             }
-            seen = self
-                .events
-                .changed
-                .wait_timeout(seen, remaining)
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -793,9 +780,7 @@ fn credential_boundary(binary: &Path) -> Check {
     // Worker events are static text and numbers: no event carries a credential string.
     let events = worker
         .events
-        .seen
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .seen()
         .iter()
         .map(Value::to_string)
         .collect::<String>();
@@ -1494,4 +1479,88 @@ pub fn run(case: &str, worker: &Path) -> Check {
         .find(|(name, _)| *name == case)
         .ok_or_else(|| "unknown_execution_api_case".to_owned())?;
     check(worker)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log_in(name: &str) -> (PathBuf, Events) {
+        let dir = std::env::temp_dir().join(format!("fs-events-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("events.log");
+        std::fs::write(&path, b"").expect("log");
+        (dir, Events { path })
+    }
+
+    fn append(events: &Events, bytes: &[u8]) {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&events.path)
+            .expect("open");
+        file.write_all(bytes).expect("append");
+    }
+
+    /// The worker writes an event before it answers; nothing here consumes the log in the
+    /// background, so a count taken after the write sees it at once and a negative count
+    /// cannot miss it.
+    #[test]
+    fn events_written_before_a_response_are_counted_without_any_consumer() {
+        let (dir, events) = log_in("sync");
+        assert_eq!(events.matching("execution_started", None), 0);
+        append(
+            &events,
+            b"{\"event\":\"execution_started\",\"execution\":1}\n",
+        );
+        assert_eq!(events.matching("execution_started", None), 1);
+        append(
+            &events,
+            b"{\"event\":\"execution_started\",\"execution\":2}\n",
+        );
+        assert_eq!(events.matching("execution_started", None), 2);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_event_still_being_written_is_not_counted_until_its_newline_lands() {
+        let (dir, events) = log_in("partial");
+        append(
+            &events,
+            b"{\"event\":\"admitted\",\"listener\":\"control\"}\n",
+        );
+        append(&events, b"{\"event\":\"admitted\",\"listener\":\"exec");
+        assert_eq!(events.matching("admitted", None), 1);
+        append(&events, b"ute\"}\n");
+        assert_eq!(events.matching("admitted", None), 2);
+        assert_eq!(events.matching("admitted", Some("execute")), 1);
+        assert_eq!(events.matching("admitted", Some("control")), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_wait_sees_events_that_arrive_late() {
+        let (dir, events) = log_in("late");
+        let worker_log = events.path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            std::fs::write(
+                worker_log,
+                b"{\"event\":\"execution_finished\",\"execution\":1}\n",
+            )
+            .expect("write");
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while events.matching("execution_finished", None) == 0 {
+            assert!(Instant::now() < deadline, "the event never arrived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        writer.join().expect("writer");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn non_event_lines_are_ignored() {
+        assert!(parse_events(b"not json\n{\"event\":\"x\"}\n").len() == 1);
+        assert!(parse_events(b"").is_empty());
+    }
 }
