@@ -108,6 +108,13 @@ lifting allocates a result or error message. Hooks restore the existing import
 budget when entering guest code or a host import. This changes the compiled
 Wasmtime surface and is part of the R3 second review and operator approval;
 it adds no packages, changes no versions and leaves Cargo.lock unchanged.
+The baseline also includes #130's worker-only rustix `net` feature. The execution
+API bounds each accepted socket's send buffer so response backpressure reaches
+the absolute write deadline. Its local and restricted-cluster slow-reader cases
+bound the receive buffer to exercise that deadline over TCP. These socket options
+operate only on the service's pod-local connections; they add no guest network
+capability, packages or versions and leave Cargo.lock unchanged. This feature is
+part of #130's R3 second review and operator approval.
 Existing dependency tables are intentional. Any other changed entry or added lock
 package requires an explicit review and guard update; the evidence report adds no
 dependencies. Fixture tests check that

@@ -420,7 +420,8 @@ pub fn run(
 }
 
 /// Dependency tables and lockfile package names from b5e7330, with #277's
-/// worker-only call-hook feature for bounded return lifting (see WAS-01 README).
+/// worker-only call-hook feature for bounded return lifting and #130's rustix net
+/// feature for bounded socket queues (see WAS-01 README).
 pub fn dependency_guard(root: &str, worker: &str, lock: &str) -> bool {
     fn tables(
         value: &toml::Value,
