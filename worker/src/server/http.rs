@@ -261,9 +261,32 @@ pub fn respond_now(stream: &mut TcpStream, status: u16, body: &[u8]) {
     let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
     let _ = stream.write_all(&bytes);
     let _ = stream.shutdown(Shutdown::Write);
-    let mut sink = [0u8; 8192];
+    discard_available(stream);
+}
+
+/// The most `respond_now` discards, and the longest it spends doing so: a peer that keeps its
+/// receive queue full cannot hold an accept loop, which closes the socket when either bound is
+/// reached.
+const DISCARD_BYTES: usize = 64 * 1024;
+const DISCARD_TIME: Duration = Duration::from_millis(20);
+
+fn discard_available(stream: &mut TcpStream) {
     let _ = stream.set_nonblocking(true);
-    while matches!(stream.read(&mut sink), Ok(count) if count > 0) {}
+    discard_bounded(|sink| stream.read(sink));
+}
+
+/// Reads until the source is empty or closed, or a bound is reached; returns the bytes taken.
+fn discard_bounded(mut read: impl FnMut(&mut [u8]) -> io::Result<usize>) -> usize {
+    let end = Instant::now() + DISCARD_TIME;
+    let mut sink = [0u8; 8192];
+    let mut discarded = 0usize;
+    while discarded < DISCARD_BYTES && remaining(end).is_some() {
+        match read(&mut sink) {
+            Ok(count) if count > 0 => discarded += count,
+            _ => break,
+        }
+    }
+    discarded
 }
 
 fn write_until(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
@@ -278,4 +301,79 @@ fn write_until(stream: &mut TcpStream, mut bytes: &[u8], deadline: Instant) -> i
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn discarding_stops_at_its_byte_bound_when_the_source_is_never_empty() {
+        let taken = discard_bounded(|sink| Ok(sink.len()));
+        assert!(
+            (DISCARD_BYTES..DISCARD_BYTES + 8192).contains(&taken),
+            "discarded {taken} bytes from an endless source"
+        );
+    }
+
+    #[test]
+    fn discarding_stops_at_its_time_bound_when_the_source_trickles() {
+        let started = Instant::now();
+        let taken = discard_bounded(|_| {
+            std::thread::sleep(Duration::from_millis(5));
+            Ok(1)
+        });
+        assert!(taken < DISCARD_BYTES);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A peer that keeps streaming after the refusal must not hold the accept loop: the discard
+    /// ends at its byte or time bound, and the socket is then closed.
+    #[test]
+    fn an_overflow_refusal_to_a_streaming_peer_returns_within_its_bound() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let sent = Arc::new(AtomicUsize::new(0));
+        let stream = TcpStream::connect(address).unwrap();
+        // Several writers keep the receive queue non-empty while the refusal is discarding.
+        let peers: Vec<_> = (0..4)
+            .map(|_| {
+                let (stop, sent) = (stop.clone(), sent.clone());
+                let mut stream = stream.try_clone().unwrap();
+                std::thread::spawn(move || {
+                    let chunk = [b'x'; 8192];
+                    while !stop.load(Ordering::Acquire) {
+                        match stream.write(&chunk) {
+                            Ok(count) => {
+                                sent.fetch_add(count, Ordering::AcqRel);
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                })
+            })
+            .collect();
+        let (mut accepted, _) = listener.accept().unwrap();
+        // The peer is demonstrably streaming before the refusal is written.
+        while sent.load(Ordering::Acquire) < 4 * DISCARD_BYTES {
+            std::thread::yield_now();
+        }
+        let started = Instant::now();
+        respond_now(&mut accepted, 503, b"{}");
+        let took = started.elapsed();
+        drop(accepted);
+        stop.store(true, Ordering::Release);
+        drop(stream);
+        for peer in peers {
+            peer.join().unwrap();
+        }
+        assert!(
+            took < Duration::from_secs(1),
+            "the overflow refusal held the accept loop for {took:?}"
+        );
+    }
 }
