@@ -1324,48 +1324,79 @@ pub fn control_ceilings_and_deadlines() {
     env.recovered();
 }
 
-/// A reader that takes a maximum-size response one byte at a time is cut off at the absolute
-/// response deadline, and its connection and capacity are recovered.
+/// A reader that keeps taking a maximum-size response, steadily but slower than the absolute
+/// response deadline allows, is cut off at that deadline, and its connection permit is recovered.
 ///
-/// The kernel buffers part of a response, so a cut-off connection shows as end of stream only
-/// after the buffered bytes are read. The reader therefore takes one byte at a time, slower than
-/// the deadline allows, from the first response byte until the deadline plus slack has passed,
-/// then reads the rest at full speed: a server that had kept writing would deliver the whole
-/// announced body, one that cut the connection at the deadline delivers less.
+/// Each reader takes a chunk every few milliseconds from the first response byte on, so the
+/// server's partial writes keep progressing across the deadline: a per-write timeout would never
+/// fire, only an absolute deadline ends the response. The cutoff is read on the server's side,
+/// as its own counters, while every reader still holds its socket open: no transport buffering
+/// and no client-side timeout can stand in for it. A server that had kept writing would hold its
+/// permits for as long as the readers go on reading.
 pub fn a_slow_reader_is_cut_off_at_the_response_deadline() {
     let env = start(Options {
         concurrency: 2,
         ..Options::default()
     });
     let deadline = execute_timing().response_deadline;
+    let stop = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicUsize::new(0));
     let readers: Vec<_> = (0..env.concurrency)
         .map(|_| {
             let mut spec = Spec::new(&env, MANY_LOGS, &[LOGGING]);
             spec.body = Some("m".repeat(9000));
             let addr = env.server.execute_addr();
+            let (stop, started) = (stop.clone(), started.clone());
             std::thread::spawn(move || {
                 let mut stream = connect(addr);
                 stream
                     .write_all(&request_bytes("/v1/execute", &spec.bytes()))
                     .unwrap();
                 let mut received = Vec::new();
-                let mut byte = [0u8; 1];
-                assert_eq!(stream.read(&mut byte).unwrap(), 1, "the response started");
-                received.push(byte[0]);
-                let started = Instant::now();
-                while started.elapsed() < deadline + SLACK {
-                    if stream.read(&mut byte).unwrap_or(0) == 0 {
-                        break;
+                let mut chunk = [0u8; 4096];
+                let first = stream.read(&mut chunk).unwrap();
+                assert!(first > 0, "the response started");
+                received.extend_from_slice(&chunk[..first]);
+                started.fetch_add(1, Ordering::AcqRel);
+                // Steady progress, far slower than a response of this size needs to finish
+                // within the deadline; the socket stays open until the case ends.
+                while !stop.load(Ordering::Acquire) {
+                    match stream.read(&mut chunk) {
+                        Ok(count) if count > 0 => received.extend_from_slice(&chunk[..count]),
+                        _ => break,
                     }
-                    received.push(byte[0]);
-                    // Slower than the deadline allows for a response of this size.
-                    std::thread::sleep(Duration::from_millis(2));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
-                let _ = stream.read_to_end(&mut received);
+                while !stop.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
                 received
             })
         })
         .collect();
+    wait_for(
+        || started.load(Ordering::Acquire) == env.concurrency,
+        "every reader took the first bytes of its response",
+    );
+    // Every response started before this instant, so each absolute deadline ends no later than
+    // here plus the deadline, while every reader still holds its socket open.
+    let first_bytes = Instant::now();
+    wait_for(
+        || env.server.execute_connections() == 0,
+        "the connection permits were recovered",
+    );
+    let recovered_after = first_bytes.elapsed();
+    assert!(
+        recovered_after <= deadline + SLACK,
+        "the response ended at its absolute deadline ({recovered_after:?}), not when the readers \
+         were done"
+    );
+    assert_eq!(
+        env.server.responses_cut_off(),
+        env.concurrency,
+        "each response was cut off by the server"
+    );
+    stop.store(true, Ordering::Release);
     for reader in readers {
         let received = reader.join().unwrap();
         let split = received
@@ -1382,7 +1413,7 @@ pub fn a_slow_reader_is_cut_off_at_the_response_deadline() {
         assert!(announced > 4_000_000, "a maximum-size response");
         assert!(
             received.len() - split - 4 < announced,
-            "the response was cut off at the deadline, not delivered"
+            "the reader never got the whole response"
         );
     }
     env.recovered();

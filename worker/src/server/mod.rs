@@ -340,6 +340,23 @@ struct Shared {
     jobs: Jobs,
     #[cfg(any(test, feature = "qualification"))]
     marks: Marks,
+    /// Test and qualification builds only: responses cut off at their absolute deadline.
+    #[cfg(any(test, feature = "qualification"))]
+    cut_offs: AtomicUsize,
+}
+
+impl Shared {
+    /// Writes one response under its absolute deadline. A peer that has not taken it by then is
+    /// cut off (counted in test and qualification builds).
+    fn respond(&self, stream: &mut TcpStream, status: u16, body: &[u8], deadline: Duration) {
+        let result = http::respond(stream, status, body, deadline);
+        #[cfg(any(test, feature = "qualification"))]
+        if result.is_err() {
+            self.cut_offs.fetch_add(1, Ordering::AcqRel);
+        }
+        #[cfg(not(any(test, feature = "qualification")))]
+        let _ = result;
+    }
 }
 
 /// Test and qualification builds only: the server's own clock readings for the last execution,
@@ -387,6 +404,9 @@ pub struct Server {
     control_addr: SocketAddr,
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<()>>,
+    /// Test and qualification builds only: the execute listener's connection permits.
+    #[cfg(any(test, feature = "qualification"))]
+    execute_connections: Arc<Slots>,
 }
 
 impl Server {
@@ -417,6 +437,8 @@ impl Server {
             },
             #[cfg(any(test, feature = "qualification"))]
             marks: Marks::default(),
+            #[cfg(any(test, feature = "qualification"))]
+            cut_offs: AtomicUsize::new(0),
             settings,
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -425,7 +447,7 @@ impl Server {
         let threads = vec![
             accept_loop(
                 execute_listener,
-                execute_connections,
+                execute_connections.clone(),
                 stop.clone(),
                 shared.clone(),
                 execute_connection,
@@ -444,6 +466,8 @@ impl Server {
             control_addr,
             stop,
             threads,
+            #[cfg(any(test, feature = "qualification"))]
+            execute_connections,
         })
     }
 
@@ -458,6 +482,20 @@ impl Server {
     /// Executions currently holding an execution slot.
     pub fn running_executions(&self) -> usize {
         self.shared.executing.used.load(Ordering::Acquire)
+    }
+
+    /// Test and qualification builds only: connections currently holding an execute-listener
+    /// permit, whatever they are doing.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn execute_connections(&self) -> usize {
+        self.execute_connections.used.load(Ordering::Acquire)
+    }
+
+    /// Test and qualification builds only: responses the server cut off at their absolute
+    /// deadline because the peer had not taken them in time.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn responses_cut_off(&self) -> usize {
+        self.shared.cut_offs.load(Ordering::Acquire)
     }
 
     /// Abandonable steps (artifact, cache and binding work) that have not ended.
@@ -572,7 +610,7 @@ fn execute_connection(shared: Arc<Shared>, mut stream: TcpStream, _connection: S
         Err(error) => return head_error(&mut stream, error, timing.response_deadline),
     };
     let respond = |stream: &mut TcpStream, (status, body): (u16, Vec<u8>)| {
-        let _ = http::respond(stream, status, &body, timing.response_deadline);
+        shared.respond(stream, status, &body, timing.response_deadline);
     };
     if head.path != "/v1/execute" {
         return respond(
@@ -613,7 +651,7 @@ fn control_connection(shared: Arc<Shared>, mut stream: TcpStream, _connection: S
         Err(error) => return head_error(&mut stream, error, timing.response_deadline),
     };
     let respond = |stream: &mut TcpStream, (status, body): (u16, Vec<u8>)| {
-        let _ = http::respond(stream, status, &body, timing.response_deadline);
+        shared.respond(stream, status, &body, timing.response_deadline);
     };
     let operation = match (head.method.as_str(), head.path.as_str()) {
         ("POST", "/v1/cancel") => Control::Cancel,
