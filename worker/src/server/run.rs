@@ -121,6 +121,8 @@ pub(super) fn execute(shared: &Shared, body: &[u8], slot: Slot) -> (u16, Vec<u8>
     };
     let finished = admitted(shared, &request, &running.cancel_flag());
     drop(slot);
+    #[cfg(any(test, feature = "qualification"))]
+    super::Marks::set(&shared.marks.released, Instant::now());
     running.finish(finished.uncertain);
     let reply = answer(&request, finished.result, finished.logs);
     drop(running);
@@ -141,6 +143,8 @@ fn admitted(shared: &Shared, request: &ExecuteRequest, cancel: &Arc<AtomicBool>)
     };
     // The one absolute deadline of this execution, fixed at admission.
     let until = Instant::now() + limits.timeout;
+    #[cfg(any(test, feature = "qualification"))]
+    super::Marks::set(&shared.marks.until, until);
     let projection = request.projection();
     // Nothing starts for an execution that has no time left, or that is already cancelled.
     if cancel.load(std::sync::atomic::Ordering::Acquire) {

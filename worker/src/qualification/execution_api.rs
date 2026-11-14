@@ -12,7 +12,7 @@ use falcone_serverless_worker::api::{self, CancelState, WorkerLimits};
 use falcone_serverless_worker::artifact::cache_key::ENGINE_VERSION;
 use falcone_serverless_worker::cache::Stage;
 use falcone_serverless_worker::limits::GUEST_MEMORY_BYTES;
-use falcone_serverless_worker::server::http::{MAX_HEADERS, MAX_REQUEST, Timing};
+use falcone_serverless_worker::server::http::{MAX_CONTROL_BODY, MAX_HEADERS, MAX_REQUEST, Timing};
 use falcone_serverless_worker::server::{
     ADMISSION_CONNECTIONS, CONTROL_CONNECTIONS, Hooks, Server, Settings,
 };
@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -32,22 +32,21 @@ const LOG_PARAMS: &[u8] = include_bytes!("api_fixtures/log-params.wasm");
 const MANY_LOGS: &[u8] = include_bytes!("api_fixtures/many-logs.wasm");
 const BLOCK: &[u8] = include_bytes!("api_fixtures/block.wasm");
 const IMPORTS_CONTEXT: &[u8] = include_bytes!("api_fixtures/imports-context.wasm");
+const STORAGE_CALLS: &[u8] = include_bytes!("api_fixtures/storage-calls.wasm");
 const WASI_IMPORT: &[u8] = include_bytes!("execute_fixtures/wasi-import.wasm");
 
 const LOGGING: &str = "falcone:host/logging@0.2.0";
 const CONTEXT: &str = "falcone:host/invocation-context@0.2.0";
+const STORAGE: &str = "falcone:host/storage@0.2.0";
 
 /// Slack on top of a documented bound, for scheduling on a loaded machine.
 const SLACK: Duration = Duration::from_secs(1);
 /// The termination budget of a cancel or an expired deadline.
 const TERMINATION: Duration = Duration::from_millis(500);
 
-static PRODUCTION_TIMING: AtomicBool = AtomicBool::new(false);
-
-/// The restricted pod qualifies the documented production deadlines; local runs scale them down.
-pub fn use_production_timing() {
-    PRODUCTION_TIMING.store(true, Ordering::Release);
-}
+/// The restricted pod qualifies the documented production deadlines (its runner sets this);
+/// local runs scale them down.
+pub static PRODUCTION_TIMING: AtomicBool = AtomicBool::new(false);
 
 fn execute_timing() -> Timing {
     if PRODUCTION_TIMING.load(Ordering::Acquire) {
@@ -217,8 +216,9 @@ fn start(options: Options) -> Env {
     if let Some((stage, gate)) = options.stage_gate.clone() {
         let seen = seen.clone();
         hooks.stage = Some(Arc::new(move |at| {
-            if at == stage {
-                seen.stage_hits.fetch_add(1, Ordering::AcqRel);
+            // Only the first operation to reach the stage is held: it is the one the execution
+            // abandons, and the executions after it must pass while it is still stalled.
+            if at == stage && seen.stage_hits.fetch_add(1, Ordering::AcqRel) == 0 {
                 block_on(&gate);
             }
         }));
@@ -300,13 +300,35 @@ impl Env {
             || self.seen.calls.load(Ordering::Acquire) > before,
             "the blocked guest started",
         );
+        self.server.reset_marks();
         let started = Instant::now();
         let cancel = self.cancel(&blocked);
         assert_eq!(cancel.status, 200);
         assert_eq!(cancel_state(&cancel), CancelState::Acknowledged);
-        assert!(started.elapsed() < TERMINATION + SLACK);
+        assert!(started.elapsed() < TERMINATION + SLACK, "the cancel answer");
         assert_eq!(running.join().expect("execute thread").status, 499);
         wait_for(|| self.server.running_executions() == 0, "slots released");
+        self.assert_released_after_cancel();
+    }
+
+    /// The slot was released within the termination budget of the last accepted cancel, by the
+    /// server's own clock: the bound is the documented one, with no transport tolerance.
+    fn assert_released_after_cancel(&self) {
+        let after = self
+            .server
+            .release_after_cancel()
+            .expect("a cancel was accepted and the slot released");
+        assert!(after <= TERMINATION, "slot released {after:?} after cancel");
+    }
+
+    /// The slot was released within the termination budget of the execution's absolute
+    /// deadline, by the server's own clock.
+    fn assert_released_after_deadline(&self) {
+        let after = self
+            .server
+            .release_after_deadline()
+            .expect("the deadline was set and the slot released");
+        assert!(after <= TERMINATION, "slot released {after:?} after until");
     }
 
     fn spawn_execute(&self, spec: &Spec) -> std::thread::JoinHandle<Reply> {
@@ -385,9 +407,14 @@ fn unique(prefix: &str) -> String {
 
 impl Spec {
     fn new(env: &Env, artifact: &[u8], imports: &[&str]) -> Self {
+        Self::for_digest(env.publish(artifact), imports)
+    }
+
+    /// A request for the artifact already published under `digest` (`sha256:<hex>`).
+    fn for_digest(digest: String, imports: &[&str]) -> Self {
         Self {
             activation: unique("act"),
-            digest: env.publish(artifact),
+            digest,
             mode: "wasm".into(),
             imports: imports.iter().map(|import| (*import).to_owned()).collect(),
             grants: Vec::new(),
@@ -1007,14 +1034,14 @@ pub fn cancel_survives_a_saturated_execute_listener() {
     assert_failure(&extra, 503, "busy", "at_capacity");
     assert_eq!(extra.json()["retryable"], true);
     // The control listener is untouched by the saturation.
-    let started = Instant::now();
+    env.server.reset_marks();
     let cancel = env.cancel(&blocked[0]);
     assert_eq!(cancel.status, 200);
     assert_eq!(cancel_state(&cancel), CancelState::Acknowledged);
-    assert!(started.elapsed() < TERMINATION + SLACK);
     let first = running.into_iter().next().unwrap().join().unwrap();
     assert_answers(&first, &blocked[0], "cancelled", "cancel_requested");
     assert_eq!(first.status, 499);
+    env.assert_released_after_cancel();
     drop(stalled);
     let second = env.cancel(&blocked[1]);
     assert_eq!(cancel_state(&second), CancelState::Acknowledged);
@@ -1128,16 +1155,22 @@ pub fn update_and_cancel_semantics() {
 
 // --- HTTP ceilings and deadlines ------------------------------------------------------------
 
-/// Oversized heads, requests and action bodies are refused, and connections that send nothing,
-/// drip a head or stall a body are closed within their bounds; no capacity leaks in any case.
-pub fn http_ceilings_and_deadlines() {
-    let env = start(Options::default());
-    let addr = env.server.execute_addr();
-    let timing = execute_timing();
+/// What differs between the two listeners in the transfer cases.
+struct Listener {
+    addr: SocketAddr,
+    path: &'static str,
+    timing: Timing,
+}
+
+/// The cases both listeners share: an oversized head is refused with the documented status, and
+/// connections that send nothing, drip a head or stall a body are closed within their bounds.
+/// After each, a normal execute and a cancel both succeed: no slot or permit leaked.
+fn transfer_ceilings_and_deadlines(env: &Env, listener: &Listener) {
+    let Listener { addr, path, timing } = *listener;
 
     // Oversized head.
     let mut head = format!(
-        "POST /v1/execute HTTP/1.1\r\nX-Pad: {}\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nX-Pad: {}\r\n\r\n",
         "p".repeat(MAX_HEADERS + 1)
     );
     head.push_str("{}");
@@ -1150,6 +1183,61 @@ pub fn http_ceilings_and_deadlines() {
         "body_too_large",
     );
     env.recovered();
+
+    // A connection that sends no bytes is closed at the header deadline.
+    let mut silent = connect(addr);
+    let elapsed = closed_within(&mut silent, timing.header_deadline + SLACK)
+        .expect("the silent connection is closed");
+    assert!(elapsed <= timing.header_deadline + SLACK);
+    env.recovered();
+
+    // A head dripped past the absolute deadline is closed at it, however steady the drip.
+    let mut drip = connect(addr);
+    let start = Instant::now();
+    drip.write_all(format!("POST {path} HTTP/1.1\r\n").as_bytes())
+        .unwrap();
+    let step = timing.header_deadline / 8;
+    let mut closed = None;
+    while start.elapsed() < timing.header_deadline + SLACK {
+        if drip.write_all(b"X: y\r\n").is_err() {
+            closed = Some(start.elapsed());
+            break;
+        }
+        if let Some(at) = closed_within(&mut drip, step) {
+            closed = Some(start.elapsed().max(at));
+            break;
+        }
+    }
+    let closed = closed.expect("the dripped head is closed");
+    assert!(closed <= timing.header_deadline + SLACK);
+    env.recovered();
+
+    // A body that stalls is closed at the inactivity timeout, and frees its connection slot.
+    let mut stalled = connect(addr);
+    stalled
+        .write_all(
+            format!("POST {path} HTTP/1.1\r\nContent-Length: 100\r\n\r\n0123456789").as_bytes(),
+        )
+        .unwrap();
+    let elapsed = closed_within(&mut stalled, timing.body_inactivity + SLACK)
+        .expect("the stalled body is closed");
+    assert!(elapsed <= timing.body_inactivity + SLACK);
+    env.recovered();
+}
+
+/// Oversized heads, requests and action bodies are refused, and connections that send nothing,
+/// drip a head or stall a body are closed within their bounds; no capacity leaks in any case.
+pub fn http_ceilings_and_deadlines() {
+    let env = start(Options::default());
+    let addr = env.server.execute_addr();
+    transfer_ceilings_and_deadlines(
+        &env,
+        &Listener {
+            addr,
+            path: "/v1/execute",
+            timing: execute_timing(),
+        },
+    );
 
     // Oversized request: refused before any body is read.
     let mut stream = connect(addr);
@@ -1183,42 +1271,56 @@ pub fn http_ceilings_and_deadlines() {
         "no guest or artifact was touched"
     );
     env.recovered();
+}
 
-    // A connection that sends no bytes is closed at the header deadline.
-    let mut silent = connect(addr);
-    let elapsed = closed_within(&mut silent, timing.header_deadline + SLACK)
-        .expect("the silent connection is closed");
-    assert!(elapsed <= timing.header_deadline + SLACK);
-    env.recovered();
+/// The control listener has the same head and transfer bounds, and its own 64 KiB body ceiling:
+/// a body at the ceiling is read, one byte more is refused before it is read. Nothing the
+/// stalled or oversized connections did leaves the listener, or an execution, worse off.
+pub fn control_ceilings_and_deadlines() {
+    let env = start(Options::default());
+    let addr = env.server.control_addr();
+    transfer_ceilings_and_deadlines(
+        &env,
+        &Listener {
+            addr,
+            path: "/v1/cancel",
+            timing: control_timing(),
+        },
+    );
 
-    // A head dripped past the absolute deadline is closed at it, however steady the drip.
-    let mut drip = connect(addr);
-    let start = Instant::now();
-    drip.write_all(b"POST /v1/execute HTTP/1.1\r\n").unwrap();
-    let step = timing.header_deadline / 8;
-    let mut closed = None;
-    while start.elapsed() < timing.header_deadline + SLACK {
-        if drip.write_all(b"X: y\r\n").is_err() {
-            closed = Some(start.elapsed());
-            break;
-        }
-        if let Some(at) = closed_within(&mut drip, step) {
-            closed = Some(start.elapsed().max(at));
-            break;
-        }
-    }
-    let closed = closed.expect("the dripped head is closed");
-    assert!(closed <= timing.header_deadline + SLACK);
-    env.recovered();
-
-    // A body that stalls is closed at the inactivity timeout, and frees its execution slot.
-    let mut stalled = connect(addr);
-    stalled
-        .write_all(b"POST /v1/execute HTTP/1.1\r\nContent-Length: 100\r\n\r\n0123456789")
+    // One byte over the ceiling is refused on the announced length, with the body unsent.
+    let mut stream = connect(addr);
+    stream
+        .write_all(
+            format!(
+                "POST /v1/cancel HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                MAX_CONTROL_BODY + 1
+            )
+            .as_bytes(),
+        )
         .unwrap();
-    let elapsed = closed_within(&mut stalled, timing.body_inactivity + SLACK)
-        .expect("the stalled body is closed");
-    assert!(elapsed <= timing.body_inactivity + SLACK);
+    assert_failure(
+        &read_reply(&mut stream),
+        413,
+        "request_too_large",
+        "body_too_large",
+    );
+    env.recovered();
+
+    // The same oversized body, sent in full, is refused all the same, and nothing ran.
+    let reply = post(addr, "/v1/cancel", &vec![b'x'; MAX_CONTROL_BODY + 1]);
+    assert_failure(&reply, 413, "request_too_large", "body_too_large");
+    env.recovered();
+
+    // A body exactly at the ceiling is read, and then judged on its content.
+    let loaded = env.server.validations();
+    let reply = post(addr, "/v1/cancel", &vec![b'x'; MAX_CONTROL_BODY]);
+    assert_failure(&reply, 400, "invalid_request", "malformed_request");
+    assert_eq!(
+        env.server.validations(),
+        loaded,
+        "nothing was loaded or run"
+    );
     env.recovered();
 }
 
@@ -1293,9 +1395,11 @@ pub fn a_slow_reader_is_cut_off_at_the_response_deadline() {
 pub fn the_shortest_timeout_wins() {
     let shortest = Duration::from_millis(600);
     let expect = |env: &Env, spec: &Spec, started: Instant| {
+        env.server.reset_marks();
         let reply = env.execute(spec);
         let elapsed = started.elapsed();
         assert_eq!(reply.status, 504);
+        env.assert_released_after_deadline();
         assert_answers(&reply, spec, "timeout", "deadline_exceeded");
         assert!(
             env.seen.calls.load(Ordering::Acquire) >= 1,
@@ -1307,7 +1411,7 @@ pub fn the_shortest_timeout_wins() {
         );
         assert!(
             elapsed <= shortest + TERMINATION + SLACK,
-            "the shortest limit, not more"
+            "the shortest limit, not more, as the client saw it"
         );
         env.recovered();
     };
@@ -1409,7 +1513,11 @@ pub fn one_absolute_deadline_end_to_end() {
     let reply = env.execute(&spec);
     assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
     assert_eq!(reply.status, 504);
-    assert!(started.elapsed() <= timeout + TERMINATION + SLACK);
+    env.assert_released_after_deadline();
+    assert!(
+        started.elapsed() <= timeout + TERMINATION + SLACK,
+        "as the client saw it"
+    );
     assert_eq!(
         env.seen.binds.load(Ordering::Acquire),
         1,
@@ -1439,7 +1547,11 @@ pub fn one_absolute_deadline_end_to_end() {
     let started = Instant::now();
     let reply = env.execute(&spec);
     assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
-    assert!(started.elapsed() <= timeout + TERMINATION + SLACK);
+    env.assert_released_after_deadline();
+    assert!(
+        started.elapsed() <= timeout + TERMINATION + SLACK,
+        "as the client saw it"
+    );
     assert_eq!(
         env.seen.calls.load(Ordering::Acquire),
         1,
@@ -1494,44 +1606,248 @@ pub fn one_absolute_deadline_end_to_end() {
     }
 }
 
-/// Cache and validation work is supervised: on the deadline or on cancel the slot is released
-/// within the termination budget, the following execute is admitted and nothing partial is
-/// published.
-pub fn cache_stalls_are_supervised() {
-    let timeout = Duration::from_millis(500);
-    for stage in [Stage::Read, Stage::Compile, Stage::Publish] {
-        let stall = gate();
-        let env = start(Options {
-            stage_gate: Some((stage, stall.clone())),
-            ..Options::default()
-        });
-        let mut spec = Spec::new(&env, OK, &[]);
-        spec.timeout_ms = timeout.as_millis() as u64;
-        let started = Instant::now();
-        let reply = env.execute(&spec);
-        assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
-        assert!(
-            started.elapsed() <= timeout + TERMINATION + SLACK,
-            "slot released in time"
-        );
-        assert!(
-            env.seen.stage_hits.load(Ordering::Acquire) >= 1,
-            "the stage was reached"
-        );
-        assert_eq!(env.server.running_executions(), 0);
-        stall.store(true, Ordering::Release);
-        wait_for(|| env.server.active_steps() == 0, "the abandoned step ends");
-        assert!(
-            env.cache_entries().is_empty(),
-            "no partial or abandoned entry at {stage:?}"
-        );
-        // The following execute is admitted and completes; only now is an entry published.
-        let next = Spec::new(&env, OK, &[]);
-        assert_eq!(env.execute(&next).status, 200);
-        let entries = env.cache_entries();
-        assert_eq!(entries.len(), 1, "{entries:?}");
-        assert!(entries[0].ends_with(".cache"));
+/// How an execution that waits on a stalled step is ended.
+#[derive(Clone, Copy, Debug)]
+enum Ending {
+    Deadline,
+    Cancel,
+}
+
+/// The first operation to reach `stage` stalls. The execution leaves it on its deadline or on
+/// cancel, releases its slot within the termination budget (by the server's own clock), and the
+/// next execute is admitted and completes while the abandoned operation is still stalled. Once
+/// the abandoned operation ends, the cache holds only the next execute's complete entry.
+fn a_stalled_step_is_abandoned(stage: Stage, artifact: &[u8], ending: Ending) {
+    let stall = gate();
+    let env = start(Options {
+        stage_gate: Some((stage, stall.clone())),
+        ..Options::default()
+    });
+    let mut spec = Spec::new(&env, artifact, &[]);
+    if let Ending::Deadline = ending {
+        spec.timeout_ms = 500;
     }
+    env.server.reset_marks();
+    let running = env.spawn_execute(&spec);
+    wait_for(
+        || env.seen.stage_hits.load(Ordering::Acquire) >= 1,
+        "the stage was reached",
+    );
+    match ending {
+        Ending::Deadline => {
+            let reply = running.join().unwrap();
+            assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
+            assert_eq!(reply.status, 504);
+            env.assert_released_after_deadline();
+        }
+        Ending::Cancel => {
+            let cancel = env.cancel(&spec);
+            assert_eq!(cancel_state(&cancel), CancelState::Acknowledged);
+            let reply = running.join().unwrap();
+            assert_answers(&reply, &spec, "cancelled", "cancel_requested");
+            assert_eq!(reply.status, 499);
+            env.assert_released_after_cancel();
+        }
+    }
+    assert_eq!(
+        env.server.running_executions(),
+        0,
+        "the slot is free at {stage:?} after {ending:?}"
+    );
+    assert!(
+        env.server.active_steps() >= 1,
+        "the abandoned operation is still stalled"
+    );
+    // A temporary file may exist while publication is stalled; only the rename publishes.
+    assert!(
+        env.cache_entries()
+            .iter()
+            .all(|entry| !entry.ends_with(".cache")),
+        "nothing is published while it is stalled"
+    );
+    // Admitted and complete while the abandoned operation is still stalled.
+    let next = Spec::new(&env, OK, &[]);
+    assert_eq!(
+        env.execute(&next).status,
+        200,
+        "the next execute is admitted at {stage:?} after {ending:?}"
+    );
+    assert!(
+        env.server.active_steps() >= 1,
+        "still stalled when the next execute finished"
+    );
+    stall.store(true, Ordering::Release);
+    wait_for(|| env.server.active_steps() == 0, "the abandoned step ends");
+    let entries = env.cache_entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "no partial or abandoned entry at {stage:?} after {ending:?}: {entries:?}"
+    );
+    assert!(entries[0].ends_with(".cache"));
+    assert_eq!(env.execute(&next).status, 200, "the entry loads");
+}
+
+/// Cache operations (lookup and read, compile, publish) are supervised: on the deadline or on
+/// cancel the slot is released within the termination budget, the following execute is admitted
+/// while the abandoned operation is still stalled, and nothing partial is published.
+pub fn cache_stalls_are_supervised() {
+    for stage in [Stage::Read, Stage::Compile, Stage::Publish] {
+        for ending in [Ending::Deadline, Ending::Cancel] {
+            a_stalled_step_is_abandoned(stage, OK, ending);
+        }
+    }
+}
+
+/// Storage open and drop callbacks, and calls the authorization refuses, count against
+/// `max_host_calls` like every other guest-to-host entry. The guest opens one object twice and
+/// drops each handle it gets: with the key granted that is four entries (two opens, two drops),
+/// with no grant it is two refused opens. The call after the budget is refused, and none of
+/// these entries reaches the platform bindings.
+pub fn storage_and_refused_entries_count_against_the_budget() {
+    let env = start(Options::default());
+    // The guest opens `objects/a`. A grant over `objects/` allows it; a grant over another
+    // prefix links the interface but refuses the key.
+    let with_prefix = |env: &Env, prefix: &str, max_host_calls: u64| {
+        let mut spec = Spec::new(env, STORAGE_CALLS, &[STORAGE]);
+        spec.grants = vec![json!({
+            "family": "storage",
+            "interface": STORAGE,
+            "scope": {"prefixes": [prefix]},
+            "secretRef": {"name": "storage-binding-qualification", "version": "1"}
+        })];
+        spec.max_host_calls = max_host_calls;
+        spec
+    };
+    let granted = |env: &Env, max_host_calls: u64| with_prefix(env, "objects/", max_host_calls);
+    let refused = |env: &Env, max_host_calls: u64| with_prefix(env, "elsewhere/", max_host_calls);
+    let entries = |env: &Env| env.seen.entries.load(Ordering::Acquire);
+    let over_budget = |reply: &Reply, spec: &Spec| {
+        assert_answers(reply, spec, "execution_failed", "host_call_budget_exceeded");
+        assert_eq!(reply.json()["result"]["retryable"], false);
+    };
+
+    // Granted: open, drop, open, drop. Exactly four entries fit; a fifth would not be needed.
+    let before = entries(&env);
+    let spec = granted(&env, 4);
+    let reply = env.execute(&spec);
+    assert_eq!(reply.status, 200, "four entries fit a budget of four");
+    assert_eq!(entries(&env) - before, 4, "open and drop both enter");
+    // One short: the second drop is the entry that is refused, so drop callbacks count.
+    let before = entries(&env);
+    let spec = granted(&env, 3);
+    over_budget(&env.execute(&spec), &spec);
+    assert_eq!(entries(&env) - before, 4, "the refused entry is the drop");
+    // Two short: the first drop is refused.
+    let before = entries(&env);
+    let spec = granted(&env, 1);
+    over_budget(&env.execute(&spec), &spec);
+    assert_eq!(entries(&env) - before, 2);
+
+    // Refused by authorization: no handle, two entries, both counted.
+    let before = entries(&env);
+    let spec = refused(&env, 2);
+    let reply = env.execute(&spec);
+    assert_eq!(reply.status, 200, "refused opens are answered to the guest");
+    assert_eq!(entries(&env) - before, 2, "a refused call still enters");
+    let before = entries(&env);
+    let spec = refused(&env, 1);
+    over_budget(&env.execute(&spec), &spec);
+    assert_eq!(entries(&env) - before, 2, "a refused call counts");
+    assert_eq!(
+        env.seen.calls.load(Ordering::Acquire),
+        0,
+        "no storage entry reached the platform"
+    );
+    env.recovered();
+}
+
+// --- the production worker -----------------------------------------------------------------
+
+/// The artifact the production-worker cases publish and execute.
+pub fn production_artifact() -> &'static [u8] {
+    OK
+}
+
+/// The artifact's digest, as the file name the worker reads it by.
+pub fn production_digest() -> String {
+    format!("{:x}", Sha256::digest(production_artifact()))
+}
+
+/// The worker's configuration file, as the worker pod mounts it: the four listener ports, and
+/// the artifact and cache directories under `root`.
+pub fn worker_config(execute: u16, control: u16, metrics: u16, probe: u16, root: &Path) -> String {
+    format!(
+        "listen_port = {execute}\ncontrol_port = {control}\nmetrics_port = {metrics}\n\
+         probe_port = {probe}\npool_id = \"pool-serve-test\"\ncache_path = \"{}\"\n\
+         artifact_path = \"{}\"\nfalcone_api_endpoint = \"https://falcone.example.test/api\"\n\
+         falcone_dispatcher_endpoint = \"https://dispatcher.example.test\"\n",
+        root.join("cache").display(),
+        root.join("artifacts").display()
+    )
+}
+
+/// The worker binary, started from its configuration (locally as a process, in the pod as the
+/// production image), serves the execution API: a wasm revision returns the legacy envelope with
+/// the pinned runtime identity and no credential string, a non-wasm revision is refused, and each
+/// listener refuses the other's operations. `production_artifact` is published under its digest.
+pub fn the_production_worker_serves_the_execution_api(execute: SocketAddr, control: SocketAddr) {
+    let listening = Instant::now();
+    for addr in [execute, control] {
+        while TcpStream::connect(addr).is_err() {
+            assert!(
+                listening.elapsed() < Duration::from_secs(60),
+                "the worker listens on {addr}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    let spec = Spec::for_digest(format!("sha256:{}", production_digest()), &[]);
+    let reply = post(execute, "/v1/execute", &spec.bytes());
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    api::parse_result(&reply.body, &spec.parsed()).expect("a result that matches its request");
+    let value = reply.json();
+    assert_eq!(value["status"], "success");
+    assert_eq!(value["result"], json!({"statusCode": 200, "body": "ok"}));
+    let identity = &value["identity"];
+    assert_eq!(identity["wasmtime_version"], ENGINE_VERSION);
+    assert_eq!(identity["runtime_mode"], "wasm");
+    assert_eq!(identity["artifact_digest"], spec.digest.as_str());
+    assert_eq!(identity["function_revision"], "rev-qualification-0001");
+    assert_no_leak(&reply, &spec.all_secrets());
+
+    // A non-wasm revision is refused, and nothing runs.
+    let mut oci = Spec::for_digest(spec.digest.clone(), &[]);
+    oci.mode = "oci".into();
+    let reply = post(execute, "/v1/execute", &oci.bytes());
+    assert_answers(
+        &reply,
+        &oci,
+        "runtime_mode_not_supported",
+        "runtime_mode_not_wasm",
+    );
+    assert_eq!(reply.status, 409);
+
+    // Each listener refuses the other's operations; a cancel for nothing is not found.
+    let reply = post(control, "/v1/execute", &spec.bytes());
+    assert_failure(&reply, 404, "not_found", "execution_not_found");
+    let reply = post(
+        execute,
+        "/v1/cancel",
+        &serde_json::to_vec(&spec.cancel_message()).unwrap(),
+    );
+    assert_failure(&reply, 404, "not_found", "execution_not_found");
+    let reply = post(
+        control,
+        "/v1/cancel",
+        &serde_json::to_vec(&spec.cancel_message()).unwrap(),
+    );
+    assert_failure(&reply, 404, "not_found", "execution_not_found");
 }
 
 /// A component near the artifact bound: a valid component with a large custom section.
@@ -1561,64 +1877,18 @@ fn large_artifact() -> Vec<u8> {
 /// or `timeout`, the slot is free within the termination budget, and nothing is published.
 pub fn validation_is_cancellable_and_bounded() {
     let big = large_artifact();
-    // Cancelled while validation is in progress.
-    let stall = gate();
-    let env = start(Options {
-        stage_gate: Some((Stage::Validate, stall.clone())),
-        ..Options::default()
-    });
-    let spec = Spec::new(&env, &big, &[]);
-    let running = env.spawn_execute(&spec);
-    wait_for(
-        || env.seen.stage_hits.load(Ordering::Acquire) == 1,
-        "validation started",
-    );
-    let started = Instant::now();
-    let cancel = env.cancel(&spec);
-    assert_eq!(cancel_state(&cancel), CancelState::Acknowledged);
-    assert!(started.elapsed() <= TERMINATION + SLACK);
-    let reply = running.join().unwrap();
-    assert_answers(&reply, &spec, "cancelled", "cancel_requested");
-    assert_eq!(env.server.running_executions(), 0, "the slot is free");
-    stall.store(true, Ordering::Release);
-    wait_for(
-        || env.server.active_steps() == 0,
-        "the abandoned validation ends",
-    );
-    assert!(env.cache_entries().is_empty(), "nothing was published");
-    assert_eq!(
-        env.execute(&Spec::new(&env, OK, &[])).status,
-        200,
-        "the next execute is admitted"
-    );
-    drop(env);
-
-    // A short timeout during validation.
-    let stall = gate();
-    let env = start(Options {
-        stage_gate: Some((Stage::Validate, stall.clone())),
-        ..Options::default()
-    });
-    let mut spec = Spec::new(&env, &big, &[]);
-    spec.timeout_ms = 500;
-    let started = Instant::now();
-    let reply = env.execute(&spec);
-    assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
-    assert!(started.elapsed() <= Duration::from_millis(500) + TERMINATION + SLACK);
-    stall.store(true, Ordering::Release);
-    wait_for(
-        || env.server.active_steps() == 0,
-        "the abandoned validation ends",
-    );
-    assert!(env.cache_entries().is_empty());
-    drop(env);
+    for ending in [Ending::Cancel, Ending::Deadline] {
+        a_stalled_step_is_abandoned(Stage::Validate, &big, ending);
+    }
 
     // No stall at all: a 1 ms timeout cannot cover reading and validating the artifact.
     let env = start(Options::default());
     let mut spec = Spec::new(&env, &big, &[]);
     spec.timeout_ms = 1;
+    env.server.reset_marks();
     let reply = env.execute(&spec);
     assert_answers(&reply, &spec, "timeout", "deadline_exceeded");
+    env.assert_released_after_deadline();
     wait_for(
         || env.server.active_steps() == 0,
         "the abandoned validation ends",
@@ -1644,26 +1914,18 @@ pub const CASES: &[(&str, fn())] = &[
     ("admission-order", admission_order_when_every_slot_is_busy),
     ("update-cancel", update_and_cancel_semantics),
     ("http", http_ceilings_and_deadlines),
+    ("control-http", control_ceilings_and_deadlines),
     (
         "slow-reader",
         a_slow_reader_is_cut_off_at_the_response_deadline,
     ),
     ("timeout-selection", the_shortest_timeout_wins),
     ("budgets", budgets_are_enforced),
+    (
+        "budget-entries",
+        storage_and_refused_entries_count_against_the_budget,
+    ),
     ("deadline", one_absolute_deadline_end_to_end),
     ("cache-stalls", cache_stalls_are_supervised),
     ("validation", validation_is_cancellable_and_bounded),
 ];
-
-/// Runs one case, or reports it unknown.
-pub fn run(name: &str) -> std::process::ExitCode {
-    let Some((_, case)) = CASES.iter().find(|(candidate, _)| *candidate == name) else {
-        eprintln!("unknown_execute_api_case");
-        return std::process::ExitCode::FAILURE;
-    };
-    use_production_timing();
-    case();
-    println!("{}", json!({"case": name, "status": "passed"}));
-    println!("{}", json!({"check": "execute_api", "status": "passed"}));
-    std::process::ExitCode::SUCCESS
-}

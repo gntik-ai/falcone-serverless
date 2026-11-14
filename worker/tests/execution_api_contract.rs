@@ -4,13 +4,12 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-// Part of the service surface is reached only from `worker/src/server`, outside this crate.
-#[allow(dead_code, unused_imports)]
 #[path = "../src/api/mod.rs"]
 mod api;
 
 use api::{
-    Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,
+    CancelState, Class, Code, Malformed, Rejection, WorkerLimits, parse_cancel, parse_projection,
+    parse_request, parse_result, parse_update,
 };
 use jsonschema::{Draft, Registry, Validator};
 use serde_json::{Value, json};
@@ -1884,4 +1883,109 @@ fn a_304_result_with_a_body_is_malformed_in_schema_and_parser() {
     let (schema, verdict) = judge("result", &document, Some(&pinned));
     assert!(schema);
     assert!(matches!(verdict, Verdict::Accepted(_)));
+}
+
+/// What the execution service reads from an admitted request, a cancel and an update, with the
+/// values written out by hand from the fixtures.
+#[test]
+fn the_values_the_service_reads_are_those_of_the_messages() {
+    let request = parse_request(&bytes(&fixture("request/valid/wasm-no-base")))
+        .unwrap_or_else(|_| panic!("the valid request parses"));
+    assert_eq!(request.activation_id().as_str(), "act-synthetic-0001");
+    assert_eq!(request.attempt_id().as_str(), "att-synthetic-0001");
+    assert_eq!(request.invocation_key(), "inv-0000007");
+    assert_eq!(request.idempotency_key(), Some("idem-0000007"));
+    assert_eq!(request.tenant(), "tenant-synthetic-0001");
+    assert_eq!(request.workspace(), "ws-synthetic-0001");
+    let params: Value = serde_json::from_slice(&request.params_json()).unwrap();
+    assert_eq!(
+        params["__ow_path"],
+        "/v1/workspaces/ws-synthetic-0001/openapi"
+    );
+    let projection = request.projection();
+    assert_eq!(
+        projection.artifact_digest(),
+        "sha256:f1ddc5e62e3a9cab94e751a7e89ff4c5e02c1cee8aac0e31e91bcdfaa6eb5a25"
+    );
+    assert_eq!(
+        projection.declared_imports().collect::<Vec<_>>(),
+        ["falcone:host/http@0.2.0", "falcone:host/storage@0.2.0"]
+    );
+    let scopes: api::GrantScopes = projection.grant_scopes();
+    assert_eq!(scopes.hosts, ["api.example.test"]);
+    assert_eq!(scopes.prefixes, ["tenants/synthetic/"]);
+    assert!(scopes.topics.is_empty() && scopes.targets.is_empty());
+
+    let cancel = parse_cancel(&bytes(&fixture("cancel/valid/requested")))
+        .unwrap_or_else(|_| panic!("the cancel parses"));
+    assert_eq!(cancel.activation_id().as_str(), "act-synthetic-0001");
+    assert_eq!(cancel.attempt_id().as_str(), "att-synthetic-0001");
+    assert!(cancel.state() == CancelState::Requested);
+    let reply = cancel.reply(CancelState::Uncertain);
+    assert!(reply.state() == CancelState::Uncertain);
+    assert_eq!(reply.activation_id().as_str(), "act-synthetic-0001");
+    let update = parse_update(&bytes(&fixture("update/valid/checkpoint")))
+        .unwrap_or_else(|_| panic!("the update parses"));
+    assert_eq!(update.activation_id().as_str(), "act-synthetic-0001");
+    assert_eq!(update.attempt_id().as_str(), "att-synthetic-0001");
+    assert_eq!(update.sequence(), 4);
+}
+
+/// Every budget field is a limit the request cannot exceed and the worker's own ceilings cap, and
+/// a budget the worker cannot honour is refused rather than replaced.
+#[test]
+fn execution_limits_are_the_minimum_of_the_request_the_revision_and_the_worker() {
+    let request = parse_request(&bytes(&fixture("request/valid/wasm-no-base")))
+        .unwrap_or_else(|_| panic!("the valid request parses"));
+    let worker = |max_memory_bytes, compatibility_memory_bytes, wall_clock_ms| WorkerLimits {
+        max_memory_bytes,
+        compatibility_memory_bytes,
+        max_wall_clock: std::time::Duration::from_millis(wall_clock_ms),
+        engine_version: "49.0.5",
+    };
+    // The deadline is 30.250 s after 2026-11-11T12:00:00Z; admitted 10 s before it.
+    let deadline = 1_794_398_430_250;
+    let admitted = deadline - 10_000;
+    let roomy = worker(1 << 30, 1 << 30, 300_000);
+    let limits: api::ExecutionLimits = request.execution_limits(&roomy, admitted).unwrap();
+    assert_eq!(limits.memory_bytes, 67_108_864, "the revision budget");
+    assert_eq!(limits.fuel, 10_000_000);
+    assert_eq!(limits.max_host_calls, 1000);
+    assert_eq!(limits.timeout.as_millis(), 10_000, "the request deadline");
+    // Admitted long before the deadline: the projection's 30 s limit is the shortest.
+    let early = request
+        .execution_limits(&roomy, deadline - 100_000)
+        .unwrap();
+    assert_eq!(early.timeout.as_millis(), 30_000, "the projection limit");
+    // The worker's wall clock is shortest.
+    let short = request
+        .execution_limits(&worker(1 << 30, 1 << 30, 5_000), admitted)
+        .unwrap();
+    assert_eq!(short.timeout.as_millis(), 5_000, "the worker wall clock");
+    // No time left is no time, not a default.
+    let late = request.execution_limits(&roomy, deadline + 1).unwrap();
+    assert_eq!(late.timeout.as_millis(), 0);
+    // A budget above either memory ceiling is refused, never lowered silently.
+    for ceiling in [
+        worker(33_554_432, 1 << 30, 300_000),
+        worker(1 << 30, 33_554_432, 300_000),
+    ] {
+        let Err(refusal) = request.execution_limits(&ceiling, admitted) else {
+            panic!("a budget above the worker ceiling is refused");
+        };
+        assert!(refusal.code() == Code::InvalidRequest);
+        assert!(refusal.class() == Class::NonRetryable);
+        assert_eq!(refusal.status(), 400);
+    }
+    // A projection built for another engine is refused.
+    let mut other = worker(1 << 30, 1 << 30, 300_000);
+    other.engine_version = "48.0.0";
+    assert!(request.execution_limits(&other, admitted).is_err());
+}
+
+/// The log limits of the contract's result envelope.
+#[test]
+fn the_log_limits_are_those_of_the_contract() {
+    assert_eq!(api::MAX_LOG_LINES, 1000);
+    assert_eq!(api::MAX_LOG_LINE_CHARS, 8192);
 }

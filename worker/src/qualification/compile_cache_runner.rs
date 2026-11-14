@@ -9,6 +9,8 @@ mod execute_cases;
 mod execute_runner;
 #[cfg(feature = "qualification")]
 mod execution_api;
+#[cfg(feature = "qualification")]
+mod execution_api_runner;
 mod limits_cases;
 mod limits_runner;
 pub use falcone_serverless_worker::host;
@@ -136,7 +138,7 @@ fn main() -> std::process::ExitCode {
         }
         #[cfg(feature = "qualification")]
         Some(flag) if flag.starts_with("--execute-api=") => {
-            return execution_api::run(&flag[14..]);
+            return execution_api_runner::run(&flag[14..]);
         }
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),

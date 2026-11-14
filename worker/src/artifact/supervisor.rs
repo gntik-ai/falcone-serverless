@@ -79,8 +79,13 @@ impl Supervisor {
         cancelled: &AtomicBool,
     ) -> Result<(CacheKey, Vec<u8>), Error> {
         let validated = validate(bytes, limits.input_bytes)?;
-        let (child, result) = self.spawn_compile(&validated, limits, cancelled)?;
-        self.last_child = Some(child);
+        let mut reaped = None;
+        let result = self.compile_validated_keep(&validated, limits, cancelled, &mut |child| {
+            reaped = Some(child);
+        });
+        if let Some(child) = reaped {
+            self.keep_child(child);
+        }
         result
     }
 

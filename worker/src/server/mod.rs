@@ -338,6 +338,29 @@ struct Shared {
     registry: Arc<Registry>,
     executing: Arc<Slots>,
     jobs: Jobs,
+    #[cfg(any(test, feature = "qualification"))]
+    marks: Marks,
+}
+
+/// Test and qualification builds only: the server's own clock readings for the last execution,
+/// so a termination bound is measured on the server, apart from any transport delay.
+#[cfg(any(test, feature = "qualification"))]
+#[derive(Default)]
+struct Marks {
+    until: Mutex<Option<Instant>>,
+    cancel: Mutex<Option<Instant>>,
+    released: Mutex<Option<Instant>>,
+}
+
+#[cfg(any(test, feature = "qualification"))]
+impl Marks {
+    fn set(mark: &Mutex<Option<Instant>>, at: Instant) {
+        *mark.lock().unwrap_or_else(|e| e.into_inner()) = Some(at);
+    }
+
+    fn get(mark: &Mutex<Option<Instant>>) -> Option<Instant> {
+        *mark.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 pub fn unix_now_millis() -> u64 {
@@ -392,6 +415,8 @@ impl Server {
             jobs: Jobs {
                 slots: Slots::new(2 * concurrency + 2),
             },
+            #[cfg(any(test, feature = "qualification"))]
+            marks: Marks::default(),
             settings,
         });
         let stop = Arc::new(AtomicBool::new(false));
@@ -442,6 +467,37 @@ impl Server {
 
     pub fn cache_dir(&self) -> &std::path::Path {
         &self.shared.settings.cache_dir
+    }
+
+    /// Test and qualification builds only: forgets the readings of earlier executions.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn reset_marks(&self) {
+        let marks = &self.shared.marks;
+        for mark in [&marks.until, &marks.cancel, &marks.released] {
+            *mark.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    /// Test and qualification builds only: how long after its absolute deadline (`until`) the
+    /// last execution released its slot, by the server's own clock. `None` until released.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn release_after_deadline(&self) -> Option<Duration> {
+        let (until, released) = (
+            Marks::get(&self.shared.marks.until)?,
+            Marks::get(&self.shared.marks.released)?,
+        );
+        Some(released.saturating_duration_since(until))
+    }
+
+    /// Test and qualification builds only: how long after the last accepted cancel the slot was
+    /// released, by the server's own clock. `None` until both have happened.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn release_after_cancel(&self) -> Option<Duration> {
+        let (cancel, released) = (
+            Marks::get(&self.shared.marks.cancel)?,
+            Marks::get(&self.shared.marks.released)?,
+        );
+        Some(released.saturating_duration_since(cancel))
     }
 
     /// Test and qualification builds only: artifacts validated by this server's cache.
@@ -597,6 +653,8 @@ fn control(shared: &Shared, operation: Control, body: &[u8]) -> (u16, Vec<u8>) {
             if message.state() != CancelState::Requested {
                 return malformed();
             }
+            #[cfg(any(test, feature = "qualification"))]
+            Marks::set(&shared.marks.cancel, Instant::now());
             match shared.registry.cancel(
                 message.activation_id().as_str(),
                 message.attempt_id().as_str(),

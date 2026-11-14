@@ -10,7 +10,7 @@ compile child, with real guests; none uses a mock of the service.
   `worker/tests/execution_api_contract.rs`).
 - **Restricted pod** (the shared cluster, gated by `FS_TEST_CLUSTER`):
   `worker/tests/cluster_execute_api.rs` runs each case in its own pod of the qualification image in
-  an `fs-test-*` namespace that it creates and deletes (Pod Security `restricted`, seccomp
+  an `fs-test-run01-<id>` namespace that it creates and deletes (Pod Security `restricted`, seccomp
   `RuntimeDefault`, read-only root filesystem, arbitrary non-root UID, no service account token),
   with the **documented production deadlines** (5 s execute, 2 s control) instead of the scaled
   ones. The qualification image is built from `worker/qualification/Containerfile` with
@@ -39,14 +39,22 @@ passes when the pod succeeds and prints `{"check":"execute_api","status":"passed
 | `saturation-control` | `saturation_control` | A control listener full of stalled connections does not affect running executions, and recovers when its deadlines close them. |
 | `admission-order` | `admission_order` | With every slot busy: a complete non-wasm request still gets `409`; a wasm request, or one whose body has not arrived, gets `503 busy` without its body being read. |
 | `update-cancel` | `update_cancel` | Unknown pairs `404`, malformed `400`, a stale update `409`. |
-| `http` | `http` | Oversized head, oversized request and oversized action body are refused; a silent connection, a dripped head and a stalled body are closed within their bounds; a normal execute and a cancel succeed after each. |
+| `http` | `http` | Execute listener: oversized head, oversized request and oversized action body are refused; a silent connection, a dripped head and a stalled body are closed within their bounds; a normal execute and a cancel succeed after each. |
+| `control-http` | `control_http` | Control listener: the same head and transfer bounds, and its own 64 KiB body ceiling (a body at the ceiling is read and judged, one byte more is refused before it is read); a normal execute and a cancel succeed after each. |
 | `slow-reader` | `slow_reader` | A reader taking a maximum-size response one byte at a time is cut off at the absolute response deadline; with `concurrency` such readers a normal execute and a cancel still succeed. |
 | `timeout-selection` | `timeout_selection` | The request deadline, the projection limit and the worker wall clock each win when shortest: `504` with attribution and identity, elapsed within tolerance, capacity recovered. |
 | `budgets` | `budgets` | 1 MiB vs 4 MiB memory, a fuel loop, N+1 host calls with exactly N seen, and an above-ceiling refusal before compile. |
+| `budget-entries` | `budget_entries` | Storage open and drop callbacks, and calls the authorization refuses, count against `max_host_calls`: with the key granted a budget of 4 fits open, drop, open, drop and 3 fails on the second drop; with the key refused a budget of 2 fits and 1 fails. None reaches the platform. |
 | `deadline` | `deadline` | Setup crossing `until`, or instantiation ending after it, never starts the guest; a blocked host call ends at `until`; a late host call is refused unseen; the deadline outranks the host-call budget. |
-| `cache-stalls` | `cache_stalls` | Stalls during cache read, compilation and publication: `timeout`, slot released within the budget, next execute admitted, no partial entry. |
-| `validation` | `validation` | A cold artifact near 64 MiB cancelled or timed out during validation: `cancelled` or `timeout`, slot released within 500 ms, nothing published. |
+| `cache-stalls` | `cache_stalls` | A stall during cache read, compilation or publication, ended by the deadline and by cancel: `timeout` or `cancelled`, slot released within 500 ms of `until` or of the cancel by the server's own clock, the next execute admitted and completed while the abandoned operation is still stalled, and afterwards only that execute's complete entry in the cache. |
+| `validation` | `validation` | A cold artifact near 64 MiB cancelled or timed out during validation: `cancelled` or `timeout`, slot released within 500 ms (server clock), the next execute admitted while validation is still stalled, nothing published. |
 | (production image) | `production_image_ships_the_compile_child` | `falcone-serverless-worker --check-install` in the **production** image finds and starts `artifact-compile-child` beside the worker. Needs `FS_TEST_WORKER_IMAGE`. |
+| (production image) | `production_image_serves_the_execution_api` | One restricted pod, three containers on a scratch volume: the qualification image writes the worker configuration and the artifact (`production-prepare`), the **production** image serves them (`serve`, a native sidecar), and the qualification image (`production-client`) executes a wasm revision (legacy envelope, pinned runtime identity, no credential string), gets `409` for a non-wasm revision, and sees each listener refuse the other's operations. Needs both images. |
+
+Termination bounds (a cancel, an expired deadline) are measured on the server: it records its own
+clock at the accepted cancel, at the absolute deadline and at the slot release, and the cases
+assert the 500 ms budget on those readings with no allowance for transport. The client-side
+elapsed time is asserted separately, with a one-second allowance for scheduling.
 
 ## Running
 

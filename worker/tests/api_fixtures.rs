@@ -25,5 +25,5 @@ fn api_fixture_binaries_match_their_wat_oracles() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 7);
+    assert_eq!(checked, 8);
 }
