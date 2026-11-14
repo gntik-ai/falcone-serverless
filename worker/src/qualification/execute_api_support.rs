@@ -31,6 +31,7 @@ pub fn fixture(name: &str) -> Vec<u8> {
         "api-log-four" => &include_bytes!("execute_fixtures/api-log-four.wasm")[..],
         "api-log-big" => &include_bytes!("execute_fixtures/api-log-big.wasm")[..],
         "api-probe" => &include_bytes!("execute_fixtures/api-probe.wasm")[..],
+        "api-storage" => &include_bytes!("execute_fixtures/api-storage.wasm")[..],
         "api-publish" => &include_bytes!("execute_fixtures/api-publish.wasm")[..],
         "wasi-import" => &include_bytes!("execute_fixtures/wasi-import.wasm")[..],
         _ => panic!("unknown fixture {name}"),
@@ -357,6 +358,8 @@ pub struct Spec {
     pub note: Option<String>,
     /// Event topics the revision is granted.
     pub topics: Vec<String>,
+    /// Storage prefixes the revision is granted.
+    pub prefixes: Vec<String>,
 }
 
 static IDS: AtomicUsize = AtomicUsize::new(1);
@@ -379,6 +382,7 @@ impl Spec {
             tenant: "tenant-local".into(),
             note: None,
             topics: Vec::new(),
+            prefixes: Vec::new(),
         }
     }
 
@@ -442,18 +446,29 @@ impl Spec {
                     "timeout_ms": self.timeout_ms,
                     "max_host_calls": self.max_host_calls
                 },
-                "grants": if self.topics.is_empty() {
-                    json!([])
-                } else {
-                    json!([{
-                        "family": "event",
-                        "interface": "falcone:host/events@0.2.0",
-                        "scope": {"topics": self.topics}
-                    }])
-                }
+                "grants": self.grants()
             },
             "params": params
         })
+    }
+
+    fn grants(&self) -> Value {
+        let mut grants = Vec::new();
+        if !self.topics.is_empty() {
+            grants.push(json!({
+                "family": "event",
+                "interface": "falcone:host/events@0.2.0",
+                "scope": {"topics": self.topics}
+            }));
+        }
+        if !self.prefixes.is_empty() {
+            grants.push(json!({
+                "family": "storage",
+                "interface": "falcone:host/storage@0.2.0",
+                "scope": {"prefixes": self.prefixes}
+            }));
+        }
+        Value::Array(grants)
     }
 
     pub fn bytes(&self) -> Vec<u8> {

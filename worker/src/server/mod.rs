@@ -37,11 +37,6 @@ use std::time::{Duration, Instant};
 /// blocked inside a host call may not, which RUN-02's host-call deadlines close.
 pub const CANCEL_WAIT: Duration = Duration::from_millis(1000);
 
-/// With every slot busy, how long an execute body that is still arriving is collected, so
-/// that a complete non-wasm request gets its `409` however it was segmented. Bytes that
-/// already arrived are taken at once; a stalled body is not waited for beyond this.
-pub const BUSY_BODY_GRACE: Duration = Duration::from_millis(100);
-
 /// What a server needs besides its platform.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -438,13 +433,12 @@ fn execute(
             Reason::BodyTooLarge,
         )));
     }
-    // With every slot busy the body is not read. The one exception is a body that already
-    // arrived with the headers, or is still arriving behind them for at most
-    // `BUSY_BODY_GRACE`: a refusal that does not depend on capacity (the runtime mode)
-    // still takes precedence over `busy`. A body that stalls costs one admission
-    // connection for the grace, never a slot.
+    // With every slot busy the body is not read: not waited for, not collected. The one
+    // thing still looked at is a body that already arrived with the headers (it is in the
+    // head's buffer, nothing is read from the socket for it), because a refusal that does
+    // not depend on capacity (the runtime mode) takes precedence over `busy`.
     if services.running() >= services.config.concurrency {
-        if http::collect_arriving(stream, head, length, BUSY_BODY_GRACE)
+        if head.buffered.len() >= length
             && let Err(Rejection::Refused(refused)) = parse_request(&head.buffered[..length])
             && refused.refusal.code() == Code::RuntimeModeNotSupported
         {

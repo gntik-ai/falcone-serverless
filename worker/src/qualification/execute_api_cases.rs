@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const LOGGING: &str = "falcone:host/logging@0.2.0";
 const CONTEXT: &str = "falcone:host/invocation-context@0.2.0";
 const PROGRESS: &str = "falcone:host/progress@0.2.0";
+const STORAGE: &str = "falcone:host/storage@0.2.0";
 
 fn execute(cluster: &Cluster, spec: &Spec) -> Answer {
     post(cluster.execute(), "/v1/execute", &spec.bytes())
@@ -272,6 +273,35 @@ pub fn the_call_after_max_host_calls_is_refused_and_the_host_saw_exactly_n() {
     assert_eq!(execute(&cluster, &spec).status, 200);
 }
 
+pub fn storage_open_drop_and_denied_calls_count_against_max_host_calls() {
+    let cluster = start(1);
+    let digest = cluster.platform.add(fixture("api-storage"));
+    let mut spec = Spec::new(digest).imports(&[STORAGE]);
+    spec.prefixes = vec!["granted/".into()];
+    // The guest enters the host three times and none of them reaches the binding layer: it
+    // opens a granted object, drops the handle, and opens a key outside its grant (denied).
+    // Each entry counts, so room for exactly three runs it and room for two does not: take
+    // any one of the three out of the count and the second half of this case stays green.
+    spec.max_host_calls = 3;
+    assert_eq!(execute(&cluster, &spec).status, 200);
+    for (attempt, max_host_calls) in [2, 1].into_iter().enumerate() {
+        spec.activation = format!("act-local-storage-{attempt}");
+        spec.max_host_calls = max_host_calls;
+        let answer = execute(&cluster, &spec);
+        assert_eq!(answer.status, 500, "max_host_calls {max_host_calls}");
+        assert_eq!(
+            answer.failure(),
+            (
+                "execution_failed".into(),
+                "host_call_budget_exceeded".into()
+            ),
+            "max_host_calls {max_host_calls}"
+        );
+    }
+    // Open, drop and the denied call are decided inside the host layer, before the bindings.
+    assert_eq!(host_calls(&cluster), 0);
+}
+
 // --- admission order and listeners ------------------------------------------------------------
 
 /// Runs `spin` guests until `count` are busy; returns their connections' handles and specs.
@@ -294,6 +324,9 @@ fn release(cluster: &Cluster, busy: Vec<(Spec, std::thread::JoinHandle<Answer>)>
             (answer.status, answer.failure().0.as_str()),
             (499, "cancelled")
         );
+        // The guest had started: its own first log line is in the cancelled result, which
+        // is what the production-image qualification relies on to prove the same from outside.
+        assert_eq!(answer.json()["logs"], json!(["Info: hello"]));
     }
 }
 
@@ -307,6 +340,41 @@ pub fn with_every_slot_busy_the_body_is_not_read_and_the_answer_is_busy() {
     let answer = read_answer(&mut stream).expect("busy is answered without the body");
     assert_eq!(answer.status, 503);
     assert_eq!(answer.failure(), ("busy".into(), "no_capacity".into()));
+    release(&cluster, busy);
+}
+
+pub fn with_every_slot_busy_the_busy_answer_does_not_consume_a_large_body() {
+    let cluster = start(1);
+    let busy = saturate(&cluster, 1);
+    // A request at the largest body the listener accepts, sent whole by a writer that stops
+    // when the socket stops taking bytes. A server that read the body before answering
+    // `busy` would take all of it; one that does not leaves most of it unsent, because the
+    // kernel buffers hold far less than eight mebibytes.
+    let total = 8 * 1024 * 1024;
+    let mut stream = connect(cluster.execute());
+    let mut writer = stream.try_clone().unwrap();
+    writer.write_all(&head("/v1/execute", total)).unwrap();
+    let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = sent.clone();
+    let body = std::thread::spawn(move || {
+        let chunk = vec![b'x'; 16 * 1024];
+        for _ in 0..total / chunk.len() {
+            if writer.write_all(&chunk).is_err() {
+                break;
+            }
+            counter.fetch_add(chunk.len(), Ordering::SeqCst);
+        }
+    });
+    let answer = read_answer(&mut stream).expect("busy is answered without the body");
+    assert_eq!(answer.status, 503);
+    assert_eq!(answer.failure(), ("busy".into(), "no_capacity".into()));
+    // Whatever the drain after the answer took, the body was not read to its end.
+    assert!(
+        sent.load(Ordering::SeqCst) < total,
+        "the whole {total}-byte body was taken before the busy answer"
+    );
+    drop(stream);
+    body.join().unwrap();
     release(&cluster, busy);
 }
 
@@ -331,11 +399,15 @@ pub fn with_every_slot_busy_a_non_wasm_request_with_its_body_buffered_still_gets
     let body = spec.bytes();
     let mut message = head("/v1/execute", body.len());
     message.extend_from_slice(&body);
+    assert!(
+        message.len() < 16 * 1024,
+        "the request must fit the head reader's first read"
+    );
     stream.write_all(&message).unwrap();
     refused(read_answer(&mut stream).unwrap());
 
-    // A complete request well past the head reader's first read: the body is queued on the
-    // socket behind the headers, not in the head's buffer.
+    // A body that did not arrive with the headers is not read for the sake of its mode:
+    // the same request, whole but too large for the head reader's first read, is `busy`.
     spec.body_chars = 100_000;
     let body = spec.bytes();
     assert!(body.len() > 100_000);
@@ -343,16 +415,9 @@ pub fn with_every_slot_busy_a_non_wasm_request_with_its_body_buffered_still_gets
     let mut message = head("/v1/execute", body.len());
     message.extend_from_slice(&body);
     stream.write_all(&message).unwrap();
-    refused(read_answer(&mut stream).unwrap());
-
-    // The same request delivered in fragments, each its own segment.
-    let mut stream = connect(cluster.execute());
-    stream.set_nodelay(true).unwrap();
-    stream.write_all(&head("/v1/execute", body.len())).unwrap();
-    for fragment in body.chunks(1500) {
-        stream.write_all(fragment).unwrap();
-    }
-    refused(read_answer(&mut stream).unwrap());
+    let answer = read_answer(&mut stream).unwrap();
+    assert_eq!(answer.status, 503);
+    assert_eq!(answer.failure(), ("busy".into(), "no_capacity".into()));
 
     // A wasm request in the same position is merely busy.
     let wasm = Spec::new(digest);
@@ -1314,6 +1379,41 @@ pub fn host_a_host_counts_every_entry_against_max_host_calls() {
     let _ = std::fs::remove_dir_all(directory);
 }
 
+pub fn host_storage_open_drop_and_denied_entries_each_count_against_max_host_calls() {
+    let (loaded, directory) = host_loaded("api-storage");
+    let counted = |max_host_calls: u64| {
+        let probe = Arc::new(Probe::default());
+        let context = host::Context {
+            grants: host::Grants {
+                prefixes: vec!["granted/".into()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut host = host::Host::new(context, Arc::new(ProbeBindings(probe.clone())));
+        host.set_budgets(u64::MAX, max_host_calls);
+        let until = Instant::now() + Duration::from_secs(30);
+        let execution = host::execute_until(&loaded, host, b"{}", until);
+        assert_eq!(probe.host_calls.load(Ordering::SeqCst), 0);
+        execution
+    };
+    // Open, drop and a denied open are three entries; only the third budget lets all pass.
+    assert_eq!(counted(3).outcome, InvocationOutcome::Success);
+    for max_host_calls in [2, 1] {
+        let execution = counted(max_host_calls);
+        assert_eq!(
+            execution.outcome,
+            InvocationOutcome::HostCallBudget,
+            "max_host_calls {max_host_calls}"
+        );
+        assert_eq!(
+            execution.result.unwrap_err().code,
+            "host_call_budget_exceeded"
+        );
+    }
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 /// Every case, by name, for the pod runner and the registration check.
 pub const CASES: &[(&str, fn())] = &[
     (
@@ -1369,8 +1469,16 @@ pub const CASES: &[(&str, fn())] = &[
         the_call_after_max_host_calls_is_refused_and_the_host_saw_exactly_n,
     ),
     (
+        "storage_open_drop_and_denied_calls_count_against_max_host_calls",
+        storage_open_drop_and_denied_calls_count_against_max_host_calls,
+    ),
+    (
         "with_every_slot_busy_the_body_is_not_read_and_the_answer_is_busy",
         with_every_slot_busy_the_body_is_not_read_and_the_answer_is_busy,
+    ),
+    (
+        "with_every_slot_busy_the_busy_answer_does_not_consume_a_large_body",
+        with_every_slot_busy_the_busy_answer_does_not_consume_a_large_body,
     ),
     (
         "with_every_slot_busy_a_non_wasm_request_with_its_body_buffered_still_gets_409",
@@ -1543,6 +1651,10 @@ pub const CASES: &[(&str, fn())] = &[
     (
         "host_the_handler_is_not_invoked_when_until_passes_after_instantiation",
         host_the_handler_is_not_invoked_when_until_passes_after_instantiation,
+    ),
+    (
+        "host_storage_open_drop_and_denied_entries_each_count_against_max_host_calls",
+        host_storage_open_drop_and_denied_entries_each_count_against_max_host_calls,
     ),
     (
         "host_a_host_counts_every_entry_against_max_host_calls",

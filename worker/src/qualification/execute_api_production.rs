@@ -213,9 +213,25 @@ fn stalled_in_body() -> std::net::TcpStream {
     stream
 }
 
-/// With the execute listener full of stalled connections and every slot running a guest, a
-/// cancel on the control listener takes effect and one more execute is busy.
-fn cancel_succeeds_under_full_load() {
+/// The first thing the spinning guest does is log this line. A result carries it only if the
+/// guest ran, so it is the proof from outside that a cancelled execution had started its guest.
+const GUEST_STARTED_LINE: &str = "Info: hello";
+
+fn guest_started(answer: &Answer) -> bool {
+    answer.json()["logs"]
+        .as_array()
+        .is_some_and(|lines| lines.iter().any(|line| line == GUEST_STARTED_LINE))
+}
+
+/// One pass of the saturation scenario. Returns whether every cancelled execution proved,
+/// by its own log line, that its guest had started when the cancel took effect.
+///
+/// The production image has no server-side event to wait on, and a heartbeat acknowledges an
+/// execution that is still in setup, so the guest's start cannot be awaited from outside.
+/// What can be done from outside is to prove it afterwards: a pass counts only if the
+/// cancelled guests logged, and `cancel_succeeds_under_full_load` repeats a pass whose cancel
+/// landed during setup (compiled code is cached after the first pass, which makes that rare).
+fn saturated_pass() -> bool {
     // Stalled connections first, while slots are free: the listener accepts in arrival
     // order, so by the time the guests' connections are served these are held. Header
     // stalls never complete a head; body stalls are proven by their `100 Continue`.
@@ -242,22 +258,45 @@ fn cancel_succeeds_under_full_load() {
     let begun = Instant::now();
     for (spec, _) in &busy {
         while !running(spec) {
-            assert!(begun.elapsed() < SAFETY, "the guest never started");
+            assert!(begun.elapsed() < SAFETY, "the execution was never admitted");
             std::thread::yield_now();
         }
     }
     let more = run(&Spec::new(digest_of("api-ok")));
     assert_eq!((more.status, more.failure().0.as_str()), (503, "busy"));
+    let mut proven = true;
     for (spec, handle) in busy {
+        // The cancel waits at most `CANCEL_WAIT` for the execution to end, and a guest that
+        // observes it ends well inside that.
+        let cancelled = Instant::now();
         assert_eq!(cancel_of(&spec), "acknowledged");
+        assert!(
+            cancelled.elapsed() < falcone_serverless_worker::server::CANCEL_WAIT,
+            "the cancel took {:?}",
+            cancelled.elapsed()
+        );
         let answer = handle.join().unwrap();
         assert_eq!(
             (answer.status, answer.failure().0.as_str()),
             (499, "cancelled")
         );
+        proven &= guest_started(&answer);
     }
     drop(stalled);
     recovered();
+    proven
+}
+
+/// With the execute listener full of stalled connections and every slot running a guest, a
+/// cancel on the control listener takes effect and one more execute is busy.
+fn cancel_succeeds_under_full_load() {
+    const PASSES: usize = 20;
+    for _ in 0..PASSES {
+        if saturated_pass() {
+            return;
+        }
+    }
+    panic!("no pass cancelled guests that had started, in {PASSES} passes");
 }
 
 fn http_ceilings_refuse_without_running_a_guest() {

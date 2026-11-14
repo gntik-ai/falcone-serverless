@@ -36,7 +36,9 @@ tests!(
     a_memory_budget_above_the_worker_ceiling_is_refused_before_compile,
     a_small_fuel_budget_stops_a_looping_guest_well_before_the_timeout,
     the_call_after_max_host_calls_is_refused_and_the_host_saw_exactly_n,
+    storage_open_drop_and_denied_calls_count_against_max_host_calls,
     with_every_slot_busy_the_body_is_not_read_and_the_answer_is_busy,
+    with_every_slot_busy_the_busy_answer_does_not_consume_a_large_body,
     with_every_slot_busy_a_non_wasm_request_with_its_body_buffered_still_gets_409,
     each_listener_refuses_the_other_listeners_operations,
     a_cancel_succeeds_with_all_slots_busy_and_the_execute_listener_full_of_stalled_connections,
@@ -80,6 +82,7 @@ tests!(
     redaction_past_the_secret_budget_the_result_is_only_the_marker,
     redaction_past_the_match_budget_the_result_is_only_the_marker_and_quickly,
     host_the_handler_is_not_invoked_when_until_passes_after_instantiation,
+    host_storage_open_drop_and_denied_entries_each_count_against_max_host_calls,
     host_a_host_counts_every_entry_against_max_host_calls,
 );
 
