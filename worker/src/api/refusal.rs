@@ -1,8 +1,10 @@
 //! Failure codes, their classes, and the refusal envelope.
 //!
 //! The three `GW_` codes are named and meant exactly as in ctr-functions-api v1 and are only
-//! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`
-//! and `request_too_large`. Nothing in this module reads a request field.
+//! referenced here. The worker-only codes are the refusals `runtime_mode_not_supported`,
+//! `invalid_request`, `request_too_large`, `busy`, `undeclared_import`, `not_found` and
+//! `stale_update`, and the outcomes `execution_failed`, `timeout` and `cancelled`. Nothing in
+//! this module reads a request field.
 
 use super::types::{Count, Text};
 use super::wire::unit_debug;
@@ -10,8 +12,8 @@ use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// How a caller may react to a failure. Every v1 code is `non_retryable`; later revisions add
-/// codes of the other classes without changing these names.
+/// How a caller may react to a failure. Only `busy` is `retryable`, because nothing ran; every
+/// other v1 code is `non_retryable`.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Class {
@@ -35,6 +37,20 @@ pub enum Code {
     InvalidRequest,
     #[serde(rename = "request_too_large")]
     RequestTooLarge,
+    #[serde(rename = "execution_failed")]
+    ExecutionFailed,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "busy")]
+    Busy,
+    #[serde(rename = "undeclared_import")]
+    UndeclaredImport,
+    #[serde(rename = "not_found")]
+    NotFound,
+    #[serde(rename = "stale_update")]
+    StaleUpdate,
 }
 unit_debug!(
     Code: OciNotAuthorized,
@@ -43,6 +59,13 @@ unit_debug!(
     RuntimeModeNotSupported,
     InvalidRequest,
     RequestTooLarge,
+    ExecutionFailed,
+    Timeout,
+    Cancelled,
+    Busy,
+    UndeclaredImport,
+    NotFound,
+    StaleUpdate,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +78,27 @@ pub enum Reason {
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    MalformedRequest,
+    BudgetAboveWorkerCeiling,
+    EngineVersionMismatch,
+    DuplicateExecution,
+    HandlerFailed,
+    InvalidHandlerResult,
+    GuestTrapped,
+    MemoryBudgetExceeded,
+    FuelExhausted,
+    HostCallBudgetExceeded,
+    BufferLimitExceeded,
+    ArtifactRejected,
+    ArtifactUnavailable,
+    SetupFailed,
+    OutcomeUncertain,
+    DeadlineExceeded,
+    CancelRequested,
+    AtCapacity,
+    ImportNotDeclared,
+    ExecutionNotFound,
+    SequenceNotNewer,
 }
 unit_debug!(
     Reason: OciNotAuthorized,
@@ -64,6 +108,27 @@ unit_debug!(
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    MalformedRequest,
+    BudgetAboveWorkerCeiling,
+    EngineVersionMismatch,
+    DuplicateExecution,
+    HandlerFailed,
+    InvalidHandlerResult,
+    GuestTrapped,
+    MemoryBudgetExceeded,
+    FuelExhausted,
+    HostCallBudgetExceeded,
+    BufferLimitExceeded,
+    ArtifactRejected,
+    ArtifactUnavailable,
+    SetupFailed,
+    OutcomeUncertain,
+    DeadlineExceeded,
+    CancelRequested,
+    AtCapacity,
+    ImportNotDeclared,
+    ExecutionNotFound,
+    SequenceNotNewer,
 );
 
 impl Code {
@@ -71,8 +136,15 @@ impl Code {
         match self {
             Self::OciNotAuthorized => 403,
             Self::BaseDisabled | Self::BaseMismatch | Self::RuntimeModeNotSupported => 409,
+            Self::StaleUpdate => 409,
             Self::InvalidRequest => 400,
             Self::RequestTooLarge => 413,
+            Self::ExecutionFailed => 500,
+            Self::Timeout => 504,
+            Self::Cancelled => 499,
+            Self::Busy => 503,
+            Self::UndeclaredImport => 422,
+            Self::NotFound => 404,
         }
     }
 
@@ -86,12 +158,25 @@ impl Code {
             }
             Self::InvalidRequest => "The request is malformed.",
             Self::RequestTooLarge => "The request body exceeds the size budget.",
+            Self::ExecutionFailed => "The execution failed.",
+            Self::Timeout => "The execution exceeded its time limit.",
+            Self::Cancelled => "The execution was cancelled.",
+            Self::Busy => "The worker has no free execution capacity.",
+            Self::UndeclaredImport => {
+                "The component imports an interface the revision does not declare."
+            }
+            Self::NotFound => "Nothing matches the request on this worker.",
+            Self::StaleUpdate => "The update is not newer than the last one accepted.",
         }
     }
 
-    /// Retries never change the class: a retried attempt of a non-retryable code stays so.
+    /// Retries never change the class: a retried attempt of a code keeps it. Only `busy` is
+    /// retryable, because nothing ran.
     pub(crate) fn class(self) -> Class {
-        Class::NonRetryable
+        match self {
+            Self::Busy => Class::Retryable,
+            _ => Class::NonRetryable,
+        }
     }
 
     fn allows(self, reason: Reason) -> bool {
@@ -103,9 +188,34 @@ impl Code {
                 | (Self::RuntimeModeNotSupported, Reason::RuntimeModeNotWasm)
                 | (
                     Self::InvalidRequest,
-                    Reason::MissingPath | Reason::NonJsonBody
+                    Reason::MissingPath
+                        | Reason::NonJsonBody
+                        | Reason::MalformedRequest
+                        | Reason::BudgetAboveWorkerCeiling
+                        | Reason::EngineVersionMismatch
+                        | Reason::DuplicateExecution
                 )
                 | (Self::RequestTooLarge, Reason::BodyTooLarge)
+                | (
+                    Self::ExecutionFailed,
+                    Reason::HandlerFailed
+                        | Reason::InvalidHandlerResult
+                        | Reason::GuestTrapped
+                        | Reason::MemoryBudgetExceeded
+                        | Reason::FuelExhausted
+                        | Reason::HostCallBudgetExceeded
+                        | Reason::BufferLimitExceeded
+                        | Reason::ArtifactRejected
+                        | Reason::ArtifactUnavailable
+                        | Reason::SetupFailed
+                        | Reason::OutcomeUncertain
+                )
+                | (Self::Timeout, Reason::DeadlineExceeded)
+                | (Self::Cancelled, Reason::CancelRequested)
+                | (Self::Busy, Reason::AtCapacity)
+                | (Self::UndeclaredImport, Reason::ImportNotDeclared)
+                | (Self::NotFound, Reason::ExecutionNotFound)
+                | (Self::StaleUpdate, Reason::SequenceNotNewer)
         )
     }
 }
@@ -128,7 +238,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn new(code: Code, reason: Reason) -> Self {
+    pub fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
             status: Count::from(code.status()),
@@ -153,6 +263,15 @@ impl Refusal {
 
     pub(crate) fn class(&self) -> Class {
         self.code.class()
+    }
+
+    /// The HTTP status the failure carries.
+    pub fn status(&self) -> u16 {
+        self.code.status()
+    }
+
+    pub fn code(&self) -> Code {
+        self.code
     }
 }
 

@@ -313,6 +313,7 @@
   },
   "worker": {
     "dependencies": {
+      "aho-corasick": "=1.1.5",
       "ring": "=0.17.14",
       "rustix": {
         "features": [
@@ -347,6 +348,12 @@
       }
     },
     "dev-dependencies": {
+      "falcone-serverless-worker": {
+        "features": [
+          "qualification"
+        ],
+        "path": "."
+      },
       "jsonschema": {
         "default-features": false,
         "version": "0.59.0"

@@ -7,6 +7,8 @@ mod compile_cache_fixtures;
 mod counting_alloc;
 mod execute_cases;
 mod execute_runner;
+#[cfg(feature = "qualification")]
+mod execution_api;
 mod limits_cases;
 mod limits_runner;
 pub use falcone_serverless_worker::host;
@@ -131,6 +133,10 @@ fn main() -> std::process::ExitCode {
         Some("--guest-execute-allocation") => return execute_runner::allocation_main(),
         Some(flag) if flag.starts_with("--guest-execute=") => {
             return execute_runner::run(&flag[16..]);
+        }
+        #[cfg(feature = "qualification")]
+        Some(flag) if flag.starts_with("--execute-api=") => {
+            return execution_api::run(&flag[14..]);
         }
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),

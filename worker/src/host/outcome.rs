@@ -7,6 +7,8 @@ pub enum InvocationOutcome {
     Success,
     GuestInterrupted,
     GuestMemoryLimit,
+    FuelExhausted,
+    HostCallBudget,
     BufferLimit,
     Cancelled,
     Uncertain,
@@ -21,16 +23,21 @@ pub fn classify(host: &Host, result: Result<(), &engine::Error>) -> InvocationOu
     if host.memory_limited() {
         return InvocationOutcome::GuestMemoryLimit;
     }
-    if result.is_err_and(|error| {
-        matches!(
-            error.downcast_ref::<engine::Trap>(),
-            Some(engine::Trap::Interrupt)
-        )
-    }) {
+    // The deadline outranks every budget: a call refused because it started at or after the
+    // deadline is a timeout even when it would also have been over the host-call budget.
+    let trap =
+        |kind| result.is_err_and(|error| error.downcast_ref::<engine::Trap>() == Some(&kind));
+    if trap(engine::Trap::Interrupt) || host.deadline_refused() {
         return InvocationOutcome::GuestInterrupted;
     }
     if host.cancelled_host_call() {
         return InvocationOutcome::Cancelled;
+    }
+    if trap(engine::Trap::OutOfFuel) {
+        return InvocationOutcome::FuelExhausted;
+    }
+    if host.host_call_budget_exceeded() {
+        return InvocationOutcome::HostCallBudget;
     }
     if host.buffer_limited() {
         return InvocationOutcome::BufferLimit;

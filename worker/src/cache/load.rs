@@ -51,7 +51,11 @@ pub enum LoadEvent {
 macro_rules! witness {
     ($cache:expr, $event:expr) => {
         #[cfg(test)]
-        $cache.events.borrow_mut().push($event);
+        $cache
+            .events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push($event);
     };
 }
 

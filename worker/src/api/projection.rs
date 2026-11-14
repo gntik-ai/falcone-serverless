@@ -1,6 +1,6 @@
 //! The pinned revision projection: everything the worker needs to run one revision.
 
-use super::grants::{Grant, GrantVersion, all_valid};
+use super::grants::{Grant, GrantScopes, GrantVersion, all_valid};
 use super::types::{
     CatalogId, CatalogVersion, Digest, Id, InterfaceVersion, Positive, RuntimeMode, Text,
 };
@@ -77,7 +77,48 @@ pub struct Projection {
 }
 redacted!(Projection);
 
+impl Budgets {
+    pub fn fuel(&self) -> u64 {
+        self.fuel.get()
+    }
+    pub fn memory_bytes(&self) -> u64 {
+        self.memory_bytes.get()
+    }
+    pub fn timeout_ms(&self) -> u64 {
+        self.timeout_ms.get()
+    }
+    pub fn max_host_calls(&self) -> u64 {
+        self.max_host_calls.get()
+    }
+}
+
 impl Projection {
+    pub fn budgets(&self) -> &Budgets {
+        &self.budgets
+    }
+
+    /// The imports the revision declares; empty means none.
+    pub fn declared_imports(&self) -> impl Iterator<Item = &str> {
+        self.imports.iter().map(Text::as_str)
+    }
+
+    pub fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+
+    pub fn artifact_digest(&self) -> &str {
+        self.artifact_digest.as_str()
+    }
+
+    /// The concrete scopes of the revision manifest's grants.
+    pub fn grant_scopes(&self) -> GrantScopes {
+        let mut scopes = GrantScopes::default();
+        for grant in &self.grants {
+            grant.add_to(&mut scopes);
+        }
+        scopes
+    }
+
     /// The rules a schema cannot attach to one field.
     pub(crate) fn check(&self) -> Result<(), Malformed> {
         if all_valid(&self.grants, GrantVersion::V020) {

@@ -130,6 +130,52 @@ impl Grant {
     }
 }
 
+impl Grant {
+    /// Every string the grant carries that is a name, never an interface or family label.
+    pub(crate) fn names(&self, out: &mut Vec<String>) {
+        for scope in [
+            &self.scope.prefixes,
+            &self.scope.hosts,
+            &self.scope.topics,
+            &self.scope.targets,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out.extend(scope.0.iter().cloned());
+        }
+        if let Some(secret) = &self.secret_ref {
+            out.push(secret.name.as_str().to_owned());
+            out.extend(secret.version.iter().map(|v| v.as_str().to_owned()));
+        }
+        out.extend(self.guest_grant_id.iter().map(|id| id.as_str().to_owned()));
+    }
+
+    /// Adds this grant's scope entries to the concrete scopes of its family.
+    pub(crate) fn add_to(&self, scopes: &mut GrantScopes) {
+        for (list, target) in [
+            (&self.scope.prefixes, &mut scopes.prefixes),
+            (&self.scope.hosts, &mut scopes.hosts),
+            (&self.scope.topics, &mut scopes.topics),
+            (&self.scope.targets, &mut scopes.targets),
+        ] {
+            if let Some(names) = list {
+                target.extend(names.0.iter().cloned());
+            }
+        }
+    }
+}
+
+/// Concrete scope entries per family, as the host capability layer takes them.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct GrantScopes {
+    pub prefixes: Vec<String>,
+    pub hosts: Vec<String>,
+    pub topics: Vec<String>,
+    pub targets: Vec<String>,
+}
+redacted!(GrantScopes);
+
 /// Whether every grant names the interface of `version` and the scope of its family.
 pub(crate) fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
     grants.iter().all(|grant| grant.valid(version))

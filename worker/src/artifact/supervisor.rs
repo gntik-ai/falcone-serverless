@@ -11,7 +11,7 @@ use rustix::process::{Pid, Resource, Rlimit, prlimit};
 
 use super::Error;
 use super::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
-use super::validate::validate;
+use super::validate::{Validated, validate};
 
 /// Version 3 bounds native compiler output independently of raw input limits.
 pub const MAX_COMPILED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -25,6 +25,8 @@ pub struct CompileLimits {
     pub memory_bytes: u64,
     pub wall_clock_deadline: Instant,
 }
+
+type Compiled = Result<(CacheKey, Vec<u8>), Error>;
 
 pub struct Supervisor {
     child_path: PathBuf,
@@ -77,6 +79,37 @@ impl Supervisor {
         cancelled: &AtomicBool,
     ) -> Result<(CacheKey, Vec<u8>), Error> {
         let validated = validate(bytes, limits.input_bytes)?;
+        let (child, result) = self.spawn_compile(&validated, limits, cancelled)?;
+        self.last_child = Some(child);
+        result
+    }
+
+    /// As `compile_output`, for bytes the caller has already validated once. The reaped child
+    /// goes to `keep` (concurrent executions share one supervisor and retain none).
+    pub fn compile_validated_keep(
+        &self,
+        validated: &Validated<'_>,
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+        keep: &mut dyn FnMut(Child),
+    ) -> Result<(CacheKey, Vec<u8>), Error> {
+        let (child, result) = self.spawn_compile(validated, limits, cancelled)?;
+        keep(child);
+        result
+    }
+
+    pub fn keep_child(&mut self, child: Child) {
+        self.last_child = Some(child);
+    }
+
+    /// The spawned child is always terminated and reaped before it is returned, so even a
+    /// failed compile hands back a reaped child. `Err` means nothing was spawned.
+    fn spawn_compile(
+        &self,
+        validated: &Validated<'_>,
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+    ) -> Result<(Child, Compiled), Error> {
         if limits.input_bytes == 0
             || limits.cpu_seconds == 0
             || limits.cpu_seconds == u64::MAX
@@ -92,21 +125,19 @@ impl Supervisor {
             ENGINE_CONFIG,
             INTERFACE_VERSION,
         )?;
-        let child = Command::new(&self.child_path)
+        let mut child = Command::new(&self.child_path)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| Error::new("compile_failed"))?;
-        self.last_child = Some(child);
         self.spawned.fetch_add(1, Ordering::Release);
-        let child = self.last_child.as_mut().expect("just spawned child");
         // Before this returns, even setup and I/O failures terminate and reap.
-        let result = run(child, validated.bytes(), limits, cancelled);
-        let cleanup = terminate_and_reap(child);
-        cleanup?;
-        Ok((key, result?))
+        let result = run(&mut child, validated.bytes(), limits, cancelled);
+        let cleanup = terminate_and_reap(&mut child);
+        let outcome = cleanup.and_then(|()| result.map(|output| (key, output)));
+        Ok((child, outcome))
     }
 }
 

@@ -3,8 +3,10 @@
 Contract version: v1
 
 This closed TOML contract provides `ctr-worker-runtime-config` for the Wasm worker,
-chart and controller. Adding a field requires v2. Unknown keys are rejected at every
-level. No runtime consumer, server, engine or cluster operation is implemented here.
+chart and controller. Adding a field requires v2, except the optional `control_port` and
+`artifact_path`, which the operator added to v1 for the execution API (RUN-01.t3). Unknown keys
+are rejected at every level. This document defines the configuration only; the execution API
+that consumes it is [execution-api-v1.md](worker-execution-api/execution-api-v1.md).
 
 ## Fields
 
@@ -18,6 +20,7 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | --- | --- | --- | --- | --- |
 | version | u32 | none | 1 | false |
 | listen_port | u16 | port | 8080 | false |
+| control_port | u16 | port | 8082 | false |
 | metrics_port | u16 | port | 9090 | false |
 | probe_port | u16 | port | 8081 | false |
 | startup_probe_path | string | path | /startupz | false |
@@ -33,11 +36,21 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | checkpoint_reserve_ms | u64 | ms | 10000 | false |
 | kill_grace_ms | u64 | ms | 5000 | false |
 | cache_path | string | path | /var/cache/falcone-worker | false |
+| artifact_path | string | path | /var/lib/falcone-worker/artifacts | false |
 | egress.resolver | string | path | /etc/resolv.conf | false |
 | egress.allow_list | array<string> | URL origin | [] | false |
 | falcone_api_endpoint | string | URL | none | true |
 | falcone_dispatcher_endpoint | string | URL | none | true |
 | dispatcher_key_path | string | path | /var/run/falcone/dispatcher-keys | false |
+
+`listen_port` is the execute listener, which serves only `POST /v1/execute`. `control_port` is
+the control listener, a second pod-local port that serves only cancel and execution update; it is
+the address the dispatcher uses for control (`<pod IP>:control_port`). The two listeners share
+no connection capacity. `listen_port`, `control_port`, `metrics_port` and `probe_port` must
+differ, and `concurrency` must be at least 1. `artifact_path` is a pod-local directory of
+validated raw artifacts named `<64 hex digits of the artifact digest>.wasm`; the worker verifies
+each file against the revision's `artifact_digest`. `max_wall_clock_ms` and `max_memory_bytes`
+are the ceilings of the execution API (see the execution-API contract).
 
 Each default budget must be at or below its configured maximum. The sum of
 `cancel_reserve_ms`, `checkpoint_reserve_ms` and `kill_grace_ms` must be at or
@@ -86,6 +99,7 @@ guest, starts no server, contacts no endpoint and accesses no cluster.
 ```toml
 version = 1
 listen_port = 8080
+control_port = 8082
 metrics_port = 9090
 probe_port = 8081
 startup_probe_path = "/startupz"
@@ -101,6 +115,7 @@ cancel_reserve_ms = 5000
 checkpoint_reserve_ms = 10000
 kill_grace_ms = 5000
 cache_path = "/var/cache/falcone-worker"
+artifact_path = "/var/lib/falcone-worker/artifacts"
 falcone_api_endpoint = "https://falcone.example.test/api"
 falcone_dispatcher_endpoint = "https://dispatcher.example.test"
 dispatcher_key_path = "/var/run/falcone/dispatcher-keys"

@@ -15,16 +15,19 @@ mod projection;
 mod refusal;
 mod request;
 mod result;
+mod service;
 mod types;
 mod wire;
 
-pub use messages::{CancelMessage, UpdateMessage};
+pub use grants::GrantScopes;
+pub use messages::{CancelMessage, CancelState, UpdateMessage};
 pub use projection::Projection;
-pub use refusal::Refusal;
+pub use refusal::{Class, Code, Reason, Refusal};
 pub use request::ExecuteRequest;
-pub use result::{ExecutionResult, Pinned};
+pub use result::{ExecutionResult, HandlerResult, Pinned};
+pub use service::{ExecutionLimits, WorkerLimits};
+pub use types::{MAX_LOG_LINE_CHARS, MAX_LOG_LINES};
 
-use refusal::{Code, Reason};
 use serde::Deserialize;
 use std::fmt;
 use types::{Id, Positive};

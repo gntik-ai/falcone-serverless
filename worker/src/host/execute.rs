@@ -44,32 +44,73 @@ pub struct Prepared {
     deadline: Instant,
 }
 impl Prepared {
-    /// Validation and bounded trusted compilation must complete before this call.
+    /// Validation and bounded trusted compilation must complete before this call. The guest
+    /// deadline starts now, from the contract's guest duration; a service that owns an absolute
+    /// execution deadline uses `new_until` instead.
     pub fn new(loaded: &Loaded, host: Host) -> Result<Self, Execution> {
+        let until = Instant::now() + host.guest_duration();
+        Self::start(loaded, host, until, false)
+    }
+
+    /// As `new`, with the execution's one absolute deadline. The store's epoch deadline and every
+    /// host call derive from `until`; nothing here computes a new deadline from a duration.
+    /// A guest never starts at or after `until`: it is checked before instantiation and again
+    /// after it, before the handler can be invoked.
+    pub fn new_until(loaded: &Loaded, host: Host, until: Instant) -> Result<Self, Execution> {
+        Self::start(loaded, host, until, true)
+    }
+
+    /// `bind_calls` makes `until` the deadline of every host call too; the duration-based `new`
+    /// keeps the host-call ceiling alone, as before.
+    fn start(
+        loaded: &Loaded,
+        mut host: Host,
+        until: Instant,
+        bind_calls: bool,
+    ) -> Result<Self, Execution> {
+        let expired = wasmtime::Error::new(wasmtime::Trap::Interrupt);
+        if Instant::now() >= until {
+            return Err(finish(
+                &host,
+                until,
+                Err(error("deadline_exceeded")),
+                Some(&expired),
+            ));
+        }
+        if bind_calls {
+            host.set_until(until);
+        }
         let component = loaded.component();
         let engine = component.engine();
-        let deadline = Instant::now() + host.guest_duration();
+        let deadline = until;
+        let fuel = host.fuel();
         let mut store = Store::new(engine, host);
         let result = (|| {
             if !engine.get_epoch_interruption() {
-                return Err(error("epoch_interruption_required"));
+                return Err((error("epoch_interruption_required"), None));
             }
-            // The trusted engine enables fuel. Guest time is bounded by the
-            // invocation's epoch deadline, independently of compilation budgets.
+            // The trusted engine enables fuel. The revision's fuel budget bounds guest work;
+            // the epoch deadline bounds its time, independently.
             store
-                .set_fuel(u64::MAX)
-                .map_err(|_| error("fuel_required"))?;
+                .set_fuel(fuel)
+                .map_err(|_| (error("fuel_required"), None))?;
             let instance = runtime::instantiate_in_store(engine, component, &mut store, deadline)
-                .map_err(|_| error("instantiation_failed"))?;
+                .map_err(|cause| (error("instantiation_failed"), Some(cause)))?;
+            // The window between instantiation and the handler: a guest that would start
+            // at or after the deadline never runs.
+            store.data().after_instantiation();
+            if Instant::now() >= deadline {
+                return Err((error("deadline_exceeded"), Some(expired)));
+            }
             let (_, handler) = instance
                 .get_export(&mut store, None, HANDLER_EXPORT)
-                .ok_or_else(|| error("missing_handler_export"))?;
+                .ok_or_else(|| (error("missing_handler_export"), None))?;
             let (_, handle) = instance
                 .get_export(&mut store, Some(&handler), "handle")
-                .ok_or_else(|| error("invalid_handler_signature"))?;
+                .ok_or_else(|| (error("invalid_handler_signature"), None))?;
             instance
                 .get_typed_func(&mut store, handle)
-                .map_err(|_| error("invalid_handler_signature"))
+                .map_err(|_| (error("invalid_handler_signature"), None))
         })();
         match result {
             Ok(handler) => {
@@ -94,7 +135,7 @@ impl Prepared {
                     deadline,
                 })
             }
-            Err(e) => Err(finish(store.data(), deadline, Err(e), None)),
+            Err((e, cause)) => Err(finish(store.data(), deadline, Err(e), cause.as_ref())),
         }
     }
     pub fn call(mut self, params: &[u8]) -> Execution {
@@ -177,22 +218,25 @@ fn finish(
         InvocationOutcome::Uncertain => Err(error("uncertain")),
         InvocationOutcome::GuestInterrupted => Err(error("deadline_exceeded")),
         InvocationOutcome::GuestMemoryLimit => Err(error("guest_memory_limit_exceeded")),
+        InvocationOutcome::FuelExhausted => Err(error("fuel_exhausted")),
+        InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::BufferLimit => Err(error("buffer_limit_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
     Execution { outcome, result }
 }
 pub fn execute(loaded: &Loaded, host: Host, params: &[u8]) -> Execution {
+    let until = Instant::now() + host.guest_duration();
+    execute_until(loaded, host, params, until)
+}
+
+/// One invocation under an absolute deadline owned by the caller.
+pub fn execute_until(loaded: &Loaded, host: Host, params: &[u8], until: Instant) -> Execution {
     if params.len() > host.output_limit() {
         host.record(&Err::<(), _>(HostError::LimitExceeded));
-        return finish(
-            &host,
-            Instant::now() + host.guest_duration(),
-            Err(error("buffer_limit_exceeded")),
-            None,
-        );
+        return finish(&host, until, Err(error("buffer_limit_exceeded")), None);
     }
-    match Prepared::new(loaded, host) {
+    match Prepared::new_until(loaded, host, until) {
         Ok(prepared) => prepared.call(params),
         Err(result) => result,
     }

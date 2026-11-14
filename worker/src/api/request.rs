@@ -136,19 +136,74 @@ pub struct ExecuteRequest {
 redacted!(ExecuteRequest);
 
 impl ExecuteRequest {
-    pub(super) fn activation_id(&self) -> &Id {
+    pub fn activation_id(&self) -> &Id {
         &self.activation_id
     }
 
-    pub(super) fn attempt_id(&self) -> &Id {
+    pub fn attempt_id(&self) -> &Id {
         &self.attempt_id
     }
 
-    pub(super) fn attempt_number(&self) -> Positive {
+    pub fn attempt_number(&self) -> Positive {
         self.attempt_number
     }
 
-    fn attribution(&self) -> Attribution {
+    pub fn projection(&self) -> &Projection {
+        &self.projection
+    }
+
+    /// The absolute request deadline, in milliseconds since the Unix epoch.
+    pub fn deadline_unix_millis(&self) -> u64 {
+        self.deadline.unix_millis()
+    }
+
+    pub fn invocation_key(&self) -> &str {
+        self.invocation.invocation_key.as_str()
+    }
+
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.invocation.idempotency_key.as_ref().map(Id::as_str)
+    }
+
+    pub fn tenant(&self) -> &str {
+        self.credential.tenant.as_str()
+    }
+
+    pub fn workspace(&self) -> &str {
+        self.credential.workspace.as_str()
+    }
+
+    /// The legacy `main(params)` object as the JSON the guest receives.
+    pub fn params_json(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.params).unwrap_or_default()
+    }
+
+    /// Every distinct string of the credential, for redaction. The credential stays in the host
+    /// binding layer; this list is only ever used to scrub text that leaves it.
+    pub fn credential_secrets(&self) -> Vec<String> {
+        let credential = &self.credential;
+        let mut names: Vec<String> = [
+            &credential.iss,
+            &credential.aud,
+            &credential.tenant,
+            &credential.workspace,
+            &credential.pool_profile,
+            &credential.revision,
+            &credential.activation,
+            &credential.attempt,
+        ]
+        .into_iter()
+        .map(|claim| claim.as_str().to_owned())
+        .collect();
+        for grant in &credential.allowed_capabilities {
+            grant.names(&mut names);
+        }
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    pub(super) fn attribution(&self) -> Attribution {
         Attribution {
             activation_id: self.activation_id.clone(),
             attempt_id: self.attempt_id.clone(),

@@ -1,5 +1,6 @@
 //! The result: the legacy `{status, result, logs}` envelope plus the activation identity.
 
+use super::Attribution;
 use super::projection::{LanguageProfile, Projection};
 use super::refusal::{Class, Refusal};
 use super::request::ExecuteRequest;
@@ -124,7 +125,71 @@ impl Pinned for ExecuteRequest {
     }
 }
 
+impl Pinned for Attribution {
+    fn projection(&self) -> &Projection {
+        &self.projection
+    }
+
+    fn attempt(&self) -> Option<(&Id, &Id, Positive)> {
+        Some((&self.activation_id, &self.attempt_id, self.attempt_number))
+    }
+}
+
+impl HandlerResult {
+    /// The guest's output as a legacy handler result, or `None` when it is not one.
+    pub fn from_guest(bytes: &[u8]) -> Option<Self> {
+        let handler: Self = serde_json::from_slice(bytes).ok()?;
+        let in_range = handler.status_code.within(100, 599);
+        let no_body_on_304 = !(handler.status_code.is(304) && handler.body.is_some());
+        (in_range && no_body_on_304).then_some(handler)
+    }
+}
+
+impl Identity {
+    /// What ran: the pinned projection, which the worker has verified it executes.
+    fn of(projection: &Projection) -> Self {
+        Self {
+            function_revision: projection.revision.clone(),
+            runtime_mode: projection.runtime_mode,
+            artifact_digest: projection.artifact_digest.clone(),
+            base_digest: projection.base_digest().cloned(),
+            wasmtime_version: projection.engine_version.clone(),
+            language_profile: projection.language_profile.clone(),
+            interface_version: projection.interface_version,
+        }
+    }
+}
+
 impl ExecutionResult {
+    /// The answer to an attempt: the handler result on success, otherwise the failure. `logs`
+    /// must already be redacted; they are cut to the schema's limits here.
+    pub fn answer(
+        pinned: &(impl Pinned + ?Sized),
+        outcome: Result<HandlerResult, Refusal>,
+        logs: Vec<String>,
+    ) -> Option<Self> {
+        let (activation_id, attempt_id, attempt_number) = pinned.attempt()?;
+        let (status, result, class) = match outcome {
+            Ok(handler) => (Status::Success, Outcome::Handler(handler), None),
+            Err(refusal) => {
+                let class = refusal.class();
+                (Status::Failure, Outcome::Failure(refusal), Some(class))
+            }
+        };
+        Some(Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: activation_id.clone(),
+            attempt_id: attempt_id.clone(),
+            attempt_number,
+            status,
+            result,
+            class,
+            logs: Logs::bounded(logs),
+            identity: Identity::of(pinned.projection()),
+        })
+    }
+
     /// The rules a schema cannot attach to one field, and the identity of the pinned revision.
     pub(super) fn check(&self, pinned: &impl Pinned) -> Result<(), Malformed> {
         match (&self.status, &self.result, &self.class) {

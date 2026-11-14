@@ -101,6 +101,29 @@ impl Limits {
     pub fn duration(self, field: Field) -> std::time::Duration {
         std::time::Duration::from_millis(self.value(field))
     }
+    /// The same limits with one field replaced, subject to the field's validation rules: never
+    /// zero, never unbounded and never above its ceiling.
+    pub fn bounded(mut self, field: Field, value: u64) -> Result<Self, ValidationError> {
+        let kind = if value == 0 {
+            Some(ValidationKind::Zero)
+        } else if value == u64::MAX {
+            Some(ValidationKind::Unbounded)
+        } else if value > field.ceiling() {
+            Some(ValidationKind::AboveCeiling)
+        } else {
+            None
+        };
+        match kind {
+            Some(kind) => Err(ValidationError {
+                field: field.name().into(),
+                kind,
+            }),
+            None => {
+                self.values[field as usize] = value;
+                Ok(self)
+            }
+        }
+    }
     pub fn parse(json: &str) -> Result<Self, ValidationError> {
         let error = |field: &str, kind| ValidationError {
             field: field.into(),

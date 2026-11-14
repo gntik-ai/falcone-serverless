@@ -4,9 +4,11 @@
 mod execute;
 pub mod net;
 pub mod outcome;
-pub use execute::{ExecuteError, Execution, Prepared, execute};
+pub use execute::{ExecuteError, Execution, Prepared, execute, execute_until};
 mod runtime;
 pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, instantiate};
+#[cfg(any(test, feature = "qualification"))]
+pub use runtime::{EntryHook, StartHook};
 use wasmtime::component::{ComponentType, Lift, Lower};
 
 pub fn aggregate_within_limit(parts: &[usize]) -> bool {

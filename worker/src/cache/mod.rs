@@ -8,7 +8,7 @@ pub use load::Loaded;
 use crate::artifact::Error;
 use crate::artifact::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
 use crate::artifact::supervisor::{CompileLimits, MAX_COMPILED_OUTPUT_BYTES, Supervisor};
-use crate::artifact::validate::validate;
+use crate::artifact::validate::{Validated, validate};
 use ring::{hmac, rand::SecureRandom, rand::SystemRandom};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -74,8 +74,29 @@ pub struct Cache {
     engine: load::Engine,
     supervisor: Supervisor,
     #[cfg(test)]
-    events: std::cell::RefCell<Vec<LoadEvent>>,
+    events: std::sync::Mutex<Vec<LoadEvent>>,
+    #[cfg(any(test, feature = "qualification"))]
+    stage_hook: Option<StageHook>,
+    #[cfg(any(test, feature = "qualification"))]
+    validations: std::sync::atomic::AtomicUsize,
 }
+
+/// A step of the cache operation that a test or qualification build can pause or fail.
+#[cfg(any(test, feature = "qualification"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Before the artifact is validated.
+    Validate,
+    /// Before the cache file is read.
+    Read,
+    /// Before the trusted compiler is started.
+    Compile,
+    /// After the temporary file is written, before it is synced and renamed.
+    Publish,
+}
+
+#[cfg(any(test, feature = "qualification"))]
+pub type StageHook = std::sync::Arc<dyn Fn(Stage) + Send + Sync>;
 
 impl Cache {
     pub fn new(directory: impl Into<PathBuf>, child: impl Into<PathBuf>) -> Result<Self, Error> {
@@ -89,8 +110,36 @@ impl Cache {
             engine: load::engine()?,
             supervisor: Supervisor::new(child),
             #[cfg(test)]
-            events: std::cell::RefCell::new(Vec::new()),
+            events: std::sync::Mutex::new(Vec::new()),
+            #[cfg(any(test, feature = "qualification"))]
+            stage_hook: None,
+            #[cfg(any(test, feature = "qualification"))]
+            validations: std::sync::atomic::AtomicUsize::new(0),
         })
+    }
+
+    /// Test and qualification builds only: pauses the operation at each `Stage`.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn set_stage_hook(&mut self, hook: StageHook) {
+        self.stage_hook = Some(hook);
+    }
+
+    /// Test and qualification builds only: how many artifacts this cache has validated.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn validations(&self) -> usize {
+        self.validations.load(Ordering::Acquire)
+    }
+
+    #[cfg(any(test, feature = "qualification"))]
+    fn stage(&self, stage: Stage) {
+        if let Some(hook) = &self.stage_hook {
+            hook(stage);
+        }
+    }
+
+    /// The directory the cache entries live in.
+    pub fn directory(&self) -> &Path {
+        &self.directory
     }
 
     pub fn spawn_count(&self) -> usize {
@@ -108,7 +157,7 @@ impl Cache {
 
     #[cfg(test)]
     pub fn take_events(&self) -> Vec<LoadEvent> {
-        self.events.take()
+        std::mem::take(&mut *self.events.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     pub fn compile(
@@ -118,10 +167,64 @@ impl Cache {
         limits: CompileLimits,
         cancelled: &AtomicBool,
     ) -> Result<Loaded, Error> {
+        let mut child = None;
+        let result = self.compile_inner(
+            contract_version,
+            bytes,
+            limits,
+            cancelled,
+            &|_| Ok(()),
+            &mut |reaped| child = Some(reaped),
+        );
+        if let Some(child) = child {
+            self.supervisor.keep_child(child);
+        }
+        result
+    }
+
+    /// As `compile`, for concurrent executions sharing one cache. The artifact is validated
+    /// exactly once; `admit` sees the validated component (its imports) before anything is
+    /// compiled or loaded, and an error from it ends the operation. The whole operation
+    /// (lookup, read, load, compile, publish) observes `cancelled` and the deadline in `limits`,
+    /// and publishes only by atomic rename of a complete temporary file.
+    pub fn compile_shared(
+        &self,
+        contract_version: u32,
+        bytes: &[u8],
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+        admit: &dyn Fn(&Validated<'_>) -> Result<(), Error>,
+    ) -> Result<Loaded, Error> {
+        self.compile_inner(
+            contract_version,
+            bytes,
+            limits,
+            cancelled,
+            admit,
+            &mut |_| {},
+        )
+    }
+
+    fn compile_inner(
+        &self,
+        contract_version: u32,
+        bytes: &[u8],
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+        admit: &dyn Fn(&Validated<'_>) -> Result<(), Error>,
+        keep: &mut dyn FnMut(std::process::Child),
+    ) -> Result<Loaded, Error> {
         if contract_version != CONTRACT_VERSION {
             return Err(error("unsupported_feature"));
         }
+        #[cfg(any(test, feature = "qualification"))]
+        {
+            self.validations.fetch_add(1, Ordering::AcqRel);
+            self.stage(Stage::Validate);
+        }
         let validated = validate(bytes, limits.input_bytes)?;
+        active(limits, cancelled)?;
+        admit(&validated)?;
         let key = CacheKey::new(
             validated.artifact_digest,
             ENGINE_VERSION,
@@ -136,11 +239,18 @@ impl Cache {
         };
         active(limits, cancelled)?;
         let path = self.directory.join(format!("{}.cache", key.as_str()));
+        #[cfg(any(test, feature = "qualification"))]
+        self.stage(Stage::Read);
         if let Some(loaded) = load::cached(self, &path, &key, &expected) {
             active(limits, cancelled)?;
             return Ok(loaded);
         }
-        let (compiled_key, output) = self.supervisor.compile_output(bytes, limits, cancelled)?;
+        active(limits, cancelled)?;
+        #[cfg(any(test, feature = "qualification"))]
+        self.stage(Stage::Compile);
+        let (compiled_key, output) = self
+            .supervisor
+            .compile_validated_keep(&validated, limits, cancelled, keep)?;
         active(limits, cancelled)?;
         if compiled_key != key || output.is_empty() || output.len() > MAX_COMPILED_OUTPUT_BYTES {
             return Err(error("compile_failed"));
@@ -195,7 +305,13 @@ impl Cache {
             .map_err(|_| error("trusted_cache_unavailable"))?;
         let staged = Staged(temp);
         file.write_all(entry)
-            .and_then(|()| file.sync_all())
+            .map_err(|_| error("trusted_cache_unavailable"))?;
+        #[cfg(any(test, feature = "qualification"))]
+        self.stage(Stage::Publish);
+        // An abandoned operation never publishes: the temporary file is removed on drop and
+        // the rename below is the only step that makes an entry visible.
+        active(limits, cancelled)?;
+        file.sync_all()
             .map_err(|_| error("trusted_cache_unavailable"))?;
         active(limits, cancelled)?;
         fs::rename(&staged.0, path).map_err(|_| error("trusted_cache_unavailable"))?;

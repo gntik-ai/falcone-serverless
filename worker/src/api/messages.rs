@@ -1,7 +1,7 @@
 //! Execution updates (heartbeat, progress, checkpoint reference) and cancellation.
 
 use super::types::{Count, Id, Positive, Text, Version};
-use super::wire::{constant, present, redacted};
+use super::wire::{constant, present, redacted, unit_debug};
 use super::{Malformed, constraint};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +42,18 @@ pub struct UpdateMessage {
 redacted!(UpdateMessage);
 
 impl UpdateMessage {
+    pub fn activation_id(&self) -> &Id {
+        &self.activation_id
+    }
+
+    pub fn attempt_id(&self) -> &Id {
+        &self.attempt_id
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence.get()
+    }
+
     pub(super) fn check(&self) -> Result<(), Malformed> {
         match &self.update {
             Update::Progress {
@@ -74,3 +86,45 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+/// The state a cancel message carries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CancelState {
+    Requested,
+    Acknowledged,
+    Uncertain,
+}
+unit_debug!(CancelState: Requested, Acknowledged, Uncertain);
+
+impl CancelMessage {
+    pub fn activation_id(&self) -> &Id {
+        &self.activation_id
+    }
+
+    pub fn attempt_id(&self) -> &Id {
+        &self.attempt_id
+    }
+
+    pub fn state(&self) -> CancelState {
+        match self.cancel {
+            Cancel::Requested {} => CancelState::Requested,
+            Cancel::Acknowledged {} => CancelState::Acknowledged,
+            Cancel::Uncertain {} => CancelState::Uncertain,
+        }
+    }
+
+    /// The worker's answer to a cancel request for the same attempt.
+    pub fn reply(&self, state: CancelState) -> Self {
+        Self {
+            version: Version::Only,
+            message: CancelType::Only,
+            activation_id: self.activation_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            cancel: match state {
+                CancelState::Requested => Cancel::Requested {},
+                CancelState::Acknowledged => Cancel::Acknowledged {},
+                CancelState::Uncertain => Cancel::Uncertain {},
+            },
+        }
+    }
+}

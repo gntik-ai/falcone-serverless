@@ -1,11 +1,7 @@
 //! Falcone serverless execution worker.
 //!
-//! Explicit local handler execution; no runtime adapter or platform routing.
-
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
+//! The execution worker: the execution API service (`serve`), and explicit local handler
+//! execution (`execute`). No runtime adapter or platform routing.
 
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
@@ -51,12 +47,16 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
     let output = match args {
         [] => format!("falcone-serverless-worker {}", version()),
         [flag] if flag == "--version" => format!("falcone-serverless-worker {}", version()),
+        [flag] if flag == "--check-install" => return check_install(stdout),
         [flag, path] if flag == "--check-config" => {
             let path = std::path::Path::new(path);
             let input = std::fs::read_to_string(path)
                 .map_err(|error| format!("read config {}: {error}", path.display()))?;
             let config = config::load_from_str(&input)?;
             serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
+        }
+        [command, path] if command == "serve" => {
+            return serve_command(path);
         }
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
@@ -66,11 +66,85 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | --check-install | serve CONFIG | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+/// Checks the installation: the trusted compile child is a file beside this executable and it
+/// starts. It reads empty input, so it must reject it, not crash or fail to run.
+fn check_install(stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    let compiler = std::env::current_exe()
+        .map_err(|error| format!("locate the worker executable: {error}"))?
+        .with_file_name("artifact-compile-child");
+    if !compiler.is_file() {
+        return Err(format!("missing {}", compiler.display()));
+    }
+    let status = std::process::Command::new(&compiler)
+        .env_clear()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(|error| format!("run {}: {error}", compiler.display()))?;
+    if status.code() != Some(65) {
+        return Err(format!("{} did not reject empty input", compiler.display()));
+    }
+    writeln!(
+        stdout,
+        "{}\n{}",
+        serde_json::json!({"check": "production_image", "compiler": compiler.display().to_string(), "status": "passed"}),
+        serde_json::json!({"check": "execute_api", "status": "passed"})
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// Serves the execution API (execute listener and control listener) until the process ends.
+fn serve_command(path: &std::ffi::OsStr) -> Result<(), String> {
+    use falcone_serverless_worker::{
+        api::WorkerLimits,
+        artifact::cache_key::ENGINE_VERSION,
+        limits::GUEST_MEMORY_BYTES,
+        server::{Server, Settings},
+    };
+    let path = std::path::Path::new(path);
+    let input = std::fs::read_to_string(path)
+        .map_err(|error| format!("read config {}: {error}", path.display()))?;
+    let config = config::load_from_str(&input)?;
+    // Resolve the platform compiler beside this trusted executable; no request value or PATH
+    // lookup can select a tenant executable.
+    let compiler = std::env::current_exe()
+        .map_err(|error| format!("locate the worker executable: {error}"))?
+        .with_file_name("artifact-compile-child");
+    let settings = Settings::new(
+        WorkerLimits {
+            max_memory_bytes: config.max_memory_bytes,
+            compatibility_memory_bytes: GUEST_MEMORY_BYTES as u64,
+            max_wall_clock: std::time::Duration::from_millis(config.max_wall_clock_ms),
+            engine_version: ENGINE_VERSION,
+        },
+        config.concurrency as usize,
+        config.artifact_path.into(),
+        config.cache_path.into(),
+        compiler,
+    );
+    let any = std::net::Ipv4Addr::UNSPECIFIED;
+    let server = Server::start(
+        settings,
+        (any, config.listen_port).into(),
+        (any, config.control_port).into(),
+    )
+    .map_err(|error| format!("start the execution service: {error}"))?;
+    eprintln!(
+        "falcone-serverless-worker: execute listener {}, control listener {}",
+        server.execute_addr(),
+        server.control_addr()
+    );
+    loop {
+        std::thread::park();
+    }
 }
 
 fn execute_command(

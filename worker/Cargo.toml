@@ -29,6 +29,13 @@ wasmparser = { workspace = true }
 sha2 = { workspace = true }
 # Already locked; authenticates only process-local trusted compiler output.
 ring = "=0.17.14"
+# Already locked (through regex). One linear multi-pattern matcher redacts the execution
+# credential from guest logs.
+aho-corasick = "=1.1.5"
+
+[features]
+# Test-only hooks and counters of the execution service. Never enabled in the worker image.
+qualification = []
 
 [[bin]]
 name = "artifact-compile-child"
@@ -39,6 +46,8 @@ name = "compile-cache-qualification"
 path = "src/qualification/compile_cache_runner.rs"
 
 [dev-dependencies]
+# Enables the qualification hooks for this package's own tests and qualification binaries.
+falcone-serverless-worker = { path = ".", features = ["qualification"] }
 wat = "=1.258.3"
 wit-parser = "=0.262.0"
 # WAS-01 static checks (#115).

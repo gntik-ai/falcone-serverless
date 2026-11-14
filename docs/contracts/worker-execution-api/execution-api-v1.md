@@ -4,10 +4,12 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
-[OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
+`ctr-worker-execution-api` under ADR 0010 D1. It defines the messages and parsers in
+`worker/src/api` and, since RUN-01.t3, the service in `worker/src/server` that serves execute,
+update and cancel over two pod-local HTTP listeners (see [Execution service](#execution-service)).
+How the dispatcher authenticates to the worker is not part of this contract; it is recorded with
+INV-01. The [OCI profile](oci-profile.md) is an independent profile of the same contract name
+for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
 revision and activation state) are Proposed. This contract follows the operator decisions
@@ -130,9 +132,9 @@ pinned base without `base_digest`, a `base_digest` without a pinned base, and a 
 A failure `result` is `{status, code, message, detail: {reason}, retryable}`, shaped as the
 ErrorResponse of ctr-functions-api v1 without the request-correlation fields. The class is one of
 `retryable`, `non_retryable` and `uncertain`; `retryable` is true exactly for class `retryable`.
-Every v1 code is `non_retryable`, including on every retry: a retried attempt of the same
-activation gets the same status, reason and class. Later revisions add codes of the other classes
-without changing these. The machine-readable table is [failure-codes.v1.json](failure-codes.v1.json).
+Every code is `non_retryable`, including on every retry, except `busy`, which is `retryable`
+because nothing ran: a retried attempt of the same activation gets the same status, reason and
+class. The machine-readable table is [failure-codes.v1.json](failure-codes.v1.json).
 
 | `code` | HTTP status | `detail.reason` | Class | Origin |
 | --- | --- | --- | --- | --- |
@@ -140,14 +142,23 @@ without changing these. The machine-readable table is [failure-codes.v1.json](fa
 | `GW_BASE_DISABLED` | 409 | `base_disabled` | non_retryable | ctr-functions-api v1 |
 | `GW_BASE_MISMATCH` | 409 | `base_mismatch` | non_retryable | ctr-functions-api v1 |
 | `runtime_mode_not_supported` | 409 | `runtime_mode_not_wasm` | non_retryable | worker only |
-| `invalid_request` | 400 | `missing_path` or `non_json_body` | non_retryable | worker only |
+| `invalid_request` | 400 | `missing_path`, `non_json_body`, `malformed_request`, `budget_above_worker_ceiling`, `engine_version_mismatch` or `duplicate_execution` | non_retryable | worker only |
 | `request_too_large` | 413 | `body_too_large` | non_retryable | worker only |
+| `execution_failed` | 500 | `handler_failed`, `invalid_handler_result`, `guest_trapped`, `memory_budget_exceeded`, `fuel_exhausted`, `host_call_budget_exceeded`, `buffer_limit_exceeded`, `artifact_rejected`, `artifact_unavailable`, `setup_failed` or `outcome_uncertain` | non_retryable | worker only |
+| `timeout` | 504 | `deadline_exceeded` | non_retryable | worker only |
+| `cancelled` | 499 | `cancel_requested` | non_retryable | worker only |
+| `busy` | 503 | `at_capacity` | retryable | worker only |
+| `undeclared_import` | 422 | `import_not_declared` | non_retryable | worker only |
+| `not_found` | 404 | `execution_not_found` | non_retryable | worker only |
+| `stale_update` | 409 | `sequence_not_newer` | non_retryable | worker only |
 
 The three `GW_` codes are referenced, not defined: their names, statuses and reasons are those of
 the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The
-worker-only codes are exactly the last three: the non-wasm refusal, and the two refusals the
-operator allowed for the legacy inputs below. Adding `GW_` equivalents to the functions API is a
-follow-up. A request this worker refuses carries no request value in its message.
+worker-only codes are the other ten: the non-wasm refusal, the two refusals the operator allowed
+for the legacy inputs below, and the execution API's outcome and refusal codes (RUN-01.t3).
+Budget outcomes use `execution_failed` with a distinct `detail.reason`, never codes of their
+own. Adding `GW_` equivalents to the functions API is a follow-up. A request this worker
+refuses carries no request value in its message.
 
 ### The non-wasm refusal
 
@@ -172,6 +183,113 @@ The checks run in this order: path, size, JSON. The size is `max-host-to-guest-b
 case-insensitively with `application/json` ignoring parameters. The fixture labels of the inventory
 (`envelope-invalid`, `body-not-json`, `body-too-large`) are not wire codes; this mapping is. The
 legacy handler is not invoked for any of them.
+
+## Execution service
+
+`falcone-serverless-worker serve CONFIG` runs the service (`CONFIG` is the
+[runtime configuration](../worker-runtime-config.md)). It uses two pod-local HTTP/1.1 listeners.
+Each connection carries one request and is closed after its response; bodies use
+`Content-Length`, and `Transfer-Encoding` is refused.
+
+| Listener | Port | Serves | Everything else |
+| --- | --- | --- | --- |
+| execute | `listen_port` (8080) | `POST /v1/execute` | `404 not_found` |
+| control | `control_port` (8082) | `POST /v1/cancel`, `POST /v1/update` | `404 not_found` |
+
+The control address the dispatcher uses is `<pod IP>:control_port`. How the dispatcher
+authenticates to either listener is not defined here; it is recorded with INV-01 (falcone#1362).
+The listeners share no connection capacity and nothing is ever evicted: a connection or an
+execution over capacity is answered at once with `503 busy`.
+
+### Capacity and limits
+
+| Limit | Value |
+| --- | --- |
+| Executions running at once | `concurrency` |
+| Execute connections | `concurrency` plus 16 in admission |
+| Control connections | 16 |
+| Request head (`MAX_HEADERS`) | 16 KiB; larger gets `413 request_too_large` |
+| Execute request (`MAX_REQUEST`) | 8 MiB; larger gets `413 request_too_large` before the body is read |
+| Action body (`__ow_body`) | 1048576 bytes; larger gets `413 request_too_large` (`body_too_large`) |
+| Control request body | 64 KiB |
+| Header deadline (absolute, from accept) | execute 5 s, control 2 s; the connection is closed |
+| Body inactivity timeout | execute 5 s, control 2 s; the connection is closed |
+| Response write deadline (absolute for the whole response) | execute 5 s, control 2 s; the connection is closed |
+
+A connection whose request head is incomplete holds only a connection slot. When every
+execution slot is busy, capacity is checked once the head has arrived and before the body is
+read: a request whose complete body has already arrived and names a runtime mode other than
+`wasm` still gets `409 runtime_mode_not_supported`; every other request gets `503 busy`. The
+execution slot is released before the response is written, so a slow reader holds a connection
+until the response deadline but no execution capacity.
+
+### Execute
+
+The HTTP status is the `status` of the failure, or `200` for a handler result; the body is the
+[result](#result) envelope. A refusal that has no activation to attribute (a malformed request,
+`busy`, a non-wasm projection that could not be parsed in full, an oversized request) has the
+bare failure envelope as its body.
+
+Admission order: runtime mode, then the request's own checks, then the limits below, then a
+registry entry for `(activation_id, attempt_id)`; a second running attempt with the same pair is
+refused as `invalid_request` / `duplicate_execution`. A projection whose `engine_version` is not
+the worker's pinned Wasmtime version is refused as `invalid_request` / `engine_version_mismatch`,
+so the identity of every result is the pinned version.
+
+The artifact is read from `artifact_path` as `<hex of artifact_digest>.wasm` and checked against
+`artifact_digest` (a mismatch is `artifact_rejected`, a missing file `artifact_unavailable`).
+Its `component_digest` is not separately verified.
+
+**Declared imports.** Before anything is compiled or instantiated, every import of the
+component must be both declared in `projection.imports` and one of the worker's allowed
+interfaces. Otherwise the answer is `422 undeclared_import` and no guest code runs; an empty
+`imports` means the component may import nothing.
+
+**Limits.** Each is the strictest of its sources, and a budget the worker cannot honour is
+refused before compile, never replaced by a default:
+
+| Limit | Value |
+| --- | --- |
+| Timeout | the shortest of the time left to the request's `deadline` at admission, `budgets.timeout_ms` and `max_wall_clock_ms`; fixed once at admission as the single absolute `until` |
+| Guest memory | the minimum of `budgets.memory_bytes`, `max_memory_bytes` and the engine's 256 MiB ceiling; a `memory_bytes` above the worker ceiling is `invalid_request` / `budget_above_worker_ceiling` |
+| Fuel | `budgets.fuel`; running out ends the execution |
+| Host calls | `budgets.max_host_calls`; every guest-to-host entry counts (storage open and drop, progress, logging, refused calls included); the call after the budget is refused before it reaches the host |
+
+Outcomes: `execution_failed` with reason `memory_budget_exceeded`, `fuel_exhausted` or
+`host_call_budget_exceeded` (all `retryable: false`); `504 timeout` when `until` passes. The
+deadline outranks every budget: a host call that starts at or after `until` is refused uncounted
+and ends the execution as `timeout`, even when it would also have exceeded `max_host_calls`.
+`until` is passed unchanged through artifact loading, validation, compilation, platform binding,
+instantiation and every host call (whose own timeout is the shorter of the host-call ceiling and
+`until - now`). It is checked after instantiation and before the handler runs, so a guest never
+starts at or after `until`.
+
+**Cache and validation.** The artifact is validated once per execution. Loading, validation,
+compilation and publication of the cache entry are one step the execution can abandon at `until`
+or on cancel: the slot is released within the 500 ms termination budget with `timeout` or
+`cancelled`, whatever the step later returns. An abandoned step publishes nothing: entries are
+written to a temporary file and renamed only when the step is still live.
+
+**Credential and logs.** The execution credential is held only by the host binding layer. It is
+never in the guest's environment, files or memory, and no error or log path formats it. Guest log
+lines are captured with their fields, redacted, then cut to 8192 characters, at most 1000 lines.
+Redaction runs before the cut, with one linear multi-pattern matcher over every string of the
+credential, overlapping occurrences included. No output line contains 8 or more consecutive
+characters of a credential string or a whole credential string shorter than 8. A line over 64 KiB,
+and all logs when the total scanned bytes or secret bytes exceed their fixed budgets, fail closed
+to the marker `<redacted>`. The storage, event, workflow and HTTP capabilities are denied until
+their transport lands with INV-01; logging and progress work.
+
+### Cancel and update
+
+`POST /v1/cancel` takes a cancel message with state `requested` for a running `(activation_id,
+attempt_id)` and answers `200` with a cancel message whose state is `acknowledged` (the
+execution ended within the 500 ms termination budget and no mutation may still commit) or
+`uncertain` (it did not, or a mutating host call was detached and may commit). An unknown pair is
+`404 not_found`. Cancel interrupts the guest, a blocked host call and any artifact, cache or
+binding step. `POST /v1/update` takes an update message for a running pair and echoes it with
+`200`; a `sequence` that is not greater than the last accepted one is `409 stale_update`, an
+unknown pair is `404 not_found`. A malformed body of either is `400 invalid_request`.
 
 ## Grant versions
 
@@ -208,7 +326,8 @@ no guest code and no network access:
 - the vendored schemas and the pinned functions-api error fixtures have their sha256 values pinned;
 - the failure code table is compared with the pinned functions-api error fixtures: every worker
   code of origin `functions-api` appears there with the same status, reason and retryability, and
-  the worker-only codes are exactly the three above;
+  the worker-only codes are exactly the ten above, which also agree with `common.v1.schema.json`,
+  the tables of this document and `Code` in `worker/src/api/refusal.rs`;
 - the legacy fixtures of the inventory are used byte for byte, with sha256 values equal to the
   inventory, and valid ones round-trip through the worker types unchanged.
 

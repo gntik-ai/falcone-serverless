@@ -35,7 +35,7 @@
     "code": "invalid_request",
     "origin": "worker",
     "status": 400,
-    "reasons": ["missing_path", "non_json_body"],
+    "reasons": ["missing_path", "non_json_body", "malformed_request", "budget_above_worker_ceiling", "engine_version_mismatch", "duplicate_execution"],
     "retryable": false,
     "class": "non_retryable"
   },
@@ -44,6 +44,62 @@
     "origin": "worker",
     "status": 413,
     "reasons": ["body_too_large"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "execution_failed",
+    "origin": "worker",
+    "status": 500,
+    "reasons": ["handler_failed", "invalid_handler_result", "guest_trapped", "memory_budget_exceeded", "fuel_exhausted", "host_call_budget_exceeded", "buffer_limit_exceeded", "artifact_rejected", "artifact_unavailable", "setup_failed", "outcome_uncertain"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "timeout",
+    "origin": "worker",
+    "status": 504,
+    "reasons": ["deadline_exceeded"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "cancelled",
+    "origin": "worker",
+    "status": 499,
+    "reasons": ["cancel_requested"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "busy",
+    "origin": "worker",
+    "status": 503,
+    "reasons": ["at_capacity"],
+    "retryable": true,
+    "class": "retryable"
+  },
+  {
+    "code": "undeclared_import",
+    "origin": "worker",
+    "status": 422,
+    "reasons": ["import_not_declared"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "not_found",
+    "origin": "worker",
+    "status": 404,
+    "reasons": ["execution_not_found"],
+    "retryable": false,
+    "class": "non_retryable"
+  },
+  {
+    "code": "stale_update",
+    "origin": "worker",
+    "status": 409,
+    "reasons": ["sequence_not_newer"],
     "retryable": false,
     "class": "non_retryable"
   }

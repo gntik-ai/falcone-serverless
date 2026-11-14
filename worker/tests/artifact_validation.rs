@@ -1,5 +1,7 @@
 #![cfg(target_os = "linux")]
 
+// Part of the supervisor is reached only by the execution service, outside this crate.
+#[allow(dead_code)]
 #[path = "../src/artifact/mod.rs"]
 mod artifact;
 

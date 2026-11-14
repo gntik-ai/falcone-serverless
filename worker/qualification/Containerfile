@@ -5,7 +5,7 @@ COPY compiler/Cargo.toml compiler/Cargo.toml
 COPY compiler/src compiler/src
 COPY worker/Cargo.toml worker/Cargo.toml
 COPY worker/src worker/src
-RUN cargo build --release --locked -p falcone-serverless-worker --bin qualification_runner --bin compile-cache-qualification --bin artifact-compile-child
+RUN cargo build --release --locked -p falcone-serverless-worker --features qualification --bin qualification_runner --bin compile-cache-qualification --bin artifact-compile-child
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 # Root-owned, readable and executable by any UID, writable by none. The guests are embedded.
