@@ -8,7 +8,7 @@ pub use load::Loaded;
 use crate::artifact::Error;
 use crate::artifact::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
 use crate::artifact::supervisor::{CompileLimits, MAX_COMPILED_OUTPUT_BYTES, Supervisor};
-use crate::artifact::validate::validate;
+use crate::artifact::validate::{Checked, validate};
 use ring::{hmac, rand::SecureRandom, rand::SystemRandom};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -122,8 +122,33 @@ impl Cache {
             return Err(error("unsupported_feature"));
         }
         let validated = validate(bytes, limits.input_bytes)?;
+        self.compile_checked(
+            contract_version,
+            validated.bytes(),
+            &validated.checked(),
+            limits,
+            cancelled,
+        )
+    }
+
+    /// `compile` for bytes that were already validated once (`checked` is that outcome), so
+    /// a service validates each artifact exactly once per execution.
+    pub fn compile_checked(
+        &mut self,
+        contract_version: u32,
+        bytes: &[u8],
+        checked: &Checked,
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+    ) -> Result<Loaded, Error> {
+        if contract_version != CONTRACT_VERSION {
+            return Err(error("unsupported_feature"));
+        }
+        if bytes.len() > limits.input_bytes {
+            return Err(error("compile_size_limit_exceeded"));
+        }
         let key = CacheKey::new(
-            validated.artifact_digest,
+            checked.artifact_digest,
             ENGINE_VERSION,
             std::env::consts::ARCH,
             ENGINE_CONFIG,
@@ -132,7 +157,7 @@ impl Cache {
         let expected = Provenance {
             engine_version: ENGINE_VERSION.to_owned(),
             config_hash: Sha256::digest(ENGINE_CONFIG.as_bytes()).into(),
-            module_hash: validated.artifact_digest,
+            module_hash: checked.artifact_digest,
         };
         active(limits, cancelled)?;
         let path = self.directory.join(format!("{}.cache", key.as_str()));
@@ -140,7 +165,9 @@ impl Cache {
             active(limits, cancelled)?;
             return Ok(loaded);
         }
-        let (compiled_key, output) = self.supervisor.compile_output(bytes, limits, cancelled)?;
+        let (compiled_key, output) = self
+            .supervisor
+            .compile_checked_output(bytes, checked, limits, cancelled)?;
         active(limits, cancelled)?;
         if compiled_key != key || output.is_empty() || output.len() > MAX_COMPILED_OUTPUT_BYTES {
             return Err(error("compile_failed"));

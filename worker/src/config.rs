@@ -7,8 +7,15 @@ use serde::{Deserialize, Serialize};
 pub struct RuntimeConfig {
     #[serde(default = "default_u32::<1>")]
     pub version: u32,
+    /// The execute listener: serves only `POST /v1/execute`.
     #[serde(default = "default_u16::<8080>")]
     pub listen_port: u16,
+    /// The interface both execution listeners bind.
+    #[serde(default = "listen_address")]
+    pub listen_address: String,
+    /// The control listener: serves only cancel and update, never execute.
+    #[serde(default = "default_u16::<8082>")]
+    pub control_port: u16,
     #[serde(default = "default_u16::<9090>")]
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
@@ -38,6 +45,9 @@ pub struct RuntimeConfig {
     pub kill_grace_ms: u64,
     #[serde(default = "cache_path")]
     pub cache_path: String,
+    /// Read-only directory of the revision artifacts the worker may run, by digest.
+    #[serde(default = "artifact_path")]
+    pub artifact_path: String,
     #[serde(default)]
     pub egress: EgressConfig,
     pub falcone_api_endpoint: String,
@@ -82,6 +92,12 @@ fn readiness_probe_path() -> String {
 fn cache_path() -> String {
     "/var/cache/falcone-worker".into()
 }
+fn artifact_path() -> String {
+    "/var/lib/falcone-worker/artifacts".into()
+}
+fn listen_address() -> String {
+    "0.0.0.0".into()
+}
 fn dispatcher_key_path() -> String {
     "/var/run/falcone/dispatcher-keys".into()
 }
@@ -108,6 +124,27 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
             return Err(format!("{field}: must not be empty"));
         }
     }
+    if config.listen_address.parse::<std::net::IpAddr>().is_err() {
+        return Err("listen_address: must be an IP address".into());
+    }
+    if config.artifact_path.trim().is_empty() {
+        return Err("artifact_path: must not be empty".into());
+    }
+    let ports = [
+        config.listen_port,
+        config.control_port,
+        config.metrics_port,
+        config.probe_port,
+    ];
+    if ports
+        .iter()
+        .enumerate()
+        .any(|(index, port)| ports[..index].contains(port))
+    {
+        return Err(
+            "listen_port, control_port, metrics_port and probe_port must all differ".into(),
+        );
+    }
     if config.default_wall_clock_ms > config.max_wall_clock_ms {
         return Err("default_wall_clock_ms must not exceed max_wall_clock_ms".into());
     }
@@ -131,9 +168,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     const DOC: &str = include_str!("../../docs/contracts/worker-runtime-config.md");
-    const FIELDS: [[&str; 5]; 22] = [
+    const FIELDS: [[&str; 5]; 25] = [
         ["version", "u32", "none", "1", "false"],
         ["listen_port", "u16", "port", "8080", "false"],
+        ["listen_address", "string", "IP address", "0.0.0.0", "false"],
+        ["control_port", "u16", "port", "8082", "false"],
         ["metrics_port", "u16", "port", "9090", "false"],
         ["probe_port", "u16", "port", "8081", "false"],
         ["startup_probe_path", "string", "path", "/startupz", "false"],
@@ -153,6 +192,13 @@ mod tests {
             "string",
             "path",
             "/var/cache/falcone-worker",
+            "false",
+        ],
+        [
+            "artifact_path",
+            "string",
+            "path",
+            "/var/lib/falcone-worker/artifacts",
             "false",
         ],
         [
@@ -289,6 +335,8 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "listen_port": 8080,
+                "listen_address": "0.0.0.0",
+                "control_port": 8082,
                 "metrics_port": 9090,
                 "probe_port": 8081,
                 "startup_probe_path": "/startupz",
@@ -304,6 +352,7 @@ mod tests {
                 "checkpoint_reserve_ms": 10000,
                 "kill_grace_ms": 5000,
                 "cache_path": "/var/cache/falcone-worker",
+                "artifact_path": "/var/lib/falcone-worker/artifacts",
                 "egress": { "resolver": "/etc/resolv.conf", "allow_list": [] },
                 "falcone_api_endpoint": "https://falcone.example.test/api",
                 "falcone_dispatcher_endpoint": "https://dispatcher.example.test",

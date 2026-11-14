@@ -21,10 +21,10 @@ mod wire;
 pub use messages::{CancelMessage, UpdateMessage};
 pub use projection::Projection;
 pub use refusal::Refusal;
-pub use request::ExecuteRequest;
+pub use refusal::{Class, Code, Reason};
+pub use request::{Credential, ExecuteRequest, ExecutionLimits, Plan, WorkerCeilings};
 pub use result::{ExecutionResult, Pinned};
 
-use refusal::{Code, Reason};
 use serde::Deserialize;
 use std::fmt;
 use types::{Id, Positive};

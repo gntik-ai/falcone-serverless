@@ -3,8 +3,15 @@
 Contract version: v1
 
 This closed TOML contract provides `ctr-worker-runtime-config` for the Wasm worker,
-chart and controller. Adding a field requires v2. Unknown keys are rejected at every
-level. No runtime consumer, server, engine or cluster operation is implemented here.
+chart and controller. Adding a required field requires v2; RUN-01.t3 added the three
+optional fields `listen_address`, `control_port` and `artifact_path`, each with a default,
+so an existing v1 file stays valid. Unknown keys are rejected at every level. The parser
+itself runs no server, engine or cluster operation; the worker's `serve` command reads it
+(see the [execution API](worker-execution-api/execution-api-v1.md#listeners)).
+
+`listen_port` is the execute listener and `control_port` the control listener of the
+execution API. All four ports (`listen_port`, `control_port`, `metrics_port`, `probe_port`)
+must differ.
 
 ## Fields
 
@@ -18,6 +25,8 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | --- | --- | --- | --- | --- |
 | version | u32 | none | 1 | false |
 | listen_port | u16 | port | 8080 | false |
+| listen_address | string | IP address | 0.0.0.0 | false |
+| control_port | u16 | port | 8082 | false |
 | metrics_port | u16 | port | 9090 | false |
 | probe_port | u16 | port | 8081 | false |
 | startup_probe_path | string | path | /startupz | false |
@@ -33,6 +42,7 @@ identifier, not authorization derived from guest fields or Kubernetes labels.
 | checkpoint_reserve_ms | u64 | ms | 10000 | false |
 | kill_grace_ms | u64 | ms | 5000 | false |
 | cache_path | string | path | /var/cache/falcone-worker | false |
+| artifact_path | string | path | /var/lib/falcone-worker/artifacts | false |
 | egress.resolver | string | path | /etc/resolv.conf | false |
 | egress.allow_list | array<string> | URL origin | [] | false |
 | falcone_api_endpoint | string | URL | none | true |
@@ -86,6 +96,8 @@ guest, starts no server, contacts no endpoint and accesses no cluster.
 ```toml
 version = 1
 listen_port = 8080
+listen_address = "0.0.0.0"
+control_port = 8082
 metrics_port = 9090
 probe_port = 8081
 startup_probe_path = "/startupz"
@@ -101,6 +113,7 @@ cancel_reserve_ms = 5000
 checkpoint_reserve_ms = 10000
 kill_grace_ms = 5000
 cache_path = "/var/cache/falcone-worker"
+artifact_path = "/var/lib/falcone-worker/artifacts"
 falcone_api_endpoint = "https://falcone.example.test/api"
 falcone_dispatcher_endpoint = "https://dispatcher.example.test"
 dispatcher_key_path = "/var/run/falcone/dispatcher-keys"

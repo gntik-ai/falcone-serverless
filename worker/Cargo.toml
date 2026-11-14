@@ -13,6 +13,11 @@ path = "src/qualification/posture.rs"
 [lints]
 workspace = true
 
+[features]
+# Test and qualification builds only: delay hooks and validation counters of the execution
+# API server. Never enabled in the production image.
+qualification = []
+
 # Shared crates for the first contract tasks (#60, #65, #67, #100). The worker sandbox is
 # offline and only reads crates already in Cargo.lock, so they are added here once, at
 # reviewed versions released at least two weeks ago.
@@ -29,6 +34,8 @@ wasmparser = { workspace = true }
 sha2 = { workspace = true }
 # Already locked; authenticates only process-local trusted compiler output.
 ring = "=0.17.14"
+# Already locked (1.1.5, through regex): one leftmost-longest matcher for log redaction.
+aho-corasick = "=1.1.5"
 
 [[bin]]
 name = "artifact-compile-child"
@@ -38,7 +45,15 @@ path = "src/artifact/compile_child.rs"
 name = "compile-cache-qualification"
 path = "src/qualification/compile_cache_runner.rs"
 
+# Restricted-pod qualification of the execution API (RUN-01.t3); test hooks need the feature.
+[[bin]]
+name = "execute-api-qualification"
+path = "src/qualification/execute_api_runner.rs"
+required-features = ["qualification"]
+
 [dev-dependencies]
+# Turns on the test-only hooks of the execution API server for this package's own tests.
+falcone-serverless-worker = { path = ".", features = ["qualification"] }
 wat = "=1.258.3"
 wit-parser = "=0.262.0"
 # WAS-01 static checks (#115).

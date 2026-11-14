@@ -31,6 +31,21 @@ impl<'a> Validated<'a> {
     pub fn bytes(&self) -> &'a [u8] {
         self.bytes
     }
+
+    /// The outcome without the borrow, for a caller that validated on another thread and
+    /// compiles the same bytes later. Only `validate` can mint one.
+    pub fn checked(&self) -> Checked {
+        Checked {
+            artifact_digest: self.artifact_digest,
+        }
+    }
+}
+
+/// The result of one successful `validate` of some bytes. Compiling those bytes through
+/// `Cache::compile_checked` does not validate them a second time.
+#[derive(Clone, Debug)]
+pub struct Checked {
+    pub artifact_digest: [u8; 32],
 }
 
 /// No process may receive bytes until this raw-component boundary succeeds.

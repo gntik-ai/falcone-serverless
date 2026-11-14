@@ -1,8 +1,11 @@
 //! Failure codes, their classes, and the refusal envelope.
 //!
 //! The three `GW_` codes are named and meant exactly as in ctr-functions-api v1 and are only
-//! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`
-//! and `request_too_large`. Nothing in this module reads a request field.
+//! referenced here. The worker-only codes are `runtime_mode_not_supported`, `invalid_request`,
+//! `request_too_large`, and the outcomes of serving an execution: `busy`, `undeclared_import`,
+//! `timeout`, `cancelled` and `execution_failed`. Every failure beyond those is a
+//! `detail.reason` of one of them, never a new code. Nothing in this module reads a request
+//! field.
 
 use super::types::{Count, Text};
 use super::wire::unit_debug;
@@ -35,6 +38,16 @@ pub enum Code {
     InvalidRequest,
     #[serde(rename = "request_too_large")]
     RequestTooLarge,
+    #[serde(rename = "busy")]
+    Busy,
+    #[serde(rename = "undeclared_import")]
+    UndeclaredImport,
+    #[serde(rename = "timeout")]
+    Timeout,
+    #[serde(rename = "cancelled")]
+    Cancelled,
+    #[serde(rename = "execution_failed")]
+    ExecutionFailed,
 }
 unit_debug!(
     Code: OciNotAuthorized,
@@ -43,6 +56,11 @@ unit_debug!(
     RuntimeModeNotSupported,
     InvalidRequest,
     RequestTooLarge,
+    Busy,
+    UndeclaredImport,
+    Timeout,
+    Cancelled,
+    ExecutionFailed,
 );
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +73,27 @@ pub enum Reason {
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    MalformedRequest,
+    BudgetAboveWorkerCeiling,
+    EngineVersionMismatch,
+    ArtifactDigestMismatch,
+    NoCapacity,
+    UndeclaredImport,
+    DeadlineExceeded,
+    CancelRequested,
+    MemoryBudgetExceeded,
+    FuelExhausted,
+    HostCallBudgetExceeded,
+    BufferLimitExceeded,
+    HandlerFailed,
+    HandlerTrapped,
+    InstantiationFailed,
+    InvalidHandlerResult,
+    ArtifactRejected,
+    ArtifactUnavailable,
+    CompileFailed,
+    SetupFailed,
+    UncertainSideEffects,
 }
 unit_debug!(
     Reason: OciNotAuthorized,
@@ -64,6 +103,27 @@ unit_debug!(
     MissingPath,
     NonJsonBody,
     BodyTooLarge,
+    MalformedRequest,
+    BudgetAboveWorkerCeiling,
+    EngineVersionMismatch,
+    ArtifactDigestMismatch,
+    NoCapacity,
+    UndeclaredImport,
+    DeadlineExceeded,
+    CancelRequested,
+    MemoryBudgetExceeded,
+    FuelExhausted,
+    HostCallBudgetExceeded,
+    BufferLimitExceeded,
+    HandlerFailed,
+    HandlerTrapped,
+    InstantiationFailed,
+    InvalidHandlerResult,
+    ArtifactRejected,
+    ArtifactUnavailable,
+    CompileFailed,
+    SetupFailed,
+    UncertainSideEffects,
 );
 
 impl Code {
@@ -73,6 +133,13 @@ impl Code {
             Self::BaseDisabled | Self::BaseMismatch | Self::RuntimeModeNotSupported => 409,
             Self::InvalidRequest => 400,
             Self::RequestTooLarge => 413,
+            Self::Busy => 503,
+            Self::UndeclaredImport => 422,
+            Self::Timeout => 504,
+            // No standard status says "the caller withdrew the request"; 499 is the widely
+            // understood one.
+            Self::Cancelled => 499,
+            Self::ExecutionFailed => 500,
         }
     }
 
@@ -86,10 +153,18 @@ impl Code {
             }
             Self::InvalidRequest => "The request is malformed.",
             Self::RequestTooLarge => "The request body exceeds the size budget.",
+            Self::Busy => "The worker has no free execution capacity.",
+            Self::UndeclaredImport => {
+                "The component imports an interface the revision did not declare."
+            }
+            Self::Timeout => "The execution reached its deadline.",
+            Self::Cancelled => "The execution was cancelled.",
+            Self::ExecutionFailed => "The execution failed.",
         }
     }
 
     /// Retries never change the class: a retried attempt of a non-retryable code stays so.
+    /// Every v1 code is `non_retryable`; later revisions add codes of the other classes.
     pub(crate) fn class(self) -> Class {
         Class::NonRetryable
     }
@@ -103,9 +178,34 @@ impl Code {
                 | (Self::RuntimeModeNotSupported, Reason::RuntimeModeNotWasm)
                 | (
                     Self::InvalidRequest,
-                    Reason::MissingPath | Reason::NonJsonBody
+                    Reason::MissingPath
+                        | Reason::NonJsonBody
+                        | Reason::MalformedRequest
+                        | Reason::BudgetAboveWorkerCeiling
+                        | Reason::EngineVersionMismatch
+                        | Reason::ArtifactDigestMismatch
                 )
                 | (Self::RequestTooLarge, Reason::BodyTooLarge)
+                | (Self::Busy, Reason::NoCapacity)
+                | (Self::UndeclaredImport, Reason::UndeclaredImport)
+                | (Self::Timeout, Reason::DeadlineExceeded)
+                | (Self::Cancelled, Reason::CancelRequested)
+                | (
+                    Self::ExecutionFailed,
+                    Reason::MemoryBudgetExceeded
+                        | Reason::FuelExhausted
+                        | Reason::HostCallBudgetExceeded
+                        | Reason::BufferLimitExceeded
+                        | Reason::HandlerFailed
+                        | Reason::HandlerTrapped
+                        | Reason::InstantiationFailed
+                        | Reason::InvalidHandlerResult
+                        | Reason::ArtifactRejected
+                        | Reason::ArtifactUnavailable
+                        | Reason::CompileFailed
+                        | Reason::SetupFailed
+                        | Reason::UncertainSideEffects
+                )
         )
     }
 }
@@ -128,7 +228,7 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    pub(crate) fn new(code: Code, reason: Reason) -> Self {
+    pub fn new(code: Code, reason: Reason) -> Self {
         debug_assert!(code.allows(reason));
         Self {
             status: Count::from(code.status()),
@@ -153,6 +253,18 @@ impl Refusal {
 
     pub(crate) fn class(&self) -> Class {
         self.code.class()
+    }
+
+    pub fn status(&self) -> u16 {
+        self.code.status()
+    }
+
+    pub fn code(&self) -> Code {
+        self.code
+    }
+
+    pub fn reason(&self) -> Reason {
+        self.detail.reason
     }
 }
 

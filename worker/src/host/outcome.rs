@@ -10,6 +10,10 @@ pub enum InvocationOutcome {
     BufferLimit,
     Cancelled,
     Uncertain,
+    /// The revision's `fuel` budget ran out.
+    FuelExhausted,
+    /// The call after `max_host_calls` was refused before it reached the host.
+    HostCallBudget,
     Failed,
 }
 
@@ -28,6 +32,22 @@ pub fn classify(host: &Host, result: Result<(), &engine::Error>) -> InvocationOu
         )
     }) {
         return InvocationOutcome::GuestInterrupted;
+    }
+    // A call that started at or after the deadline is a timeout even when it would also
+    // have exceeded `max_host_calls`: the deadline is checked before the entry is counted.
+    if host.deadline_refused_call() {
+        return InvocationOutcome::GuestInterrupted;
+    }
+    if result.is_err_and(|error| {
+        matches!(
+            error.downcast_ref::<engine::Trap>(),
+            Some(engine::Trap::OutOfFuel)
+        )
+    }) {
+        return InvocationOutcome::FuelExhausted;
+    }
+    if host.host_call_budget_exceeded() {
+        return InvocationOutcome::HostCallBudget;
     }
     if host.cancelled_host_call() {
         return InvocationOutcome::Cancelled;

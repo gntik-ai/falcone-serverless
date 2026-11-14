@@ -74,3 +74,51 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+impl UpdateMessage {
+    /// The activation and attempt the update is for.
+    pub fn key(&self) -> (&str, &str) {
+        (self.activation_id.as_str(), self.attempt_id.as_str())
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence.get()
+    }
+}
+
+impl CancelMessage {
+    /// The activation and attempt the cancel is for.
+    pub fn key(&self) -> (&str, &str) {
+        (self.activation_id.as_str(), self.attempt_id.as_str())
+    }
+
+    /// Whether this is a dispatcher request; `acknowledged` and `uncertain` are worker
+    /// answers and are not accepted as requests.
+    pub fn is_requested(&self) -> bool {
+        matches!(self.cancel, Cancel::Requested {})
+    }
+
+    /// The worker's answer: the execution observed the cancel and ended.
+    pub fn acknowledged(&self) -> Self {
+        self.answer(Cancel::Acknowledged {})
+    }
+
+    /// The worker's answer when the outcome of the cancellation is not known.
+    pub fn uncertain(&self) -> Self {
+        self.answer(Cancel::Uncertain {})
+    }
+
+    fn answer(&self, cancel: Cancel) -> Self {
+        Self {
+            version: self.version,
+            message: self.message,
+            activation_id: self.activation_id.clone(),
+            attempt_id: self.attempt_id.clone(),
+            cancel,
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        serde_json::to_vec(self).unwrap_or_default()
+    }
+}

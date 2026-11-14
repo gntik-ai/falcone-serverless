@@ -458,7 +458,9 @@ pub fn timeout_isolation() {
 struct CancelDeadline(Arc<std::sync::atomic::AtomicBool>);
 impl Bindings for CancelDeadline {
     fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-        std::thread::sleep(std::time::Duration::from_millis(250));
+        // A host call never outlives the invocation's deadline (200 ms here), so the
+        // cancellation has to arrive before it to be the outcome.
+        std::thread::sleep(std::time::Duration::from_millis(50));
         self.0.store(true, std::sync::atomic::Ordering::Release);
         Ok(Reply::Empty)
     }

@@ -130,6 +130,22 @@ impl Grant {
     }
 }
 
+impl Grant {
+    /// Adds this grant's concrete scope to the host's grants. Wildcards were already
+    /// refused when the request parsed; the host also ignores them.
+    pub(crate) fn add_to(&self, grants: &mut crate::host::Grants) {
+        let (names, target) = match self.family {
+            Family::Storage => (&self.scope.prefixes, &mut grants.prefixes),
+            Family::Http => (&self.scope.hosts, &mut grants.hosts),
+            Family::Event => (&self.scope.topics, &mut grants.topics),
+            Family::Workflow => (&self.scope.targets, &mut grants.targets),
+        };
+        if let Some(Names(names)) = names {
+            target.extend(names.iter().cloned());
+        }
+    }
+}
+
 /// Whether every grant names the interface of `version` and the scope of its family.
 pub(crate) fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
     grants.iter().all(|grant| grant.valid(version))

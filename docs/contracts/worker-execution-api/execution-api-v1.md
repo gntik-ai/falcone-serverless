@@ -4,9 +4,10 @@ Contract: ctr-worker-execution-api
 Version: 1
 
 This is the Wasm-worker execution API of RUN-01 (FR-RUN-01, FR-RUN-02), the early provider of
-`ctr-worker-execution-api` under ADR 0010 D1. It defines messages and parsers only: nothing here
-executes a guest, speaks a transport or reads a credential store. The dispatcher adopts it in a
-later issue; until then the types in `worker/src/api` are inert. The
+`ctr-worker-execution-api` under ADR 0010 D1. It defines the messages, their parsers, and the
+HTTP service of the worker (`worker/src/server`, started by `falcone-serverless-worker serve`)
+that carries execute, update and cancel; see [Listeners](#listeners). How the dispatcher
+authenticates to the service is not defined here: INV-01 (gntik-ai/falcone) records it. The
 [OCI profile](oci-profile.md) is an independent profile of the same contract name for mode `oci`.
 
 ADR 0006 (pool identity and the credential format) and ADR 0009 (Falcone authoritative for
@@ -140,14 +141,26 @@ without changing these. The machine-readable table is [failure-codes.v1.json](fa
 | `GW_BASE_DISABLED` | 409 | `base_disabled` | non_retryable | ctr-functions-api v1 |
 | `GW_BASE_MISMATCH` | 409 | `base_mismatch` | non_retryable | ctr-functions-api v1 |
 | `runtime_mode_not_supported` | 409 | `runtime_mode_not_wasm` | non_retryable | worker only |
-| `invalid_request` | 400 | `missing_path` or `non_json_body` | non_retryable | worker only |
+| `invalid_request` | 400 | `missing_path`, `non_json_body`, `malformed_request`, `budget_above_worker_ceiling`, `engine_version_mismatch` or `artifact_digest_mismatch` | non_retryable | worker only |
 | `request_too_large` | 413 | `body_too_large` | non_retryable | worker only |
+| `busy` | 503 | `no_capacity` | non_retryable | worker only |
+| `undeclared_import` | 422 | `undeclared_import` | non_retryable | worker only |
+| `timeout` | 504 | `deadline_exceeded` | non_retryable | worker only |
+| `cancelled` | 499 | `cancel_requested` | non_retryable | worker only |
+| `execution_failed` | 500 | `memory_budget_exceeded`, `fuel_exhausted`, `host_call_budget_exceeded`, `buffer_limit_exceeded`, `handler_failed`, `handler_trapped`, `instantiation_failed`, `invalid_handler_result`, `artifact_rejected`, `artifact_unavailable`, `compile_failed`, `setup_failed` or `uncertain_side_effects` | non_retryable | worker only |
 
 The three `GW_` codes are referenced, not defined: their names, statuses and reasons are those of
 the pinned error fixtures (below). ctr-functions-api v1 defines no other base error code. The
-worker-only codes are exactly the last three: the non-wasm refusal, and the two refusals the
-operator allowed for the legacy inputs below. Adding `GW_` equivalents to the functions API is a
-follow-up. A request this worker refuses carries no request value in its message.
+worker-only codes are the other eight: the non-wasm refusal, the two refusals the operator
+allowed for the legacy inputs below, and the five outcomes of serving an execution (`busy`,
+`undeclared_import`, `timeout`, `cancelled`, `execution_failed`). Every further failure is a
+`detail.reason` of one of them, never a new code. Adding `GW_` equivalents to the functions API
+is a follow-up. A request this worker refuses carries no request value in its message.
+
+`cancelled` has status 499 because no standard status says that the caller withdrew the request.
+`busy` is `non_retryable` as a class like every v1 code: nothing ran, and the dispatcher decides
+what to do with a refusal that depends on capacity, not on the request. A later revision may give
+it another class.
 
 ### The non-wasm refusal
 
@@ -172,6 +185,181 @@ The checks run in this order: path, size, JSON. The size is `max-host-to-guest-b
 case-insensitively with `application/json` ignoring parameters. The fixture labels of the inventory
 (`envelope-invalid`, `body-not-json`, `body-too-large`) are not wire codes; this mapping is. The
 legacy handler is not invoked for any of them.
+
+## Listeners
+
+The worker serves the API on two pod-local listeners, configured in the
+[runtime configuration](../worker-runtime-config.md) (`listen_address`, `listen_port`,
+`control_port`). They are separate sockets with separate capacity: no traffic on one can take
+capacity from the other.
+
+| | Execute listener | Control listener |
+| --- | --- | --- |
+| Address | `listen_address:listen_port` (default 8080) | `listen_address:control_port` (default 8082) |
+| Serves | `POST /v1/execute` only | `POST /v1/cancel` and `POST /v1/update` only |
+| Anything else | `404` (including the other listener's operations) | `404` (including `/v1/execute`) |
+| Connections | `concurrency` running executions plus 8 in admission | 16 |
+| Header limit and deadline | 16 KiB, 5 s absolute from accept | 4 KiB, 2 s absolute from accept |
+| Body limit and deadline | 8 MiB, 10 s absolute from the end of the headers | 64 KiB, 2 s absolute from the end of the headers |
+| Response deadline | 5 s absolute from the first response byte | 2 s absolute from the first response byte |
+
+The control transport is a second TCP port, not a Unix socket: the dispatcher runs in another
+pod, so it reaches control at the worker pod's address on `control_port` (a Service or the pod
+IP; exposing it is a chart concern). How the dispatcher authenticates to either listener is
+undecided and recorded with INV-01; until then the listeners carry no authentication and must be
+reachable only through the NetworkPolicy of the pool.
+
+Every deadline is an absolute instant: each read or write gets only the time that is left, so a
+peer that sends or reads one byte at a time cannot extend it. A connection that has no complete
+request line and headers by the header deadline, whose body does not complete by the body
+deadline, or that does not take the whole response by the response deadline, is closed. There is
+one request per connection (`Connection: close`), no keep-alive, no chunked request bodies and no
+upgrade.
+
+An execute request that exceeds a size limit is refused without running a guest: headers over
+16 KiB get `431` (or the connection is closed), a `Content-Length` over 8 MiB gets `413` with the
+`request_too_large` envelope before any body is read, and an `__ow_body` over 1048576 bytes gets
+`413` with the attributed result of the legacy-input table above. Control messages over their
+limit get `413` the same way. A response that is not an execution result (the `404`, `411`, `431`
+and malformed-HTTP answers) is `{"error": "<name>"}`; a refusal that has no activation to
+attribute (`busy`, malformed, over-large) is the bare failure envelope of the table above.
+
+### Admission
+
+The execute listener answers a connection beyond its connection limit with `503 busy` at once and
+reads nothing. Otherwise, after the headers:
+
+1. With every execution slot busy the body is not read, with one exception. A body that arrived
+   with the headers and is complete is parsed, and a request whose `runtime_mode` is not `wasm`
+   still gets `409 runtime_mode_not_supported` first. Anything else gets `503 busy`.
+2. With a free slot the body is read, parsed and refused or admitted as above. A request that
+   loses the race for the slot, or repeats the `activation_id` and `attempt_id` of a running
+   execution, gets `503 busy`.
+
+An execution slot is held from admission to the end of the execution, never while the response is
+written: a client that reads slowly holds a connection until the response deadline, not a slot.
+
+### One absolute deadline
+
+`until` is computed once, at admission:
+
+`until = admission + min(request deadline - now, projection budgets.timeout_ms, max_wall_clock_ms)`
+
+The request limit is the execute message's `deadline` (an absolute UTC time); a deadline that has
+passed leaves no time, and no stage starts. The same `until` bounds, in order:
+
+1. fetching and validating the artifact, on a helper the execution can leave;
+2. waiting for and running the supervised compile child (its wall clock is `until`);
+3. `Platform::bind`, on a helper the execution can leave;
+4. instantiation (the store's epoch deadline is derived from `until`), and a check that `until`
+   has not passed after instantiation and before the handler is invoked;
+5. every host call: its timeout is `min(host-call ceiling, until - now)`, and a call that starts
+   at or after `until` is refused without reaching the host. The deadline is checked before the
+   call is counted, so a late call ends the execution as `timeout` even when it would also have
+   exceeded `max_host_calls`.
+
+A stage that crosses `until`, or sees the cancellation, ends the execution as `504 timeout` or
+`499 cancelled` before the guest starts, and the execution slot is released within the
+termination budget of 500 ms: the artifact is validated on a helper thread that the execution
+leaves (the helper finishes on its own, and the number of live helpers is capped), never in the
+execution's own thread. Each artifact is validated exactly once per execution. A blocked
+`Platform::bind` can neither hold the slot past `until` nor ignore the cancellation.
+
+An execution that reaches `until` answers within the termination budget of 500 ms after it; the
+qualification measures this against the 500 ms of cancellation and timeout during validation, and
+against a tolerance of one second for the timeout-selection cases, which include scheduling.
+
+A host call that blocks inside the host ends at `until`. Cancelling a guest that is blocked in a
+host call cannot interrupt the call itself before RUN-02: the guest gets the timeout or the
+cancellation when the call returns or at `until`, and the cancel answer is `uncertain`.
+
+### Imports
+
+Every import of the component must be declared in the projection's `imports` and be one the worker
+provides (`ALLOWED_IMPORTS`); an empty `imports` means none. Any other import, whether the
+projection omits it or the worker does not provide it, ends the request as `422 undeclared_import`
+before anything is compiled or instantiated.
+
+### Budgets
+
+The projection's `budgets` are limits, enforced and never replaced by a default.
+
+| Budget | Enforcement | Failure |
+| --- | --- | --- |
+| `memory_bytes` | guest memory is the least of the budget, `max_memory_bytes` and the compatibility ceiling (256 MiB); instantiation or `memory.grow` past it fails the execution | `execution_failed` / `memory_budget_exceeded` |
+| `fuel` | the store's fuel; running out ends the execution | `execution_failed` / `fuel_exhausted` |
+| `max_host_calls` | every guest-to-host entry counts, including storage open and drop callbacks and calls the grants deny; the call after the last is refused before it reaches the host and ends the execution | `execution_failed` / `host_call_budget_exceeded` |
+| `timeout_ms` | part of `until` above | `timeout` / `deadline_exceeded` |
+
+A `memory_bytes` above the worker's `max_memory_bytes` (or above the compatibility ceiling) is
+refused before anything is compiled, as `invalid_request` / `budget_above_worker_ceiling`. A
+projection whose `engine_version` is not the worker's pinned Wasmtime is refused as
+`invalid_request` / `engine_version_mismatch`, because the result reports that version as the
+runtime identity. An artifact whose digest is not the projection's `artifact_digest` is refused as
+`invalid_request` / `artifact_digest_mismatch`.
+
+### Outcomes
+
+| Outcome | Result |
+| --- | --- |
+| The guest returned a legacy result | `200`, `status` `success`, `result` the handler result, `identity` of the projection |
+| The deadline passed (including inside a host call, or before the guest started) | `504 timeout` |
+| The cancellation was observed | `499 cancelled` |
+| A mutating host call was in flight when the execution ended | `500 execution_failed` / `uncertain_side_effects` |
+| Memory, fuel or host-call budget exceeded | `500 execution_failed` with that reason |
+| Handler error, trap, failed instantiation, unusable result, rejected or unavailable artifact, failed compile or bind | `500 execution_failed` with the matching reason |
+
+Every failure that ran, or that could have, carries `activation_id`, `attempt_id`,
+`attempt_number`, the `identity` block of the projection and the logs.
+
+### Cancel and update
+
+`POST /v1/cancel` takes a `cancel` message in state `requested`. The worker sets the cancellation
+of the running execution identified by `activation_id` and `attempt_id` and waits at most 1 s
+(`CANCEL_WAIT`) for it to end. The answer is `200` with a `cancel` message in state
+`acknowledged` (the execution ended, with no mutating host call left in flight) or `uncertain`
+(it did not end within the wait, or ended with a mutating host call that may still complete
+because a host call cannot be interrupted inside the host before RUN-02, or it is not running: it
+may have ended on its own or never started). No answer claims that external side effects were
+reversed.
+A message in another state, or a malformed one, is `400`.
+
+`POST /v1/update` takes an `update` message. For a running execution the worker records it (the
+highest `sequence` wins) and answers `204`; otherwise `404`. The worker does not forward updates.
+
+### Logs and the credential
+
+The execution credential is held only by the host binding layer (`Platform::bind`). It is not part
+of the guest's input, environment, files or memory: the guest gets the `params` object, the
+invocation identity and the capabilities its grants name. Every string of the credential claims is
+redacted from the logs of a result:
+
+1. each log line is cut to 8192 characters, and at most 1000 lines are kept, before anything else;
+2. one multi-pattern matcher is built per execution, every occurrence of every string is found,
+   overlapping and prefix-sharing ones included, and each covered span becomes `<redacted>`;
+3. the output is cut to 8192 characters again, because a replacement can be longer than what it
+   replaced;
+4. the work is bounded: at most 100000 distinct strings, 1 MiB of string bytes and 8000000
+   matches per execution. Past any of them the logs are dropped and the result carries the one
+   line `<redacted>`, never unredacted text.
+
+The worker's own messages carry no request value: errors name a fixed code or reason.
+
+### Platform
+
+`Platform` is the host binding layer's boundary: it supplies the artifact the plan's
+`artifact_digest` names and binds the execution's capabilities. The production worker's
+`LocalPlatform` reads artifacts from the read-only directory `artifact_path`, as
+`<sha256 hex>.wasm`, and grants nothing remote: storage, HTTP, events and workflows are denied,
+logging and progress are accepted and dropped. The remote capability bindings follow the
+dispatcher and Falcone contracts (INV-01); until then a pool stays at zero replicas, and the kill
+switch is zero replicas or rolling back the image digest.
+
+### Not in this contract
+
+Drain, probes, and limit enforcement beyond the per-execution budgets and the deadline above are
+RUN-02. ADR 0006 (the credential format) and ADR 0010 (the OCI execution path) are Proposed and
+not claimed accepted here.
 
 ## Grant versions
 
@@ -211,6 +399,10 @@ no guest code and no network access:
   the worker-only codes are exactly the three above;
 - the legacy fixtures of the inventory are used byte for byte, with sha256 values equal to the
   inventory, and valid ones round-trip through the worker types unchanged.
+
+Execution behaviour is covered by `worker/tests/execute_api_local.rs` (real sockets, in
+process) and `worker/tests/cluster_execute_api.rs` (the restricted-pod qualification; see
+[the qualification record](../../qualification/execute-api/README.md)).
 
 ## Provenance
 

@@ -108,6 +108,11 @@ lifting allocates a result or error message. Hooks restore the existing import
 budget when entering guest code or a host import. This changes the compiled
 Wasmtime surface and is part of the R3 second review and operator approval;
 it adds no packages, changes no versions and leaves Cargo.lock unchanged.
+RUN-01.t3 (the worker execution API) adds two worker table entries and no package: the
+already locked `aho-corasick =1.1.5` (one multi-pattern matcher for log redaction, bounded
+in time) and a dev-dependency of the worker on itself with the `qualification` feature, which
+turns on the test hooks of the execution API server for its own tests (the feature is never
+enabled in the production image). Both are part of the R3 second review.
 Existing dependency tables are intentional. Any other changed entry or added lock
 package requires an explicit review and guard update; the evidence report adds no
 dependencies. Fixture tests check that

@@ -45,6 +45,17 @@ macro_rules! string_type {
     };
 }
 
+/// The validated text, for the worker's own use; never for formatting.
+macro_rules! as_str {
+    ($($ty:ident),+) => {$(
+        impl $ty {
+            pub(crate) fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    )+};
+}
+
 fn id(value: &str) -> bool {
     let bytes = value.as_bytes();
     (1..=128).contains(&bytes.len())
@@ -166,6 +177,7 @@ string_type!(
     Deadline,
     timestamp
 );
+as_str!(Id, Text, NonEmpty, Digest);
 
 /// The largest integer the contract carries: 2^53 - 1, exactly representable in any JSON reader.
 const MAX_WHOLE: u64 = 9_007_199_254_740_991;
@@ -194,6 +206,12 @@ fn whole<'de, D: Deserializer<'de>>(input: D) -> Result<u64, D::Error> {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct Positive(u64);
+
+impl Positive {
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+}
 
 impl<'de> Deserialize<'de> for Positive {
     fn deserialize<D: Deserializer<'de>>(input: D) -> Result<Self, D::Error> {
@@ -272,3 +290,56 @@ impl<'de> Deserialize<'de> for Logs {
     }
 }
 redacted!(Logs);
+
+impl Logs {
+    /// The most lines and the most characters per line a result carries.
+    pub const MAX_LINES: usize = 1000;
+    pub const MAX_LINE_CHARS: usize = 8192;
+
+    /// Logs that always satisfy the schema: surplus lines are dropped and long lines cut.
+    pub(crate) fn bounded(lines: Vec<String>) -> Self {
+        Self(
+            lines
+                .into_iter()
+                .take(Self::MAX_LINES)
+                .map(|line| match line.char_indices().nth(Self::MAX_LINE_CHARS) {
+                    Some((end, _)) => line[..end].to_owned(),
+                    None => line,
+                })
+                .collect(),
+        )
+    }
+}
+
+impl Deadline {
+    /// The instant this deadline names. The text already matched `timestamp`, so every
+    /// field is in range; a year before 1970 saturates to the epoch.
+    pub(crate) fn to_system_time(&self) -> std::time::SystemTime {
+        let b = self.0.as_bytes();
+        let number =
+            |range: std::ops::Range<usize>| i64::from(self.0[range].parse::<u32>().unwrap_or(0));
+        let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+        let seconds = number(11..13) * 3600 + number(14..16) * 60 + number(17..19);
+        // Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+        let year = if month <= 2 { year - 1 } else { year };
+        let era = year.div_euclid(400);
+        let year_of_era = year - era * 400;
+        let shifted = if month > 2 { month - 3 } else { month + 9 };
+        let day_of_year = (153 * shifted + 2) / 5 + day - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        let days = era * 146_097 + day_of_era - 719_468;
+        let whole = u64::try_from(days * 86_400 + seconds).unwrap_or(0);
+        let fraction = &b[19..b.len() - 1];
+        let nanos = if fraction.len() > 1 {
+            let digits = &fraction[1..];
+            let value: u32 = std::str::from_utf8(digits)
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0);
+            value * 10u32.pow(9 - digits.len() as u32)
+        } else {
+            0
+        };
+        std::time::UNIX_EPOCH + std::time::Duration::new(whole, nanos)
+    }
+}

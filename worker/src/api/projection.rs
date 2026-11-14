@@ -53,6 +53,16 @@ pub struct Budgets {
 }
 redacted!(Budgets);
 
+/// The revision's budgets as plain numbers: limits, not observations.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RevisionBudgets {
+    pub fuel: u64,
+    pub memory_bytes: u64,
+    pub timeout_ms: u64,
+    pub max_host_calls: u64,
+}
+redacted!(RevisionBudgets);
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
@@ -78,6 +88,35 @@ pub struct Projection {
 redacted!(Projection);
 
 impl Projection {
+    /// The concrete scopes the revision's grants give the host.
+    pub(crate) fn host_grants(&self) -> crate::host::Grants {
+        let mut grants = crate::host::Grants::default();
+        for grant in &self.grants {
+            grant.add_to(&mut grants);
+        }
+        grants
+    }
+
+    pub(crate) fn declared_imports(&self) -> Vec<String> {
+        self.imports
+            .iter()
+            .map(|text| text.as_str().to_owned())
+            .collect()
+    }
+
+    pub(crate) fn engine_version(&self) -> &str {
+        self.engine_version.as_str()
+    }
+
+    pub(crate) fn budgets(&self) -> RevisionBudgets {
+        RevisionBudgets {
+            fuel: self.budgets.fuel.get(),
+            memory_bytes: self.budgets.memory_bytes.get(),
+            timeout_ms: self.budgets.timeout_ms.get(),
+            max_host_calls: self.budgets.max_host_calls.get(),
+        }
+    }
+
     /// The rules a schema cannot attach to one field.
     pub(crate) fn check(&self) -> Result<(), Malformed> {
         if all_valid(&self.grants, GrantVersion::V020) {

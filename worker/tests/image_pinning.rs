@@ -128,6 +128,27 @@ fn committed_image_has_pinned_toolchain_and_runtime_inputs() {
     assert!(!containerfile.lines().any(|line| line.starts_with("ADD ")));
 }
 
+#[test]
+fn committed_image_ships_the_compile_child_beside_the_worker() {
+    let containerfile = read("worker/Containerfile");
+    let copies: Vec<_> = containerfile
+        .lines()
+        .filter(|line| line.starts_with("COPY --from=build"))
+        .collect();
+    let worker = "/usr/local/bin/falcone-serverless-worker";
+    let child = "/usr/local/bin/artifact-compile-child";
+    assert!(
+        copies.iter().any(|line| line.ends_with(worker)),
+        "{copies:?}"
+    );
+    // `main.rs` resolves the compiler with `with_file_name`, so it must be the sibling.
+    assert!(
+        copies.iter().any(|line| line.ends_with(child)),
+        "{copies:?}"
+    );
+    assert!(read("worker/src/main.rs").contains("with_file_name(\"artifact-compile-child\")"));
+}
+
 fn fixture_b() -> String {
     let committed = read("worker/Containerfile");
     let images = external_images(&committed);

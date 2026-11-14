@@ -2,11 +2,6 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
-
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
@@ -58,6 +53,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let config = config::load_from_str(&input)?;
             serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
         }
+        [command, path] if command == "serve" => return serve_command(path, stdout),
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
         }
@@ -66,11 +62,80 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve CONFIG | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+/// The service configuration a worker runtime configuration describes.
+fn server_config(
+    config: &config::RuntimeConfig,
+    compiler: std::path::PathBuf,
+) -> Result<falcone_serverless_worker::server::ServerConfig, String> {
+    use falcone_serverless_worker::{
+        api::WorkerCeilings,
+        server::{ListenerLimits, ServerConfig},
+    };
+    let address = |port: u16| -> Result<std::net::SocketAddr, String> {
+        let ip = config
+            .listen_address
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| "listen_address: must be an IP address".to_owned())?;
+        Ok(std::net::SocketAddr::new(ip, port))
+    };
+    let concurrency = usize::try_from(config.concurrency)
+        .ok()
+        .filter(|count| *count > 0)
+        .ok_or("concurrency: must be at least 1")?;
+    Ok(ServerConfig {
+        execute_bind: address(config.listen_port)?,
+        control_bind: address(config.control_port)?,
+        concurrency,
+        ceilings: WorkerCeilings {
+            max_memory_bytes: config.max_memory_bytes,
+            max_wall_clock_ms: config.max_wall_clock_ms,
+        },
+        execute: ListenerLimits::execute(concurrency),
+        control: ListenerLimits::control(),
+        cache_dir: std::path::PathBuf::from(&config.cache_path),
+        compiler,
+    })
+}
+
+/// Serves the execution API until the process is stopped: the execute listener on
+/// `listen_port` and the control listener on `control_port`.
+fn serve_command(path: &std::ffi::OsStr, stdout: &mut dyn std::io::Write) -> Result<(), String> {
+    use falcone_serverless_worker::server::{LocalPlatform, Server};
+    let path = std::path::Path::new(path);
+    let input = std::fs::read_to_string(path)
+        .map_err(|error| format!("read config {}: {error}", path.display()))?;
+    let config = config::load_from_str(&input)?;
+    // The platform compiler is the trusted executable beside this one, never a path from a
+    // request or the environment.
+    let compiler = std::env::current_exe()
+        .map_err(|_| "compile_failed".to_owned())?
+        .with_file_name("artifact-compile-child");
+    let server = Server::start(
+        server_config(&config, compiler)?,
+        std::sync::Arc::new(LocalPlatform::new(&config.artifact_path)),
+    )?;
+    writeln!(
+        stdout,
+        "{}",
+        serde_json::json!({
+            "listening": {
+                "execute": server.execute_addr().to_string(),
+                "control": server.control_addr().to_string(),
+            }
+        })
+    )
+    .and_then(|()| stdout.flush())
+    .map_err(|error| error.to_string())?;
+    loop {
+        std::thread::park();
+    }
 }
 
 fn execute_command(

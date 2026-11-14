@@ -101,6 +101,32 @@ impl Limits {
     pub fn duration(self, field: Field) -> std::time::Duration {
         std::time::Duration::from_millis(self.value(field))
     }
+    /// A copy with one field replaced. The value must satisfy the same rules as a parsed
+    /// one: not zero, not unbounded and not above the field's ceiling.
+    pub fn with(self, field: Field, value: u64) -> Result<Self, ValidationError> {
+        let kind = if value == 0 {
+            Some(ValidationKind::Zero)
+        } else if value == u64::MAX {
+            Some(ValidationKind::Unbounded)
+        } else if value > field.ceiling() {
+            Some(ValidationKind::AboveCeiling)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            return Err(ValidationError {
+                field: field.name().into(),
+                kind,
+            });
+        }
+        let mut limits = self;
+        limits.values[field as usize] = value;
+        Ok(limits)
+    }
+    /// The highest value `with` accepts for the field.
+    pub const fn ceiling_of(field: Field) -> u64 {
+        field.ceiling()
+    }
     pub fn parse(json: &str) -> Result<Self, ValidationError> {
         let error = |field: &str, kind| ValidationError {
             field: field.into(),

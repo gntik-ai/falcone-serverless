@@ -11,7 +11,7 @@ use rustix::process::{Pid, Resource, Rlimit, prlimit};
 
 use super::Error;
 use super::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
-use super::validate::validate;
+use super::validate::{Checked, validate};
 
 /// Version 3 bounds native compiler output independently of raw input limits.
 pub const MAX_COMPILED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -77,6 +77,20 @@ impl Supervisor {
         cancelled: &AtomicBool,
     ) -> Result<(CacheKey, Vec<u8>), Error> {
         let validated = validate(bytes, limits.input_bytes)?;
+        self.compile_checked_output(validated.bytes(), &validated.checked(), limits, cancelled)
+    }
+
+    /// `compile_output` for bytes that `checked` already vouches for.
+    pub fn compile_checked_output(
+        &mut self,
+        bytes: &[u8],
+        checked: &Checked,
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+    ) -> Result<(CacheKey, Vec<u8>), Error> {
+        if bytes.len() > limits.input_bytes {
+            return Err(Error::new("compile_size_limit_exceeded"));
+        }
         if limits.input_bytes == 0
             || limits.cpu_seconds == 0
             || limits.cpu_seconds == u64::MAX
@@ -86,7 +100,7 @@ impl Supervisor {
             return Err(Error::new("compile_failed"));
         }
         let key = CacheKey::new(
-            validated.artifact_digest,
+            checked.artifact_digest,
             ENGINE_VERSION,
             std::env::consts::ARCH,
             ENGINE_CONFIG,
@@ -103,7 +117,7 @@ impl Supervisor {
         self.spawned.fetch_add(1, Ordering::Release);
         let child = self.last_child.as_mut().expect("just spawned child");
         // Before this returns, even setup and I/O failures terminate and reap.
-        let result = run(child, validated.bytes(), limits, cancelled);
+        let result = run(child, bytes, limits, cancelled);
         let cleanup = terminate_and_reap(child);
         cleanup?;
         Ok((key, result?))

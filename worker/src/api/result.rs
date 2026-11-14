@@ -1,5 +1,6 @@
 //! The result: the legacy `{status, result, logs}` envelope plus the activation identity.
 
+use super::Attribution;
 use super::projection::{LanguageProfile, Projection};
 use super::refusal::{Class, Refusal};
 use super::request::ExecuteRequest;
@@ -125,6 +126,69 @@ impl Pinned for ExecuteRequest {
 }
 
 impl ExecutionResult {
+    fn answering(
+        activity: &Attribution,
+        status: Status,
+        result: Outcome,
+        class: Option<Class>,
+        logs: Vec<String>,
+    ) -> Self {
+        Self {
+            version: Version::Only,
+            message: ResultType::Only,
+            activation_id: activity.activation_id.clone(),
+            attempt_id: activity.attempt_id.clone(),
+            attempt_number: activity.attempt_number,
+            status,
+            result,
+            class,
+            logs: Logs::bounded(logs),
+            identity: Identity::of(&activity.projection),
+        }
+    }
+
+    /// The success result for the legacy handler result `bytes`, or `None` when the guest
+    /// returned something that is not one.
+    pub fn success(activity: &Attribution, bytes: &[u8], logs: Vec<String>) -> Option<Self> {
+        let handler: HandlerResult = serde_json::from_slice(bytes).ok()?;
+        if !handler.status_code.within(100, 599)
+            || (handler.status_code.is(304) && handler.body.is_some())
+        {
+            return None;
+        }
+        Some(Self::answering(
+            activity,
+            Status::Success,
+            Outcome::Handler(handler),
+            None,
+            logs,
+        ))
+    }
+
+    /// The failure result of `refusal`, with its class.
+    pub fn failure(activity: &Attribution, refusal: Refusal, logs: Vec<String>) -> Self {
+        let class = refusal.class();
+        Self::answering(
+            activity,
+            Status::Failure,
+            Outcome::Failure(refusal),
+            Some(class),
+            logs,
+        )
+    }
+
+    /// The HTTP status that carries this result.
+    pub fn http_status(&self) -> u16 {
+        match &self.result {
+            Outcome::Failure(refusal) => refusal.status(),
+            Outcome::Handler(_) => 200,
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u8> {
+        serde_json::to_vec(self).unwrap_or_default()
+    }
+
     /// The rules a schema cannot attach to one field, and the identity of the pinned revision.
     pub(super) fn check(&self, pinned: &impl Pinned) -> Result<(), Malformed> {
         match (&self.status, &self.result, &self.class) {
@@ -156,6 +220,19 @@ impl ExecutionResult {
 }
 
 impl Identity {
+    /// What ran: the revision the projection pins, with the engine it names.
+    fn of(projection: &Projection) -> Self {
+        Self {
+            function_revision: projection.revision.clone(),
+            runtime_mode: projection.runtime_mode,
+            artifact_digest: projection.artifact_digest.clone(),
+            base_digest: projection.base_digest().cloned(),
+            wasmtime_version: projection.engine_version.clone(),
+            language_profile: projection.language_profile.clone(),
+            interface_version: projection.interface_version,
+        }
+    }
+
     /// The identity must describe the pinned revision, and `base_digest` is present exactly
     /// when the projection pins a base (both inverse mutations are rejected).
     fn check(&self, projection: &Projection) -> Result<(), Malformed> {

@@ -1,0 +1,43 @@
+(component
+  (import "falcone:host/events@0.2.0" (instance $events
+    (type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
+    (export "host-error" (type $error (eq $error-type)))
+    (export "publish" (func (param "destination" string) (param "payload" (list u8)) (result (result (error $error)))))))
+  (core module $memory (memory (export "memory") 64))
+  (core instance $memory (instantiate $memory))
+  (alias export $events "publish" (func $publish))
+  (core func $publish (canon lower (func $publish) (memory $memory "memory")))
+  (core instance $host
+    (export "memory" (memory $memory "memory"))
+    (export "publish" (func $publish)))
+  (type $bytes (list u8))
+  (type $error (variant (case "invalid-input" string) (case "failed" string)))
+  (type $result (result $bytes (error $error)))
+  (type $handle (func (param "params" $bytes) (result $result)))
+  (core module $guest
+    (import "host" "memory" (memory 64))
+    (import "host" "publish" (func $publish (param i32 i32 i32 i32 i32)))
+    (export "memory" (memory 0))
+    (data (i32.const 2097152) "{\"statusCode\":200,\"body\":\"ok\"}")
+    (data (i32.const 2097216) "orders")
+    (global $heap (mut i32) (i32.const 64))
+    (func (export "realloc") (param i32 i32 i32) (param $size i32) (result i32)
+      (local $ptr i32)
+      global.get $heap local.tee $ptr local.get $size i32.add global.set $heap
+      local.get $ptr)
+    (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
+      ;; One mutating host call, then the result.
+      (call $publish (i32.const 2097216) (i32.const 6) (i32.const 128) (i32.const 0) (i32.const 16))
+      (i32.store (i32.const 0) (i32.const 0))
+      (i32.store (i32.const 4) (i32.const 2097152))
+      (i32.store (i32.const 8) (i32.const 30))
+      i32.const 0)
+  )
+  (core instance $guest (instantiate $guest (with "host" (instance $host))))
+  (func $handle (type $handle) (canon lift (core func $guest "handle")
+    (memory $guest "memory") (realloc (func $guest "realloc")) string-encoding=utf8))
+  (instance $handler
+    (export "handler-error" (type $error))
+    (export "handle" (func $handle)))
+  (export "falcone:host/handler@0.2.0" (instance $handler))
+)

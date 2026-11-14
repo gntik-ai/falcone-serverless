@@ -4,10 +4,7 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-#[path = "../src/api/mod.rs"]
-mod api;
-
-use api::{
+use falcone_serverless_worker::api::{
     Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,
 };
 use jsonschema::{Draft, Registry, Validator};
@@ -1033,7 +1030,8 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
         .map(String::from)
         .into()
     );
-    // The only worker-only codes: the non-wasm refusal and the two legacy rejections.
+    // The worker-only codes: the non-wasm refusal, the two legacy rejections and the five
+    // outcomes of serving an execution. Every other failure is a `detail.reason` of one.
     let worker_only: BTreeSet<_> = table
         .iter()
         .filter(|row| row["origin"] == "worker")
@@ -1042,9 +1040,14 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
     assert_eq!(
         worker_only,
         [
+            "busy",
+            "cancelled",
+            "execution_failed",
             "invalid_request",
             "request_too_large",
-            "runtime_mode_not_supported"
+            "runtime_mode_not_supported",
+            "timeout",
+            "undeclared_import"
         ]
         .map(String::from)
         .into()
