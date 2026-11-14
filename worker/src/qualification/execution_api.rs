@@ -459,7 +459,7 @@ impl Spec {
             "attempt_id": format!("{}-attempt", self.activation),
             "attempt_number": 1,
             "deadline": timestamp(now_millis() + self.deadline_in.as_millis() as u64),
-            "invocation": {"invocation_key": "inv-qualification-0001"},
+            "invocation": {"invocation_key": "invocation-0001"},
             "credential": {
                 "iss": self.claims[0], "aud": self.claims[1], "tenant": self.claims[2],
                 "workspace": self.claims[3], "pool_profile": self.claims[4],
