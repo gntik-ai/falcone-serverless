@@ -79,13 +79,23 @@ impl Helpers {
             .map_err(|_| Stop::Unavailable)?;
         loop {
             match receive.recv_timeout(POLL) {
-                Ok(value) => return Ok(value),
+                // Stop conditions come before any outcome, a failure included: an
+                // execution that was cancelled or expired is `cancelled` or `timeout`,
+                // whatever the helper returned.
+                Ok(value) => {
+                    return match Self::stopped(until, cancel) {
+                        Some(stop) => Err(stop),
+                        None => Ok(value),
+                    };
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     if let Some(stop) = Self::stopped(until, cancel) {
                         return Err(stop);
                     }
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Stop::Unavailable),
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(Self::stopped(until, cancel).unwrap_or(Stop::Unavailable));
+                }
             }
         }
     }

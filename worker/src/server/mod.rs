@@ -37,6 +37,11 @@ use std::time::{Duration, Instant};
 /// blocked inside a host call may not, which RUN-02's host-call deadlines close.
 pub const CANCEL_WAIT: Duration = Duration::from_millis(1000);
 
+/// With every slot busy, how long an execute body that is still arriving is collected, so
+/// that a complete non-wasm request gets its `409` however it was segmented. Bytes that
+/// already arrived are taken at once; a stalled body is not waited for beyond this.
+pub const BUSY_BODY_GRACE: Duration = Duration::from_millis(100);
+
 /// What a server needs besides its platform.
 #[derive(Clone)]
 pub struct ServerConfig {
@@ -112,6 +117,9 @@ pub(crate) struct Services {
     /// The running executions, by activation and attempt. Its length is the number of
     /// execution slots in use; the slot count is `config.concurrency`.
     active: Mutex<HashMap<(String, String), Arc<Active>>>,
+    /// Where connections wait on their peers; tests synchronise on it.
+    #[cfg(any(test, feature = "qualification"))]
+    observed: Arc<testing::Observed>,
 }
 
 /// An execution slot. Dropping it frees the slot and tells a waiting cancel.
@@ -159,6 +167,14 @@ impl Services {
         })
     }
 
+    #[cfg(any(test, feature = "qualification"))]
+    fn waiting(&self, role: Role) -> &Arc<testing::Waiting> {
+        match role {
+            Role::Execute => &self.observed.execute,
+            Role::Control => &self.observed.control,
+        }
+    }
+
     fn find(&self, activation: &str, attempt: &str) -> Option<Arc<Active>> {
         self.active
             .lock()
@@ -180,6 +196,8 @@ pub struct Server {
     execute: SocketAddr,
     control: SocketAddr,
     stop: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "qualification"))]
+    observed: Arc<testing::Observed>,
 }
 
 impl Server {
@@ -202,8 +220,12 @@ impl Server {
             // execution slots.
             helpers: Helpers::new((2 * config.concurrency).max(16)),
             active: Mutex::new(HashMap::new()),
+            #[cfg(any(test, feature = "qualification"))]
+            observed: Arc::default(),
             config,
         });
+        #[cfg(any(test, feature = "qualification"))]
+        let observed = services.observed.clone();
         let stop = Arc::new(AtomicBool::new(false));
         for (listener, role, limits) in [
             (execute, Role::Execute, services.config.execute),
@@ -223,6 +245,8 @@ impl Server {
             execute: addresses.0,
             control: addresses.1,
             stop,
+            #[cfg(any(test, feature = "qualification"))]
+            observed,
         })
     }
 
@@ -232,6 +256,12 @@ impl Server {
 
     pub fn control_addr(&self) -> SocketAddr {
         self.control
+    }
+
+    /// The connections waiting on their peers, by listener.
+    #[cfg(any(test, feature = "qualification"))]
+    pub fn observed(&self) -> &testing::Observed {
+        &self.observed
     }
 }
 
@@ -312,7 +342,12 @@ fn serve_connection(
 ) {
     let _ = stream.set_nodelay(true);
     let header_deadline = Instant::now() + limits.header_deadline;
-    let mut head = match http::read_head(&mut stream, limits.max_header_bytes, header_deadline) {
+    #[cfg(any(test, feature = "qualification"))]
+    let in_headers = testing::Enter::headers(services.waiting(role));
+    let read = http::read_head(&mut stream, limits.max_header_bytes, header_deadline);
+    #[cfg(any(test, feature = "qualification"))]
+    drop(in_headers);
+    let mut head = match read {
         Ok(head) => head,
         Err(Fault::Closed) => return,
         Err(Fault::HeadersTooLarge) => {
@@ -361,6 +396,8 @@ fn serve_connection(
 /// Reads the body the head announces. `Err` carries the reply for a head that cannot be
 /// served; `Ok(None)` means the body stalled or ended early.
 fn read_announced(
+    services: &Services,
+    role: Role,
     stream: &mut TcpStream,
     head: &mut Head,
     limits: ListenerLimits,
@@ -378,6 +415,11 @@ fn read_announced(
         return Ok(None);
     }
     let deadline = Instant::now() + limits.body_deadline;
+    #[cfg(any(test, feature = "qualification"))]
+    let _in_body = testing::Enter::body(services.waiting(role));
+    // Only the observation hooks use them.
+    #[cfg(not(any(test, feature = "qualification")))]
+    let _ = (services, role);
     Ok(http::read_body(stream, head, length, deadline).ok())
 }
 
@@ -397,10 +439,12 @@ fn execute(
         )));
     }
     // With every slot busy the body is not read. The one exception is a body that already
-    // arrived with the headers: a refusal that does not depend on capacity (the runtime
-    // mode) still takes precedence over `busy`.
+    // arrived with the headers, or is still arriving behind them for at most
+    // `BUSY_BODY_GRACE`: a refusal that does not depend on capacity (the runtime mode)
+    // still takes precedence over `busy`. A body that stalls costs one admission
+    // connection for the grace, never a slot.
     if services.running() >= services.config.concurrency {
-        if head.buffered.len() >= length
+        if http::collect_arriving(stream, head, length, BUSY_BODY_GRACE)
             && let Err(Rejection::Refused(refused)) = parse_request(&head.buffered[..length])
             && refused.refusal.code() == Code::RuntimeModeNotSupported
         {
@@ -408,7 +452,7 @@ fn execute(
         }
         return Some(Reply::bare(&Refusal::new(Code::Busy, Reason::NoCapacity)));
     }
-    let body = match read_announced(stream, head, limits) {
+    let body = match read_announced(services, Role::Execute, stream, head, limits) {
         Err(reply) => return Some(reply),
         Ok(None) => return None,
         Ok(Some(body)) => body,
@@ -454,7 +498,7 @@ fn control(
     limits: ListenerLimits,
     handler: ControlHandler,
 ) -> Option<Reply> {
-    let body = match read_announced(stream, head, limits) {
+    let body = match read_announced(services, Role::Control, stream, head, limits) {
         Err(reply) => return Some(reply),
         Ok(None) => return None,
         Ok(Some(body)) => body,

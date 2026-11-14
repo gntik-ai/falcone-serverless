@@ -239,7 +239,10 @@ pub(super) fn run(
     let loaded = match loaded {
         Ok(loaded) => loaded,
         Err(error) => {
-            return refuse(match compile_stop(error.code) {
+            // A cancelled or expired execution is `cancelled` or `timeout`, whatever the
+            // compile reported.
+            let stop = Helpers::stopped(until, &cancel).or_else(|| compile_stop(error.code));
+            return refuse(match stop {
                 Some(stop) => stopped(stop),
                 None => refusal(Code::ExecutionFailed, Reason::CompileFailed),
             });
@@ -281,6 +284,10 @@ pub(super) fn run(
         Ok(prepared) => prepared.call(&plan.params),
         Err(execution) => execution,
     };
+    #[cfg(any(test, feature = "qualification"))]
+    if execution.late_entry {
+        super::testing::late_entry(&plan.context.attempt_id);
+    }
     if execution.outcome == InvocationOutcome::Uncertain {
         active
             .uncertain

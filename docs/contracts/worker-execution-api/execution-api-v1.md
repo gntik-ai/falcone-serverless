@@ -229,9 +229,11 @@ attribute (`busy`, malformed, over-large) is the bare failure envelope of the ta
 The execute listener answers a connection beyond its connection limit with `503 busy` at once and
 reads nothing. Otherwise, after the headers:
 
-1. With every execution slot busy the body is not read, with one exception. A body that arrived
-   with the headers and is complete is parsed, and a request whose `runtime_mode` is not `wasm`
-   still gets `409 runtime_mode_not_supported` first. Anything else gets `503 busy`.
+1. With every execution slot busy the body is not waited for, with one exception. A body that is
+   complete once the bytes that arrived with, or are still arriving behind, the headers are
+   collected (for at most 100 ms, whatever the segmentation) is parsed, and a request whose
+   `runtime_mode` is not `wasm` still gets `409 runtime_mode_not_supported` first. A body that
+   stalls is not waited for beyond that bound and gets `503 busy`, like anything else.
 2. With a free slot the body is read, parsed and refused or admitted as above. A request that
    loses the race for the slot, or repeats the `activation_id` and `attempt_id` of a running
    execution, gets `503 busy`.

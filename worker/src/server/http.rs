@@ -194,6 +194,35 @@ pub fn read_body(
     Ok(body)
 }
 
+/// Collects body bytes that are on their way, for at most `grace`, without waiting for a
+/// body that does not come: it stops at the first read that gets nothing within what is left
+/// of `grace`. Returns whether `length` bytes are now in `head.buffered`. The head reader
+/// stops at the end of the headers, so a request that was sent whole may still be partly in
+/// the socket, or still arriving in fragments, when it returns.
+pub fn collect_arriving(
+    stream: &mut TcpStream,
+    head: &mut Head,
+    length: usize,
+    grace: Duration,
+) -> bool {
+    let deadline = Instant::now() + grace;
+    let mut chunk = [0u8; 16 * 1024];
+    while head.buffered.len() < length {
+        let Some(left) = remaining(deadline) else {
+            break;
+        };
+        if stream.set_read_timeout(Some(left)).is_err() {
+            break;
+        }
+        let want = (length - head.buffered.len()).min(chunk.len());
+        match stream.read(&mut chunk[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => head.buffered.extend_from_slice(&chunk[..count]),
+        }
+    }
+    head.buffered.len() >= length
+}
+
 fn write_until(stream: &mut TcpStream, bytes: &[u8], deadline: Instant) -> bool {
     let mut written = 0;
     while written < bytes.len() {

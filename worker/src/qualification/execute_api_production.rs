@@ -6,7 +6,7 @@
 //! qualification image instead (`execute_api_cases.rs`).
 use crate::execute_api_support::*;
 use serde_json::json;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -192,9 +192,45 @@ fn listeners_refuse_each_others_operations() {
     assert_eq!(post(execute(), "/v1/update", b"{}").status, 404);
 }
 
-/// With every slot running a guest and the execute listener full of stalled connections, a
+/// A connection stalled in a body whose server-side state is proven from outside: it asked
+/// for `100 Continue`, which the server sends only after the capacity check, immediately
+/// before it starts reading the body. Once the client holds the `100`, the connection is
+/// waiting in the body, and no later `busy` decision can release it.
+fn stalled_in_body() -> std::net::TcpStream {
+    let mut stream = connect(execute());
+    stream
+        .write_all(
+            b"POST /v1/execute HTTP/1.1\r\nHost: worker\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
+        )
+        .unwrap();
+    let mut seen = Vec::new();
+    let mut byte = [0u8; 1];
+    while !seen.ends_with(b"\r\n\r\n") {
+        assert_eq!(stream.read(&mut byte).unwrap(), 1, "closed before the 100");
+        seen.push(byte[0]);
+    }
+    assert!(seen.starts_with(b"HTTP/1.1 100 "), "not a 100 Continue");
+    stream
+}
+
+/// With the execute listener full of stalled connections and every slot running a guest, a
 /// cancel on the control listener takes effect and one more execute is busy.
 fn cancel_succeeds_under_full_load() {
+    // Stalled connections first, while slots are free: the listener accepts in arrival
+    // order, so by the time the guests' connections are served these are held. Header
+    // stalls never complete a head; body stalls are proven by their `100 Continue`.
+    let admission = falcone_serverless_worker::server::http::ADMISSION_CONNECTIONS;
+    let stalled: Vec<_> = (0..admission)
+        .map(|index| {
+            if index % 2 == 0 {
+                let mut stream = connect(execute());
+                stream.write_all(b"POST /v1/exec").unwrap();
+                stream
+            } else {
+                stalled_in_body()
+            }
+        })
+        .collect();
     let busy: Vec<_> = (0..CONCURRENCY)
         .map(|_| {
             let spec = spinner();
@@ -210,18 +246,6 @@ fn cancel_succeeds_under_full_load() {
             std::thread::yield_now();
         }
     }
-    let stalled: Vec<_> = (0..8)
-        .map(|index| {
-            let mut stream = connect(execute());
-            if index % 2 == 0 {
-                stream.write_all(b"POST /v1/exec").unwrap();
-            } else {
-                stream.write_all(&head("/v1/execute", 1000)).unwrap();
-                stream.write_all(b"{").unwrap();
-            }
-            stream
-        })
-        .collect();
     let more = run(&Spec::new(digest_of("api-ok")));
     assert_eq!((more.status, more.failure().0.as_str()), (503, "busy"));
     for (spec, handle) in busy {

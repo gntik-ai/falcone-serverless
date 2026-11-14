@@ -146,6 +146,30 @@ impl Bindings for ProbeBindings {
     }
 }
 
+/// How a stage of the test platform makes the execution stop while the stage is running, and
+/// only then returns: the stop condition already holds when the stage's value is ready, so
+/// no timing decides whether the server sees the stop or the value first.
+#[derive(Clone, Copy, Debug)]
+pub enum Interference {
+    /// Raises the execution's cancellation.
+    Cancel,
+    /// Waits for the execution's deadline to pass (yielding, never sleeping).
+    Expire,
+}
+
+impl Interference {
+    fn apply(self, until: Instant, cancel: &AtomicBool) {
+        match self {
+            Self::Cancel => cancel.store(true, Ordering::Release),
+            Self::Expire => {
+                while Instant::now() < until {
+                    std::thread::yield_now();
+                }
+            }
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct TestPlatform {
     artifacts: Mutex<HashMap<[u8; 32], Arc<[u8]>>>,
@@ -156,6 +180,10 @@ pub struct TestPlatform {
     pub bind_entered: Signal,
     /// While set, `bind` blocks on it and ignores the deadline and the cancellation.
     pub bind_gate: Mutex<Option<Arc<Gate>>>,
+    /// Applied by `artifact` before it answers.
+    pub artifact_interference: Mutex<Option<Interference>>,
+    /// Applied by `bind` before it fails: while set, `bind` fails.
+    pub bind_interference: Mutex<Option<Interference>>,
 }
 
 impl TestPlatform {
@@ -173,10 +201,14 @@ impl Platform for TestPlatform {
     fn artifact(
         &self,
         plan: &falcone_serverless_worker::api::Plan,
-        _: Instant,
-        _: &AtomicBool,
+        until: Instant,
+        cancel: &AtomicBool,
     ) -> Result<Arc<[u8]>, Unavailable> {
         self.artifact_requests.raise();
+        let interference = *self.artifact_interference.lock().unwrap();
+        if let Some(interference) = interference {
+            interference.apply(until, cancel);
+        }
         self.artifacts
             .lock()
             .unwrap()
@@ -188,10 +220,15 @@ impl Platform for TestPlatform {
     fn bind(
         &self,
         _: &falcone_serverless_worker::api::Plan,
-        _: Instant,
-        _: &AtomicBool,
+        until: Instant,
+        cancel: &AtomicBool,
     ) -> Result<Arc<dyn Bindings>, Unavailable> {
         self.bind_entered.raise();
+        let interference = *self.bind_interference.lock().unwrap();
+        if let Some(interference) = interference {
+            interference.apply(until, cancel);
+            return Err(Unavailable);
+        }
         let gate = self.bind_gate.lock().unwrap().clone();
         if let Some(gate) = gate {
             gate.wait();

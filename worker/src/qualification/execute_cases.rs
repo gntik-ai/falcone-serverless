@@ -61,6 +61,7 @@ impl Compiler {
                     code: error.code,
                     message: None,
                 }),
+                late_entry: false,
             })
     }
 }
@@ -458,15 +459,16 @@ pub fn timeout_isolation() {
 struct CancelDeadline(Arc<std::sync::atomic::AtomicBool>);
 impl Bindings for CancelDeadline {
     fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-        // A host call never outlives the invocation's deadline (200 ms here), so the
-        // cancellation has to arrive before it to be the outcome.
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // The handshake: the cancellation is raised from inside the host call, the event the
+        // guest is synchronised on, so it is set before the call returns however slowly
+        // the invocation is scheduled.
         self.0.store(true, std::sync::atomic::Ordering::Release);
         Ok(Reply::Empty)
     }
 }
 fn cancellation_before_deadline(mode: Mode) {
-    let mut host = Host::with_limits(context(), Arc::new(Empty), limits(128, 200));
+    // The deadline is generous: only the handshake decides the outcome.
+    let mut host = Host::with_limits(context(), Arc::new(Empty), limits(128, 30_000));
     host.bindings = Arc::new(CancelDeadline(host.cancellation()));
     let prepared = prepare(&compiler(), adversarial(), host).unwrap();
     let result = prepared.call(&params(mode, 0));

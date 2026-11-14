@@ -316,21 +316,44 @@ pub fn with_every_slot_busy_a_non_wasm_request_with_its_body_buffered_still_gets
     let digest = cluster.platform.add(fixture("api-ok"));
     let mut spec = Spec::new(digest);
     spec.runtime_mode = "oci".into();
+    let refused = |answer: Answer| {
+        assert_eq!(answer.status, 409);
+        assert_eq!(
+            answer.failure(),
+            (
+                "runtime_mode_not_supported".into(),
+                "runtime_mode_not_wasm".into()
+            )
+        );
+    };
     // Headers and the complete body in one segment: the body is already buffered.
     let mut stream = connect(cluster.execute());
     let body = spec.bytes();
     let mut message = head("/v1/execute", body.len());
     message.extend_from_slice(&body);
     stream.write_all(&message).unwrap();
-    let answer = read_answer(&mut stream).unwrap();
-    assert_eq!(answer.status, 409);
-    assert_eq!(
-        answer.failure(),
-        (
-            "runtime_mode_not_supported".into(),
-            "runtime_mode_not_wasm".into()
-        )
-    );
+    refused(read_answer(&mut stream).unwrap());
+
+    // A complete request well past the head reader's first read: the body is queued on the
+    // socket behind the headers, not in the head's buffer.
+    spec.body_chars = 100_000;
+    let body = spec.bytes();
+    assert!(body.len() > 100_000);
+    let mut stream = connect(cluster.execute());
+    let mut message = head("/v1/execute", body.len());
+    message.extend_from_slice(&body);
+    stream.write_all(&message).unwrap();
+    refused(read_answer(&mut stream).unwrap());
+
+    // The same request delivered in fragments, each its own segment.
+    let mut stream = connect(cluster.execute());
+    stream.set_nodelay(true).unwrap();
+    stream.write_all(&head("/v1/execute", body.len())).unwrap();
+    for fragment in body.chunks(1500) {
+        stream.write_all(fragment).unwrap();
+    }
+    refused(read_answer(&mut stream).unwrap());
+
     // A wasm request in the same position is merely busy.
     let wasm = Spec::new(digest);
     assert_eq!(execute(&cluster, &wasm).status, 503);
@@ -357,7 +380,8 @@ pub fn each_listener_refuses_the_other_listeners_operations() {
     assert_eq!(execute(&cluster, &spec).status, 200);
 }
 
-/// Opens `count` connections that send part of a request and then nothing.
+/// Opens `count` connections that send part of a request and then nothing: even ones stall in
+/// the headers, odd ones in the body.
 fn stall(
     address: std::net::SocketAddr,
     count: usize,
@@ -380,18 +404,48 @@ fn stall(
         .collect()
 }
 
+/// Waits, on the server's own events, until `headers` connections of the listener are
+/// waiting in the headers and `bodies` in a body.
+fn wait_stalled(
+    waiting: &falcone_serverless_worker::server::testing::Waiting,
+    headers: usize,
+    bodies: usize,
+) {
+    assert!(
+        waiting.in_headers.wait_at_least(headers, SAFETY),
+        "the server never saw {headers} connections stalled in the headers"
+    );
+    assert!(
+        waiting.in_body.wait_at_least(bodies, SAFETY),
+        "the server never saw {bodies} connections stalled in a body"
+    );
+}
+
 pub fn a_cancel_succeeds_with_all_slots_busy_and_the_execute_listener_full_of_stalled_connections()
 {
     let concurrency = 2;
     let cluster = start(concurrency);
+    let admission = falcone_serverless_worker::server::http::ADMISSION_CONNECTIONS;
+    let waiting = &cluster.server.observed().execute;
+    // While slots are free, every admission connection of the execute listener is taken by a
+    // stalled one: half stalled in their headers, half in their bodies. The server reports
+    // each of them before anything else happens.
+    let stalled = stall(cluster.execute(), admission, "/v1/execute", 1_000);
+    wait_stalled(waiting, admission / 2, admission / 2);
+    // The rest of the listener's connections run the blocked guests: every slot is busy.
     let busy = saturate(&cluster, concurrency);
-    // Every admission connection of the execute listener is taken by a stalled one.
-    let stalled = stall(cluster.execute(), 8, "/v1/execute", 1_000);
+    // The stalled connections are all still held when the extra execute arrives.
+    assert_eq!(
+        (waiting.in_headers.get(), waiting.in_body.get()),
+        (admission / 2, admission / 2)
+    );
+    // One more execute gets 503 busy: the listener has no connection left for it.
     let digest = cluster.platform.add(fixture("api-ok"));
-    // One more execute gets 503 busy: the listener's connections are all taken.
     let more = execute(&cluster, &Spec::new(digest));
     assert_eq!(more.status, 503);
-    assert_eq!(more.failure().0, "busy");
+    assert_eq!(more.failure(), ("busy".into(), "no_capacity".into()));
+    // A cancel on the control listener is acknowledged and takes effect within the documented
+    // deadline: the cancel waits at most `CANCEL_WAIT` for the execution to end.
     let begun = Instant::now();
     let mut busy = busy;
     let (spec, handle) = busy.remove(0);
@@ -401,8 +455,6 @@ pub fn a_cancel_succeeds_with_all_slots_busy_and_the_execute_listener_full_of_st
         (answer.status, answer.failure().0.as_str()),
         (499, "cancelled")
     );
-    // Documented: an execution that sees the cancel ends within the termination budget, and
-    // the cancel waits at most `CANCEL_WAIT` for it.
     assert!(begun.elapsed() < falcone_serverless_worker::server::CANCEL_WAIT);
     drop(stalled);
     release(&cluster, busy);
@@ -616,6 +668,78 @@ pub fn a_cancel_during_a_blocked_bind_ends_the_execution_and_frees_the_slot() {
     gate.open();
 }
 
+/// A stage that fails while its execution is already cancelled or expired is `cancelled` or
+/// `timeout`, whatever the stage reports: the stop condition is checked before the outcome of
+/// every helper, failures included.
+fn stopped_stage(
+    interference: Interference,
+    prepare: impl FnOnce(&Cluster, &mut Spec),
+    stage: impl Fn(&Cluster, Option<Interference>),
+) {
+    let cluster = start(1);
+    let digest = cluster.platform.add(fixture("api-log-ok"));
+    let mut spec = Spec::new(digest).imports(&[LOGGING]);
+    spec.deadline_in = SHORT;
+    prepare(&cluster, &mut spec);
+    stage(&cluster, Some(interference));
+    let begun = Instant::now();
+    let answer = execute(&cluster, &spec);
+    match interference {
+        Interference::Cancel => assert_eq!(
+            (answer.status, answer.failure().0.as_str()),
+            (499, "cancelled")
+        ),
+        Interference::Expire => assert_timeout(&answer, &spec, begun.elapsed()),
+    }
+    // No guest started and the host saw nothing.
+    assert_eq!(cluster.platform.probe.guest_started.count(), 0);
+    assert_eq!(host_calls(&cluster), 0);
+    stage(&cluster, None);
+    recovered(&cluster);
+}
+
+fn artifact_stage(cluster: &Cluster, interference: Option<Interference>) {
+    *cluster.platform.artifact_interference.lock().unwrap() = interference;
+}
+
+fn bind_stage(cluster: &Cluster, interference: Option<Interference>) {
+    *cluster.platform.bind_interference.lock().unwrap() = interference;
+}
+
+/// An artifact the platform cannot provide.
+fn unavailable_artifact(_: &Cluster, spec: &mut Spec) {
+    spec.digest = digest(b"never added to the platform");
+}
+
+/// An artifact the platform provides that the validator rejects.
+fn rejected_artifact(cluster: &Cluster, spec: &mut Spec) {
+    spec.digest = cluster.platform.add(b"not a component".to_vec());
+}
+
+pub fn a_cancel_that_lands_as_the_artifact_is_unavailable_is_cancelled() {
+    stopped_stage(Interference::Cancel, unavailable_artifact, artifact_stage);
+}
+
+pub fn a_cancel_that_lands_as_the_artifact_is_rejected_is_cancelled() {
+    stopped_stage(Interference::Cancel, rejected_artifact, artifact_stage);
+}
+
+pub fn a_cancel_that_lands_as_the_bind_fails_is_cancelled() {
+    stopped_stage(Interference::Cancel, |_, _| {}, bind_stage);
+}
+
+pub fn a_deadline_that_passes_as_the_artifact_is_unavailable_is_a_timeout() {
+    stopped_stage(Interference::Expire, unavailable_artifact, artifact_stage);
+}
+
+pub fn a_deadline_that_passes_as_the_artifact_is_rejected_is_a_timeout() {
+    stopped_stage(Interference::Expire, rejected_artifact, artifact_stage);
+}
+
+pub fn a_deadline_that_passes_as_the_bind_fails_is_a_timeout() {
+    stopped_stage(Interference::Expire, |_, _| {}, bind_stage);
+}
+
 pub fn a_host_call_blocking_near_expiry_ends_at_until_and_a_later_call_never_reaches_the_host() {
     let cluster = start(1);
     let gate = Gate::new();
@@ -631,7 +755,13 @@ pub fn a_host_call_blocking_near_expiry_ends_at_until_and_a_later_call_never_rea
     let answer = handle.join().unwrap();
     // The blocked call ended at `until`, not at `until` plus the 30 s host-call timeout.
     assert_timeout(&answer, &spec, begun.elapsed());
-    // The call that started after `until` was refused without reaching the host.
+    // The second entry did start after `until`: the server saw it refused, and it never
+    // reached the host. It is the deadline that ended the execution, though the same entry
+    // would also have exceeded `max_host_calls`.
+    assert_eq!(
+        falcone_serverless_worker::server::testing::late_entries(&spec.attempt()),
+        1
+    );
     assert_eq!(host_calls(&cluster), 1);
     gate.open();
 }
@@ -1289,6 +1419,30 @@ pub const CASES: &[(&str, fn())] = &[
     (
         "a_cancel_during_a_blocked_bind_ends_the_execution_and_frees_the_slot",
         a_cancel_during_a_blocked_bind_ends_the_execution_and_frees_the_slot,
+    ),
+    (
+        "a_cancel_that_lands_as_the_artifact_is_unavailable_is_cancelled",
+        a_cancel_that_lands_as_the_artifact_is_unavailable_is_cancelled,
+    ),
+    (
+        "a_cancel_that_lands_as_the_artifact_is_rejected_is_cancelled",
+        a_cancel_that_lands_as_the_artifact_is_rejected_is_cancelled,
+    ),
+    (
+        "a_cancel_that_lands_as_the_bind_fails_is_cancelled",
+        a_cancel_that_lands_as_the_bind_fails_is_cancelled,
+    ),
+    (
+        "a_deadline_that_passes_as_the_artifact_is_unavailable_is_a_timeout",
+        a_deadline_that_passes_as_the_artifact_is_unavailable_is_a_timeout,
+    ),
+    (
+        "a_deadline_that_passes_as_the_artifact_is_rejected_is_a_timeout",
+        a_deadline_that_passes_as_the_artifact_is_rejected_is_a_timeout,
+    ),
+    (
+        "a_deadline_that_passes_as_the_bind_fails_is_a_timeout",
+        a_deadline_that_passes_as_the_bind_fails_is_a_timeout,
     ),
     (
         "a_host_call_blocking_near_expiry_ends_at_until_and_a_later_call_never_reaches_the_host",

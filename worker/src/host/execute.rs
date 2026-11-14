@@ -41,6 +41,9 @@ pub struct ExecuteError {
 pub struct Execution {
     pub outcome: InvocationOutcome,
     pub result: Result<Vec<u8>, ExecuteError>,
+    /// A guest-to-host entry started at or after the deadline and was refused before it
+    /// reached the host.
+    pub late_entry: bool,
 }
 fn error(code: &'static str) -> ExecuteError {
     ExecuteError {
@@ -219,7 +222,11 @@ fn finish(
         InvocationOutcome::BufferLimit => Err(error("buffer_limit_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
-    Execution { outcome, result }
+    Execution {
+        outcome,
+        result,
+        late_entry: host.deadline_refused_call(),
+    }
 }
 pub fn execute(loaded: &Loaded, host: Host, params: &[u8]) -> Execution {
     let until = Instant::now() + host.guest_duration();
