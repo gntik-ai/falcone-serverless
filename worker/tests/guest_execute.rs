@@ -1,6 +1,8 @@
 pub use falcone_serverless_worker::{artifact, cache, host, limits};
 #[path = "../src/qualification/execute_cases.rs"]
 mod cases;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[test]
 fn empty_handler_is_rejected_before_compilation() {
@@ -78,7 +80,11 @@ fn execute_command_refuses_execution_without_the_trusted_compiler() {
     let root = std::env::temp_dir().join(format!("handler-no-compiler-{}", std::process::id()));
     std::fs::create_dir(&root).unwrap();
     let worker = root.join("falcone-serverless-worker");
-    std::fs::copy(env!("CARGO_BIN_EXE_falcone-serverless-worker"), &worker).unwrap();
+    executable::copy(
+        std::path::Path::new(env!("CARGO_BIN_EXE_falcone-serverless-worker")),
+        &worker,
+    )
+    .unwrap();
     let component = root.join("handler.wasm");
     let params = root.join("params.json");
     std::fs::write(

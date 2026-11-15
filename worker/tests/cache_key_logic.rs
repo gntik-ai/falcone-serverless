@@ -4,6 +4,8 @@
 pub mod artifact;
 #[path = "../src/cache/mod.rs"]
 pub mod cache;
+#[path = "support/executable.rs"]
+mod executable;
 #[path = "../src/qualification/compile_cache_fixtures.rs"]
 pub mod fixtures;
 
@@ -430,16 +432,8 @@ impl ChildFixture {
     }
 
     fn before_input(directory: &std::path::Path, script: &str) -> Self {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         let path = directory.join("trusted-test-child");
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o700)
-            .open(&path)
-            .unwrap();
-        writeln!(file, "#!/bin/sh\n{script}").unwrap();
+        executable::script(&path, &format!("#!/bin/sh\n{script}\n")).unwrap();
         Self(path)
     }
 }

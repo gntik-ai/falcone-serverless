@@ -2,6 +2,8 @@
 
 #[path = "../src/artifact/mod.rs"]
 mod artifact;
+#[path = "support/executable.rs"]
+mod executable;
 
 #[test]
 fn bounded_transfer_preserves_destination_on_rejection() {
@@ -365,20 +367,12 @@ struct ExitFixture(std::path::PathBuf);
 impl ExitFixture {
     // Mock only the OS process boundary to pin all signal/status mappings.
     fn new(outcome: &str) -> Self {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!("was02-exit-{}-{id}", std::process::id()));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(0o700)
-            .open(&path)
-            .unwrap();
-        writeln!(
-            file,
-            "#!/bin/sh\nwhile IFS= read -r line; do :; done\n{outcome}"
+        executable::script(
+            &path,
+            &format!("#!/bin/sh\nwhile IFS= read -r line; do :; done\n{outcome}\n"),
         )
         .unwrap();
         Self(path)

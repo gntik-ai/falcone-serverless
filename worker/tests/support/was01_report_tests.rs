@@ -1,3 +1,6 @@
+#[path = "executable.rs"]
+mod executable;
+
 use super::evidence::{Reason, Report, Verdict};
 use super::was01_report::{
     Output, ProcessKubectl, ReportGate, Runner, gate, plan, plan_safe, probe_permissions,
@@ -338,19 +341,13 @@ impl PrivateDir {
         super::Kubeconfigs::parse(path.to_str()).unwrap()
     }
     fn script(&self, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        // Publish a fresh executable only after closing its writer. Never rewrite an
-        // executable that another invocation may still have open.
         let path = self.0.join(super::namespace::namespace_name("kubectl"));
-        let staging = path.with_extension("writing");
         // Assert explicit kubeconfig selection on every real process invocation.
-        std::fs::write(
-            &staging,
-            format!("#!/bin/sh\ncase \"$1\" in --kubeconfig=*) ;; *) exit 99 ;; esac\n{body}\n"),
+        executable::script(
+            &path,
+            &format!("#!/bin/sh\ncase \"$1\" in --kubeconfig=*) ;; *) exit 99 ;; esac\n{body}\n"),
         )
         .unwrap();
-        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::rename(staging, &path).unwrap();
         path
     }
 }
