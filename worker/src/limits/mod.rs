@@ -98,6 +98,14 @@ impl Limits {
     pub const fn value(self, field: Field) -> u64 {
         self.values[field as usize]
     }
+    /// A copy with one field narrowed to `value`. Never raises a field: the result is the
+    /// minimum of the current value and `value`, so a caller cannot exceed the profile.
+    #[must_use]
+    pub const fn narrowed(mut self, field: Field, value: u64) -> Self {
+        let current = self.values[field as usize];
+        self.values[field as usize] = if value < current { value } else { current };
+        self
+    }
     pub fn duration(self, field: Field) -> std::time::Duration {
         std::time::Duration::from_millis(self.value(field))
     }

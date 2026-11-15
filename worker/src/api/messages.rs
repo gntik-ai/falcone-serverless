@@ -42,6 +42,18 @@ pub struct UpdateMessage {
 redacted!(UpdateMessage);
 
 impl UpdateMessage {
+    pub fn activation_id(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.sequence.get()
+    }
+
     pub(super) fn check(&self) -> Result<(), Malformed> {
         match &self.update {
             Update::Progress {
@@ -74,3 +86,36 @@ pub struct CancelMessage {
     cancel: Cancel,
 }
 redacted!(CancelMessage);
+
+impl CancelMessage {
+    pub fn activation_id(&self) -> &str {
+        self.activation_id.as_str()
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        self.attempt_id.as_str()
+    }
+
+    /// Whether this is the dispatcher's `requested` state, the only one a worker accepts.
+    pub fn is_requested(&self) -> bool {
+        matches!(self.cancel, Cancel::Requested {})
+    }
+
+    /// The worker's answer to a cancel: `acknowledged` once the execution ended, `uncertain`
+    /// when it has not ended within the termination budget.
+    pub fn answer(&self, acknowledged: bool) -> Vec<u8> {
+        let state = if acknowledged {
+            "acknowledged"
+        } else {
+            "uncertain"
+        };
+        serde_json::to_vec(&serde_json::json!({
+            "version": "1",
+            "type": "cancel",
+            "activation_id": self.activation_id,
+            "attempt_id": self.attempt_id,
+            "cancel": {"state": state},
+        }))
+        .unwrap_or_default()
+    }
+}

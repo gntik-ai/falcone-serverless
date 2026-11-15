@@ -135,7 +135,68 @@ pub struct ExecuteRequest {
 }
 redacted!(ExecuteRequest);
 
+impl Credential {
+    /// Every claim string. These are the values redaction must keep out of any output.
+    fn secrets(&self) -> Vec<String> {
+        let mut out: Vec<String> = [
+            &self.iss,
+            &self.aud,
+            &self.tenant,
+            &self.workspace,
+            &self.pool_profile,
+            &self.revision,
+            &self.activation,
+            &self.attempt,
+        ]
+        .iter()
+        .map(|claim| claim.as_str().to_owned())
+        .collect();
+        for grant in &self.allowed_capabilities {
+            grant.push_strings(&mut out);
+        }
+        out
+    }
+}
+
 impl ExecuteRequest {
+    /// The claim strings of the credential, for redaction. Bounded by the request size.
+    pub(super) fn credential_secrets(&self) -> Vec<String> {
+        self.credential.secrets()
+    }
+
+    /// The credential claims as JSON, for the host binding layer.
+    pub(super) fn credential_json(&self) -> String {
+        serde_json::to_string(&self.credential).unwrap_or_default()
+    }
+
+    /// The legacy `main(params)` object as JSON bytes.
+    pub(super) fn params_json(&self) -> Vec<u8> {
+        serde_json::to_vec(&self.params.0).unwrap_or_default()
+    }
+
+    /// The trusted host context. Capability scopes are those the revision declares and the
+    /// credential allows.
+    pub(super) fn host_context(&self) -> crate::host::Context {
+        let credential = super::grants::to_host(&self.credential.allowed_capabilities);
+        crate::host::Context {
+            grants: super::grants::intersect(&self.projection.host_grants(), &credential),
+            tenant: self.credential.tenant.as_str().to_owned(),
+            workspace: self.credential.workspace.as_str().to_owned(),
+            invocation_key: self.invocation.invocation_key.as_str().to_owned(),
+            attempt_id: self.attempt_id.as_str().to_owned(),
+            idempotency_key: self
+                .invocation
+                .idempotency_key
+                .as_ref()
+                .map(|key| key.as_str().to_owned())
+                .unwrap_or_default(),
+        }
+    }
+
+    pub(super) fn request_deadline_millis(&self) -> u64 {
+        self.deadline.unix_millis()
+    }
+
     pub(super) fn activation_id(&self) -> &Id {
         &self.activation_id
     }

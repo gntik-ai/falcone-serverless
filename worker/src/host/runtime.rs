@@ -7,7 +7,7 @@ use super::{Bindings, Context, HostError, Level, Operation, Pair, Reply, import_
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock, Weak,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
 };
 use std::time::{Duration, Instant};
@@ -327,6 +327,15 @@ pub struct Host {
     keys: BTreeMap<u32, (bool, String)>,
     next_handle: u32,
     executions: BTreeMap<u32, (String, String)>,
+    /// The absolute execution deadline, computed once at admission. When set, nothing
+    /// re-derives a deadline from a duration.
+    until: Option<Instant>,
+    fuel: u64,
+    max_host_calls: u64,
+    host_calls: AtomicU64,
+    host_call_budget_exceeded: AtomicBool,
+    late_host_call: AtomicBool,
+    fuel_exhausted: AtomicBool,
 }
 
 impl Host {
@@ -355,7 +364,80 @@ impl Host {
             keys: BTreeMap::new(),
             next_handle: 0,
             executions: BTreeMap::new(),
+            until: None,
+            fuel: u64::MAX,
+            max_host_calls: u64::MAX,
+            host_calls: AtomicU64::new(0),
+            host_call_budget_exceeded: AtomicBool::new(false),
+            late_host_call: AtomicBool::new(false),
+            fuel_exhausted: AtomicBool::new(false),
         }
+    }
+
+    /// Pins the absolute deadline of this execution. Instantiation, the store's epoch
+    /// deadline and every host call derive from this one instant.
+    pub fn set_until(&mut self, until: Instant) {
+        self.until = Some(until);
+    }
+
+    pub fn until(&self) -> Option<Instant> {
+        self.until
+    }
+
+    /// The store's fuel for this execution; running out of fuel ends it.
+    pub fn set_fuel(&mut self, fuel: u64) {
+        self.fuel = fuel;
+    }
+
+    /// The most guest-to-host entries one execution may make.
+    pub fn set_max_host_calls(&mut self, max: u64) {
+        self.max_host_calls = max;
+    }
+
+    pub fn fuel_exhausted(&self) -> bool {
+        self.fuel_exhausted.load(Ordering::Acquire)
+    }
+
+    pub fn host_call_budget_exceeded(&self) -> bool {
+        self.host_call_budget_exceeded.load(Ordering::Acquire)
+    }
+
+    pub fn late_host_call(&self) -> bool {
+        self.late_host_call.load(Ordering::Acquire)
+    }
+
+    pub(super) fn fuel(&self) -> u64 {
+        self.fuel
+    }
+
+    pub(super) fn note_trap(&self, error: &wasmtime::Error) {
+        if matches!(
+            error.downcast_ref::<wasmtime::Trap>(),
+            Some(wasmtime::Trap::OutOfFuel)
+        ) {
+            self.fuel_exhausted.store(true, Ordering::Release);
+        }
+    }
+
+    /// Every guest-to-host entry passes here first, including resource callbacks and calls
+    /// that authorization later refuses. The deadline is checked before the entry is counted,
+    /// so a late call ends the execution as a timeout even when it would also exceed the
+    /// budget. A refusal traps the guest before the call reaches the host.
+    pub(super) fn enter(&self) -> wasmtime::Result<()> {
+        if self.until.is_some_and(|until| Instant::now() >= until) {
+            self.late_host_call.store(true, Ordering::Release);
+            return Err(wasmtime::Error::msg("host-call-after-deadline"));
+        }
+        let entered = self
+            .host_calls
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        if entered > self.max_host_calls {
+            self.host_call_budget_exceeded
+                .store(true, Ordering::Release);
+            return Err(wasmtime::Error::msg("host-call-budget-exceeded"));
+        }
+        Ok(())
     }
 
     pub fn set_call_timeout(&mut self, timeout: Duration) {
@@ -364,6 +446,11 @@ impl Host {
 
     pub fn cancellation(&self) -> Arc<AtomicBool> {
         self.cancelled.clone()
+    }
+
+    /// Adopts a cancel flag owned by the caller, so that one flag stops the whole execution.
+    pub fn set_cancellation(&mut self, flag: Arc<AtomicBool>) {
+        self.cancelled = flag;
     }
 
     pub fn uncertain_host_call(&self) -> bool {
@@ -434,7 +521,11 @@ impl Host {
             self.call_cancelled.store(true, Ordering::Release);
             return Err(HostError::Cancelled);
         }
-        let deadline = Instant::now() + self.call_timeout;
+        // Each call is bounded by the host-call ceiling and by what is left until `until`.
+        let mut deadline = Instant::now() + self.call_timeout;
+        if let Some(until) = self.until {
+            deadline = deadline.min(until);
+        }
         let permit = permit(&self.bindings, deadline, &self.cancelled)?;
         let ticket = permit.0.clone();
         let (send, receive) = mpsc::sync_channel(1);
@@ -500,12 +591,14 @@ fn storage_resource<T: Send + 'static>(
     checkpoint: bool,
 ) -> wasmtime::Result<()> {
     linker.resource(names[0], ResourceType::host::<T>(), |mut store, rep| {
+        store.data().enter()?;
         store.data_mut().keys.remove(&rep);
         Ok(())
     })?;
     linker.func_wrap(
         names[1],
         move |mut store: StoreContextMut<'_, Host>, (key,): (WasmStr,)| {
+            store.data().enter()?;
             let result: Result<Resource<T>, HostError> = (|| {
                 let key = key.to_str(&store).map_err(|_| HostError::Denied)?;
                 let mut bytes = Bytes::new(store.data().input_limit());
@@ -529,6 +622,7 @@ fn storage_resource<T: Send + 'static>(
     linker.func_wrap(
         names[2],
         move |store: StoreContextMut<'_, Host>, (handle,): (Resource<T>,)| {
+            store.data().enter()?;
             let result: Result<Vec<u8>, HostError> = (|| {
                 let key = store.data().key(handle.rep(), checkpoint)?;
                 let Reply::Data(data) = store.data().call(Operation::Read { key, checkpoint })?
@@ -548,6 +642,7 @@ fn storage_resource<T: Send + 'static>(
         names[3],
         move |mut store: StoreContextMut<'_, Host>,
               (handle, data_arg): (Resource<T>, WasmList<u8>)| {
+            store.data().enter()?;
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[], &[&data_arg], None, 4)?;
                 let key = store.data().key(handle.rep(), checkpoint)?;
@@ -611,6 +706,7 @@ pub(super) fn instantiate_in_store(
         .func_wrap(
             "is-cancelled",
             |store: StoreContextMut<'_, Host>, (): ()| {
+                store.data().enter()?;
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
@@ -618,15 +714,18 @@ pub(super) fn instantiate_in_store(
     context.func_wrap(
         "invocation-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
             Ok((store.data().context.invocation_key.clone(),))
         },
     )?;
     context.func_wrap("attempt-id", |store: StoreContextMut<'_, Host>, (): ()| {
+        store.data().enter()?;
         Ok((store.data().context.attempt_id.clone(),))
     })?;
     context.func_wrap(
         "idempotency-key",
         |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
             Ok((store.data().context.idempotency_key.clone(),))
         },
     )?;
@@ -635,6 +734,7 @@ pub(super) fn instantiate_in_store(
         "checkpoint",
         ResourceType::host::<Checkpoint>(),
         |mut store, rep| {
+            store.data().enter()?;
             store.data_mut().keys.remove(&rep);
             Ok(())
         },
@@ -642,6 +742,7 @@ pub(super) fn instantiate_in_store(
     progress.func_wrap(
         "report",
         |store: StoreContextMut<'_, Host>, (completed, total, message): (u64, u64, WasmStr)| {
+            store.data().enter()?;
             let result: Result<(), HostError> = (|| {
                 let mut bytes = Bytes::new(store.data().input_limit());
                 bytes.add(16)?;
@@ -659,6 +760,7 @@ pub(super) fn instantiate_in_store(
     progress.func_wrap(
         "report-checkpoint",
         |store: StoreContextMut<'_, Host>, (handle,): (Resource<Checkpoint>,)| {
+            store.data().enter()?;
             let result: Result<(), HostError> = (|| {
                 let key = store.data().key(handle.rep(), true)?;
                 empty(store.data().call(Operation::ProgressCheckpoint { key })?)
@@ -672,6 +774,7 @@ pub(super) fn instantiate_in_store(
             "publish",
             |mut store: StoreContextMut<'_, Host>,
              (destination, payload): (WasmStr, WasmList<u8>)| {
+                store.data().enter()?;
                 let result = (|| {
                     preflight(&mut store, &[&destination], &[&payload], None, 0)?;
                     let mut bytes = Bytes::new(store.data().input_limit());
@@ -702,6 +805,7 @@ pub(super) fn instantiate_in_store(
         "log",
         |mut store: StoreContextMut<'_, Host>,
          (severity, message, fields): (Level, WasmStr, WasmList<LazyPair>)| {
+            store.data().enter()?;
             let result: Result<(), HostError> = (|| {
                 preflight(&mut store, &[&message], &[], Some(&fields), 1)?;
                 let mut bytes = Bytes::new(store.data().input_limit());
@@ -751,6 +855,7 @@ pub(super) fn instantiate_in_store(
             "execution",
             ResourceType::host::<Execution>(),
             |mut store, rep| {
+                store.data().enter()?;
                 store.data_mut().executions.remove(&rep);
                 Ok(())
             },
@@ -758,6 +863,7 @@ pub(super) fn instantiate_in_store(
         workflows.func_wrap(
             "start",
             |mut store: StoreContextMut<'_, Host>, (workflow, input): (WasmStr, WasmList<u8>)| {
+                store.data().enter()?;
                 let result: Result<Resource<Execution>, HostError> = (|| {
                     preflight(&mut store, &[&workflow], &[&input], None, 0)?;
                     if workflow
@@ -808,6 +914,7 @@ pub(super) fn instantiate_in_store(
             "signal",
             |mut store: StoreContextMut<'_, Host>,
              (handle, name, payload): (Resource<Execution>, WasmStr, WasmList<u8>)| {
+                store.data().enter()?;
                 let result: Result<(), HostError> = (|| {
                     preflight(&mut store, &[&name], &[&payload], None, 4)?;
                     let mut bytes = Bytes::new(store.data().input_limit());
@@ -845,6 +952,7 @@ pub(super) fn instantiate_in_store(
             "request",
             |mut store: StoreContextMut<'_, Host>,
              (url, method, headers, body): (WasmStr, WasmStr, WasmList<LazyPair>, WasmList<u8>)| {
+                store.data().enter()?;
                 let result: Result<super::net::Response, HostError> = (|| {
                     preflight(&mut store, &[&url, &method], &[&body], Some(&headers), 0)?;
                     let mut bytes = Bytes::new(store.data().input_limit());
@@ -1099,5 +1207,89 @@ mod deadline_tests {
         assert!(!rescued, "a final tick was lost during re-arm");
         assert!(elapsed >= Duration::from_millis(100));
         assert!(elapsed <= Duration::from_millis(100) + TOLERANCE);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::host::outcome::{InvocationOutcome, classify};
+
+    struct NoBindings;
+    impl Bindings for NoBindings {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            Err(HostError::Denied)
+        }
+    }
+
+    fn host() -> Host {
+        Host::new(Context::default(), Arc::new(NoBindings))
+    }
+
+    #[test]
+    fn a_call_at_or_after_the_deadline_is_refused_before_it_is_counted() {
+        let mut host = host();
+        host.set_max_host_calls(0);
+        host.set_until(Instant::now() - Duration::from_millis(1));
+        assert!(host.enter().is_err());
+        assert!(host.late_host_call());
+        // Refused before counting: neither counted nor charged to the budget.
+        assert_eq!(host.host_calls.load(Ordering::Acquire), 0);
+        assert!(!host.host_call_budget_exceeded());
+    }
+
+    #[test]
+    fn every_entry_counts_and_the_call_after_the_budget_is_refused() {
+        let mut host = host();
+        host.set_max_host_calls(2);
+        host.set_until(Instant::now() + Duration::from_secs(60));
+        assert!(host.enter().is_ok());
+        assert!(host.enter().is_ok());
+        assert!(!host.host_call_budget_exceeded());
+        assert!(host.enter().is_err());
+        assert!(host.host_call_budget_exceeded());
+        assert!(!host.late_host_call());
+        assert_eq!(
+            classify(&host, Err(&wasmtime::Error::msg("trap"))),
+            InvocationOutcome::HostCallBudget
+        );
+    }
+
+    #[test]
+    fn a_late_call_wins_over_the_budget_when_the_outcome_is_chosen() {
+        let host = host();
+        host.host_call_budget_exceeded
+            .store(true, Ordering::Release);
+        host.late_host_call.store(true, Ordering::Release);
+        assert_eq!(
+            classify(&host, Err(&wasmtime::Error::msg("trap"))),
+            InvocationOutcome::GuestInterrupted
+        );
+    }
+
+    #[test]
+    fn each_call_is_bounded_by_what_is_left_until_the_deadline() {
+        struct Slow;
+        impl Bindings for Slow {
+            fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+                std::thread::sleep(Duration::from_secs(3));
+                Ok(Reply::Empty)
+            }
+        }
+        let mut host = Host::new(Context::default(), Arc::new(Slow));
+        let started = Instant::now();
+        host.set_until(started + Duration::from_millis(200));
+        let result = host.call(Operation::Progress {
+            completed: 0,
+            total: 0,
+            message: String::new(),
+        });
+        // Not the host-call ceiling (30 s) and not the binding's three seconds.
+        assert!(matches!(result, Err(HostError::Timeout)));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

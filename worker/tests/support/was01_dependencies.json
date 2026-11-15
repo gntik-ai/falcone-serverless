@@ -347,6 +347,12 @@
       }
     },
     "dev-dependencies": {
+      "falcone-serverless-worker": {
+        "features": [
+          "qualification-hooks"
+        ],
+        "path": "."
+      },
       "jsonschema": {
         "default-features": false,
         "version": "0.59.0"

@@ -5,6 +5,7 @@ mod capability_invocations;
 mod capability_support;
 mod compile_cache_fixtures;
 mod counting_alloc;
+mod execute_api_runner;
 mod execute_cases;
 mod execute_runner;
 mod limits_cases;
@@ -132,6 +133,7 @@ fn main() -> std::process::ExitCode {
         Some(flag) if flag.starts_with("--guest-execute=") => {
             return execute_runner::run(&flag[16..]);
         }
+        Some("--execute-api") => return execute_api_runner::main(),
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),
         Some("--limits-cancellation") => return limits_runner::main(),

@@ -1,6 +1,6 @@
 //! The pinned revision projection: everything the worker needs to run one revision.
 
-use super::grants::{Grant, GrantVersion, all_valid};
+use super::grants::{self, Grant, GrantVersion, all_valid};
 use super::types::{
     CatalogId, CatalogVersion, Digest, Id, InterfaceVersion, Positive, RuntimeMode, Text,
 };
@@ -77,7 +77,35 @@ pub struct Projection {
 }
 redacted!(Projection);
 
+impl Budgets {
+    pub(super) fn fuel(&self) -> u64 {
+        self.fuel.get()
+    }
+    pub(super) fn memory_bytes(&self) -> u64 {
+        self.memory_bytes.get()
+    }
+    pub(super) fn timeout_ms(&self) -> u64 {
+        self.timeout_ms.get()
+    }
+    pub(super) fn max_host_calls(&self) -> u64 {
+        self.max_host_calls.get()
+    }
+}
+
 impl Projection {
+    pub(super) fn budgets(&self) -> &Budgets {
+        &self.budgets
+    }
+
+    /// The declared imports; empty means none.
+    pub(super) fn declared_imports(&self) -> Vec<String> {
+        self.imports.iter().map(|i| i.as_str().to_owned()).collect()
+    }
+
+    pub(super) fn host_grants(&self) -> crate::host::Grants {
+        grants::to_host(&self.grants)
+    }
+
     /// The rules a schema cannot attach to one field.
     pub(crate) fn check(&self) -> Result<(), Malformed> {
         if all_valid(&self.grants, GrantVersion::V020) {

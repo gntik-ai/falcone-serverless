@@ -130,6 +130,69 @@ impl Grant {
     }
 }
 
+/// The concrete scopes a revision's grants give the capability host.
+pub(crate) fn to_host(grants: &[Grant]) -> crate::host::Grants {
+    let mut host = crate::host::Grants::default();
+    let names = |names: &Option<Names>| names.as_ref().map(|n| n.0.clone()).unwrap_or_default();
+    for grant in grants {
+        match grant.family {
+            Family::Storage => host.prefixes.extend(names(&grant.scope.prefixes)),
+            Family::Http => host.hosts.extend(names(&grant.scope.hosts)),
+            Family::Event => host.topics.extend(names(&grant.scope.topics)),
+            Family::Workflow => host.targets.extend(names(&grant.scope.targets)),
+        }
+    }
+    host
+}
+
+impl Grant {
+    /// Every string of the grant that identifies a protected resource.
+    pub(crate) fn push_strings(&self, out: &mut Vec<String>) {
+        for scope in [
+            &self.scope.prefixes,
+            &self.scope.hosts,
+            &self.scope.topics,
+            &self.scope.targets,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            out.extend(scope.0.iter().cloned());
+        }
+        if let Some(reference) = &self.secret_ref {
+            out.push(reference.name.as_str().to_owned());
+            if let Some(version) = &reference.version {
+                out.push(version.as_str().to_owned());
+            }
+        }
+        if let Some(id) = &self.guest_grant_id {
+            out.push(id.as_str().to_owned());
+        }
+    }
+}
+
+/// The scopes both lists grant: a host capability needs the revision's grant and the
+/// credential's. The credential never widens the revision, nor the revision the credential.
+pub(crate) fn intersect(
+    revision: &crate::host::Grants,
+    credential: &crate::host::Grants,
+) -> crate::host::Grants {
+    // Linear in both lists: a request can carry hundreds of thousands of names.
+    let both = |a: &[String], b: &[String]| -> Vec<String> {
+        let allowed: std::collections::HashSet<&String> = b.iter().collect();
+        a.iter()
+            .filter(|name| allowed.contains(name))
+            .cloned()
+            .collect()
+    };
+    crate::host::Grants {
+        prefixes: both(&revision.prefixes, &credential.prefixes),
+        hosts: both(&revision.hosts, &credential.hosts),
+        topics: both(&revision.topics, &credential.topics),
+        targets: both(&revision.targets, &credential.targets),
+    }
+}
+
 /// Whether every grant names the interface of `version` and the scope of its family.
 pub(crate) fn all_valid(grants: &[Grant], version: GrantVersion) -> bool {
     grants.iter().all(|grant| grant.valid(version))

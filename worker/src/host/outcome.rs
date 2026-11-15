@@ -10,6 +10,8 @@ pub enum InvocationOutcome {
     BufferLimit,
     Cancelled,
     Uncertain,
+    FuelExhausted,
+    HostCallBudget,
     Failed,
 }
 
@@ -17,6 +19,11 @@ pub enum InvocationOutcome {
 pub fn classify(host: &Host, result: Result<(), &engine::Error>) -> InvocationOutcome {
     if host.uncertain_host_call() {
         return InvocationOutcome::Uncertain;
+    }
+    // A host call that started at or after the deadline is a timeout, whatever else the
+    // execution also exceeded.
+    if host.late_host_call() {
+        return InvocationOutcome::GuestInterrupted;
     }
     if host.memory_limited() {
         return InvocationOutcome::GuestMemoryLimit;
@@ -34,6 +41,12 @@ pub fn classify(host: &Host, result: Result<(), &engine::Error>) -> InvocationOu
     }
     if host.buffer_limited() {
         return InvocationOutcome::BufferLimit;
+    }
+    if host.fuel_exhausted() {
+        return InvocationOutcome::FuelExhausted;
+    }
+    if host.host_call_budget_exceeded() {
+        return InvocationOutcome::HostCallBudget;
     }
     if result.is_ok() {
         InvocationOutcome::Success

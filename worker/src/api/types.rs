@@ -118,6 +118,17 @@ fn timestamp(value: &str) -> bool {
         && number(17..19) < 60
 }
 
+/// The validated value of a string newtype, for the trusted worker only; never formatted.
+macro_rules! as_str {
+    ($($ty:ident),+) => {$(
+        impl $ty {
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+    )+};
+}
+
 string_type!(
     /// An activation, attempt, revision or invocation identifier.
     Id,
@@ -161,11 +172,44 @@ string_type!(
     CatalogVersion,
     catalog_version
 );
+as_str!(Id, Text, NonEmpty, Digest);
+
 string_type!(
     /// An absolute UTC deadline.
     Deadline,
     timestamp
 );
+
+impl Deadline {
+    /// Milliseconds since the Unix epoch. The value was validated as
+    /// `YYYY-MM-DDTHH:MM:SS[.f]Z`; a date before 1970 is 0.
+    pub(crate) fn unix_millis(&self) -> u64 {
+        let b = self.0.as_bytes();
+        let number =
+            |range: std::ops::Range<usize>| self.0[range].parse::<i64>().unwrap_or_default();
+        let (year, month, day) = (number(0..4), number(5..7), number(8..10));
+        // Days from the civil date (proleptic Gregorian), Howard Hinnant's algorithm.
+        let y = if month <= 2 { year - 1 } else { year };
+        let era = y.div_euclid(400);
+        let yoe = y - era * 400;
+        let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        let days = era * 146_097 + doe - 719_468;
+        let seconds = days * 86_400 + number(11..13) * 3600 + number(14..16) * 60 + number(17..19);
+        let fraction = &b[19..b.len() - 1];
+        let millis = if fraction.len() > 1 {
+            let digits = &fraction[1..];
+            let mut value = 0i64;
+            for index in 0..3 {
+                value = value * 10 + digits.get(index).map_or(0, |d| i64::from(d - b'0'));
+            }
+            value
+        } else {
+            0
+        };
+        u64::try_from(seconds * 1000 + millis).unwrap_or(0)
+    }
+}
 
 /// The largest integer the contract carries: 2^53 - 1, exactly representable in any JSON reader.
 const MAX_WHOLE: u64 = 9_007_199_254_740_991;
@@ -216,6 +260,12 @@ impl<'de> Deserialize<'de> for Count {
     }
 }
 redacted!(Count);
+
+impl Positive {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
 
 impl From<u16> for Count {
     fn from(value: u16) -> Self {

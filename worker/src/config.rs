@@ -7,8 +7,12 @@ use serde::{Deserialize, Serialize};
 pub struct RuntimeConfig {
     #[serde(default = "default_u32::<1>")]
     pub version: u32,
+    /// The execute listener: serves only `POST /v1/execute`.
     #[serde(default = "default_u16::<8080>")]
     pub listen_port: u16,
+    /// The control listener, a second pod-local port: serves only cancel and execution update.
+    #[serde(default = "default_u16::<8082>")]
+    pub control_port: u16,
     #[serde(default = "default_u16::<9090>")]
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
@@ -38,6 +42,9 @@ pub struct RuntimeConfig {
     pub kill_grace_ms: u64,
     #[serde(default = "cache_path")]
     pub cache_path: String,
+    /// Where the local platform finds artifacts: `<artifact_path>/<hex digest>.wasm`.
+    #[serde(default = "artifact_path")]
+    pub artifact_path: String,
     #[serde(default)]
     pub egress: EgressConfig,
     pub falcone_api_endpoint: String,
@@ -82,6 +89,9 @@ fn readiness_probe_path() -> String {
 fn cache_path() -> String {
     "/var/cache/falcone-worker".into()
 }
+fn artifact_path() -> String {
+    "/var/run/falcone/artifacts".into()
+}
 fn dispatcher_key_path() -> String {
     "/var/run/falcone/dispatcher-keys".into()
 }
@@ -107,6 +117,12 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
         if value.trim().is_empty() {
             return Err(format!("{field}: must not be empty"));
         }
+    }
+    if config.concurrency == 0 {
+        return Err("concurrency: must be at least 1".into());
+    }
+    if config.listen_port == config.control_port {
+        return Err("control_port: must differ from listen_port".into());
     }
     if config.default_wall_clock_ms > config.max_wall_clock_ms {
         return Err("default_wall_clock_ms must not exceed max_wall_clock_ms".into());
@@ -289,6 +305,7 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "listen_port": 8080,
+                "control_port": 8082,
                 "metrics_port": 9090,
                 "probe_port": 8081,
                 "startup_probe_path": "/startupz",
@@ -304,6 +321,7 @@ mod tests {
                 "checkpoint_reserve_ms": 10000,
                 "kill_grace_ms": 5000,
                 "cache_path": "/var/cache/falcone-worker",
+                "artifact_path": "/var/run/falcone/artifacts",
                 "egress": { "resolver": "/etc/resolv.conf", "allow_list": [] },
                 "falcone_api_endpoint": "https://falcone.example.test/api",
                 "falcone_dispatcher_endpoint": "https://dispatcher.example.test",
