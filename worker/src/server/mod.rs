@@ -198,7 +198,8 @@ pub mod hooks {
     pub struct Hooks {
         setup: Mutex<Option<Callback>>,
         guest_start: Mutex<Option<Callback>>,
-        /// Executions that reached the point of starting guest code.
+        /// Executions that instantiated their guest and were about to invoke its handler. This is
+        /// not proof that guest code ran; tests wait for the guest's own first action.
         pub guests_started: AtomicUsize,
     }
 
@@ -211,7 +212,7 @@ pub mod hooks {
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(callback));
         }
 
-        /// Runs right before guest code may start.
+        /// Runs after instantiation, right before the handler is invoked.
         pub fn on_guest_start(&self, callback: impl Fn() + Send + Sync + 'static) {
             *self
                 .guest_start

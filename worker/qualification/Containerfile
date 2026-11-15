@@ -7,11 +7,15 @@ COPY worker/Cargo.toml worker/Cargo.toml
 COPY worker/src worker/src
 COPY worker/tests worker/tests
 RUN cargo build --release --locked -p falcone-serverless-worker --bin qualification_runner --bin compile-cache-qualification --bin artifact-compile-child
-# The execution API suite runs unchanged in the restricted pod (compile-cache-qualification
-# --execute-api). It is built with the test hooks, which the production image never contains.
-RUN cargo test --release --locked -p falcone-serverless-worker --test execute_api_local --no-run --message-format=json \
-    | sed -n 's/.*"executable":"\([^"]*\/execute_api_local-[0-9a-f]*\)".*/\1/p' | tail -n 1 > /build/suite-path \
-    && cp "$(cat /build/suite-path)" /build/execute_api_local
+# The execution API suites run in the restricted pod (compile-cache-qualification --execute-api).
+# execute_api_production is black-box: in the pod it drives the digest-pinned production worker
+# image that runs beside it. execute_api_local is built with the test hooks, which the
+# production image never contains. Neither needs anything from /build at run time.
+RUN cargo test --release --locked -p falcone-serverless-worker --test execute_api_local --test execute_api_production --no-run --message-format=json > /build/suites.json \
+    && for suite in execute_api_local execute_api_production; do \
+         sed -n "s/.*\"executable\":\"\([^\"]*\/${suite}-[0-9a-f]*\)\".*/\1/p" /build/suites.json | tail -n 1 > "/build/${suite}.path" \
+         && cp "$(cat "/build/${suite}.path")" "/build/${suite}"; \
+       done
 
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 # Root-owned, readable and executable by any UID, writable by none. The guests are embedded.
@@ -19,5 +23,6 @@ COPY --from=build --chmod=0555 /build/target/release/qualification_runner /usr/l
 COPY --from=build --chmod=0555 /build/target/release/compile-cache-qualification /usr/local/bin/compile-cache-qualification
 COPY --from=build --chmod=0555 /build/target/release/artifact-compile-child /usr/local/bin/artifact-compile-child
 COPY --from=build --chmod=0555 /build/execute_api_local /usr/local/bin/execute_api_local
+COPY --from=build --chmod=0555 /build/execute_api_production /usr/local/bin/execute_api_production
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/qualification_runner"]

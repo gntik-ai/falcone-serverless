@@ -134,6 +134,9 @@ fn main() -> std::process::ExitCode {
             return execute_runner::run(&flag[16..]);
         }
         Some("--execute-api") => return execute_api_runner::main(),
+        Some("--execute-api-prepare") => {
+            return execute_api_runner::prepare(&std::env::args().nth(2).unwrap_or_default());
+        }
         Some("--limits-ignore-cancellation") => return limits_runner::unresponsive_child(),
         Some("--termination-fallback") => return limits_runner::termination_main(),
         Some("--limits-cancellation") => return limits_runner::main(),

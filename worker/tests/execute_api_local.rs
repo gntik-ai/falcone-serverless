@@ -9,179 +9,29 @@ use falcone_serverless_worker::host::{Bindings, Context, HostError, Operation, R
 use falcone_serverless_worker::server::{
     Deadlines, Platform, Secret, Server, ServerConfig, Unavailable,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
-const WORKER_ENGINE: &str = "49.0.5";
-/// The documented termination budget.
-const BUDGET: Duration = Duration::from_millis(500);
-/// Generous waits for things that must happen; they bound a hang, never a measurement.
-const LONG: Duration = Duration::from_secs(60);
+#[path = "support/execute_api_fixtures.rs"]
+mod support;
+use support::*;
 
-// --- guests -------------------------------------------------------------------------------
-
-fn wat_bytes(text: &str) -> String {
-    text.bytes().map(|b| format!("\\{b:02x}")).collect()
-}
-
-/// A handler component. `body` is the WAT body of `handle(ptr, len) -> i32`; the result area
-/// is at 0. `data` are (offset, text) segments; `pages` is the initial memory in 64 KiB pages.
-fn guest(imports: &[&str], pages: u32, data: &[(u32, &str)], body: &str) -> Vec<u8> {
-    let error = r#"(type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
-      (export "host-error" (type $error (eq $error-type)))"#;
-    let mut wat = String::from("(component\n");
-    let (mut aliases, mut core_imports, mut core_args) =
-        (String::new(), String::new(), String::new());
-    for import in imports {
-        match *import {
-            "logging" => {
-                wat += &format!(
-                    r#"(import "falcone:host/logging@0.2.0" (instance $logging
-                      {error}
-                      (type $level-type (enum "debug" "info" "warn" "error"))
-                      (export "level" (type $level (eq $level-type)))
-                      (type $field-type (record (field "name" string) (field "value" string)))
-                      (export "field" (type $field (eq $field-type)))
-                      (export "log" (func (param "severity" $level) (param "message" string) (param "fields" (list $field)) (result (result (error $error)))))))"#
-                );
-                aliases += r#"(alias export $logging "log" (func $log))
-                  (core func $log (canon lower (func $log) (memory $memory)))"#;
-                core_imports +=
-                    r#"(import "host" "log" (func $log (param i32 i32 i32 i32 i32 i32)))"#;
-                core_args += r#"(export "log" (func $log))"#;
-            }
-            "progress" => {
-                wat += &format!(
-                    r#"(import "falcone:host/progress@0.2.0" (instance $progress
-                      {error}
-                      (export "report" (func (param "completed" u64) (param "total" u64) (param "message" string) (result (result (error $error)))))))"#
-                );
-                aliases += r#"(alias export $progress "report" (func $report))
-                  (core func $report (canon lower (func $report) (memory $memory)))"#;
-                core_imports +=
-                    r#"(import "host" "report" (func $report (param i64 i64 i32 i32 i32)))"#;
-                core_args += r#"(export "report" (func $report))"#;
-            }
-            "context" => {
-                wat += r#"(import "falcone:host/invocation-context@0.2.0" (instance $context
-                      (export "invocation-key" (func (result string)))))"#;
-                aliases += r#"(alias export $context "invocation-key" (func $key))
-                  (core func $key (canon lower (func $key) (memory $memory) (realloc (func $realloc))))"#;
-                core_imports += r#"(import "host" "key" (func $key (param i32)))"#;
-                core_args += r#"(export "key" (func $key))"#;
-            }
-            "other" => wat += r#"(import "falcone:host/other@0.2.0" (instance))"#,
-            other => panic!("unknown import {other}"),
-        }
-    }
-    let segments: String = data
-        .iter()
-        .map(|(at, text)| format!("(data (i32.const {at}) \"{}\")", wat_bytes(text)))
-        .collect();
-    wat += &format!(
-        r#"
-      (type $bytes (list u8))
-      (type $herror (variant (case "invalid-input" string) (case "failed" string)))
-      (type $result (result $bytes (error $herror)))
-      (type $handle (func (param "params" $bytes) (result $result)))
-      (core module $libc
-        (memory (export "memory") {pages})
-        (global $heap (mut i32) (i32.const 65536))
-        (func (export "realloc") (param $old i32) (param $oldsize i32) (param $align i32) (param $size i32) (result i32)
-          (local $ptr i32)
-          (local.set $ptr (i32.and (i32.add (global.get $heap) (i32.sub (local.get $align) (i32.const 1)))
-                                   (i32.sub (i32.const 0) (local.get $align))))
-          (global.set $heap (i32.add (local.get $ptr) (local.get $size)))
-          (local.get $ptr)))
-      (core instance $libc (instantiate $libc))
-      (alias core export $libc "memory" (core memory $memory))
-      (alias core export $libc "realloc" (core func $realloc))
-      {aliases}
-      (core module $guest
-        (import "host" "memory" (memory {pages}))
-        {core_imports}
-        {segments}
-        (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
-          {body}))
-      (core instance $host (export "memory" (memory $memory)) {core_args})
-      (core instance $guest (instantiate $guest (with "host" (instance $host))))
-      (func $handle (type $handle) (canon lift (core func $guest "handle")
-        (memory $memory) (realloc (func $realloc)) string-encoding=utf8))
-      (instance $handler (export "handler-error" (type $herror)) (export "handle" (func $handle)))
-      (export "falcone:host/handler@0.2.0" (instance $handler)))"#
-    );
-    wat::parse_str(&wat).unwrap_or_else(|error| panic!("{error}\n{wat}"))
-}
-
-const OK_JSON: &str = r#"{"statusCode":200,"body":{"ok":true}}"#;
-
-/// Returns the static bytes at 1024 (the result area is at 0).
-fn ret(len: usize) -> String {
-    format!(
-        "(i32.store (i32.const 4) (i32.const 1024)) (i32.store (i32.const 8) (i32.const {len})) (i32.const 0)"
-    )
-}
-
-/// A guest that returns the legacy result and uses 4 MiB of memory.
-fn success() -> Vec<u8> {
-    guest(&[], 64, &[(1024, OK_JSON)], &ret(OK_JSON.len()))
-}
-
-/// A guest that never returns.
-fn spin() -> Vec<u8> {
-    guest(&[], 64, &[], &format!("(loop $l (br $l)) {}", ret(0)))
-}
-
-/// A guest that logs `message` `times` times, then returns the legacy result.
-fn logging(message: &str, times: u32) -> Vec<u8> {
-    guest(
-        &["logging"],
-        64,
-        &[(1024, OK_JSON), (2048, message)],
-        &format!(
-            "(local $i i32)
-             (loop $again
-               (call $log (i32.const 1) (i32.const 2048) (i32.const {}) (i32.const 0) (i32.const 0) (i32.const 3000))
-               (local.set $i (i32.add (local.get $i) (i32.const 1)))
-               (br_if $again (i32.lt_u (local.get $i) (i32.const {times}))))
-             {}",
-            message.len(),
-            ret(OK_JSON.len())
-        ),
-    )
-}
-
-/// A guest that makes `calls` progress reports, which reach the platform's bindings.
-fn reporting(calls: u32) -> Vec<u8> {
-    guest(
-        &["progress"],
-        64,
-        &[(1024, OK_JSON)],
-        &format!(
-            "(local $i i32)
-             (loop $again
-               (call $report (i64.const 1) (i64.const 2) (i32.const 2048) (i32.const 0) (i32.const 3000))
-               (local.set $i (i32.add (local.get $i) (i32.const 1)))
-               (br_if $again (i32.lt_u (local.get $i) (i32.const {calls}))))
-             {}",
-            ret(OK_JSON.len())
-        ),
-    )
-}
-
-/// A guest that calls the host's invocation context for ever.
+/// A guest that announces itself, then calls the host's invocation context for ever.
 fn calling() -> Vec<u8> {
     guest(
-        &["context"],
+        &["context", "progress"],
         64,
         &[],
-        &format!("(loop $l (call $key (i32.const 3000)) (br $l)) {}", ret(0)),
+        &format!(
+            "{ANNOUNCE} (loop $l (call $key (i32.const 3000)) (br $l)) {}",
+            ret(0)
+        ),
     )
 }
 
@@ -193,19 +43,53 @@ struct World {
     artifacts: Mutex<HashMap<String, Vec<u8>>>,
     /// Operations that reached the platform's bindings.
     host_calls: Arc<AtomicUsize>,
+    actions: Arc<Actions>,
     binds: AtomicUsize,
     contexts: Mutex<Vec<Context>>,
     /// The last credential bound, as the platform's binding layer saw it.
     credential: Mutex<Option<String>>,
 }
 
-struct Counting(Arc<AtomicUsize>);
+/// What the platform's bindings saw of the guest's first actions (progress reports). A test
+/// that needs "the guest ran" waits here, not on a server event that precedes instantiation.
+#[derive(Default)]
+struct Actions {
+    count: AtomicUsize,
+    sender: Mutex<Option<mpsc::Sender<()>>>,
+    /// When armed, a progress report blocks in the binding until the holder lets go.
+    held: Mutex<Option<Arc<Mutex<mpsc::Receiver<()>>>>>,
+}
+
+impl Actions {
+    /// Blocks every following progress report until the returned sender is dropped.
+    fn block(&self) -> mpsc::Sender<()> {
+        let (release, held) = mpsc::channel();
+        *self.held.lock().unwrap() = Some(Arc::new(Mutex::new(held)));
+        release
+    }
+
+    fn unblock(&self) {
+        *self.held.lock().unwrap() = None;
+    }
+}
+
+struct Counting(Arc<AtomicUsize>, Arc<Actions>);
 
 impl Bindings for Counting {
     fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
         self.0.fetch_add(1, Ordering::AcqRel);
         match operation {
-            Operation::Progress { .. } => Ok(Reply::Empty),
+            Operation::Progress { .. } => {
+                self.1.count.fetch_add(1, Ordering::AcqRel);
+                if let Some(sender) = &*self.1.sender.lock().unwrap() {
+                    let _ = sender.send(());
+                }
+                let held = self.1.held.lock().unwrap().clone();
+                if let Some(held) = held {
+                    let _ = held.lock().unwrap().recv_timeout(LONG);
+                }
+                Ok(Reply::Empty)
+            }
             _ => Err(HostError::Denied),
         }
     }
@@ -229,7 +113,10 @@ impl Platform for World {
         self.binds.fetch_add(1, Ordering::AcqRel);
         self.contexts.lock().unwrap().push(context.clone());
         *self.credential.lock().unwrap() = Some(credential.expose().to_owned());
-        Ok(Arc::new(Counting(self.host_calls.clone())))
+        Ok(Arc::new(Counting(
+            self.host_calls.clone(),
+            self.actions.clone(),
+        )))
     }
 }
 
@@ -244,186 +131,13 @@ impl World {
     }
 }
 
-// --- requests -----------------------------------------------------------------------------
-
-fn civil(seconds: u64) -> String {
-    let days = (seconds / 86_400) as i64;
-    let rest = seconds % 86_400;
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rest / 3600,
-        rest % 3600 / 60,
-        rest % 60
-    )
-}
-
-fn deadline_in(seconds: u64) -> String {
-    civil(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + seconds,
-    )
-}
-
-static NEXT: AtomicUsize = AtomicUsize::new(1);
-
-#[derive(Clone)]
-struct Spec {
-    digest: String,
-    activation: String,
-    imports: Vec<&'static str>,
-    runtime_mode: &'static str,
-    timeout_ms: u64,
-    /// Seconds until the request's own absolute deadline.
-    deadline_secs: u64,
-    memory_bytes: u64,
-    fuel: u64,
-    max_host_calls: u64,
-    engine: &'static str,
-    secrets: Vec<String>,
-    base: bool,
-}
-
-impl Spec {
-    fn new(digest: &str) -> Self {
-        let id = NEXT.fetch_add(1, Ordering::AcqRel);
-        Self {
-            digest: digest.to_owned(),
-            activation: format!("act-local-{id:06}"),
-            imports: Vec::new(),
-            runtime_mode: "wasm",
-            timeout_ms: 30_000,
-            deadline_secs: 120,
-            memory_bytes: 64 * 1024 * 1024,
-            fuel: 1 << 50,
-            max_host_calls: 1000,
-            engine: WORKER_ENGINE,
-            secrets: Vec::new(),
-            base: false,
-        }
-    }
-
-    fn with(mut self, change: impl FnOnce(&mut Self)) -> Self {
-        change(&mut self);
-        self
-    }
-
-    fn request(&self) -> Value {
-        let mut hosts = vec![json!("api.example.test")];
-        hosts.extend(self.secrets.iter().map(|secret| json!(secret)));
-        let mut projection = json!({
-            "revision": "rev-local-0001",
-            "runtime_mode": self.runtime_mode,
-            "artifact_digest": self.digest,
-            "component_digest": self.digest,
-            "language_profile": {"name": "profile-local", "version": "1"},
-            "engine_version": self.engine,
-            "wasi_version": "0.2.6",
-            "interface_version": "0.2.0",
-            "imports": self.imports.iter().map(|i| {
-                format!("falcone:host/{}@0.2.0", if *i == "context" { "invocation-context" } else { i })
-            }).collect::<Vec<_>>(),
-            "budgets": {
-                "fuel": self.fuel,
-                "memory_bytes": self.memory_bytes,
-                "timeout_ms": self.timeout_ms,
-                "max_host_calls": self.max_host_calls
-            },
-            "grants": [{"family": "http", "interface": "falcone:host/http@0.2.0", "scope": {"hosts": hosts}}]
-        });
-        if self.base {
-            projection["base"] = json!({
-                "kind": "catalog", "id": "base-local", "version": "1.0.0",
-                "digest": format!("sha256:{}", "2".repeat(64))
-            });
-        }
-        json!({
-            "version": "1",
-            "type": "execute",
-            "activation_id": self.activation,
-            "attempt_id": "att-local-0001",
-            "attempt_number": 1,
-            "deadline": deadline_in(self.deadline_secs),
-            "invocation": {"invocation_key": "inv-local-0001"},
-            "credential": {
-                "iss": "issuer-credential-canary", "aud": "audience-credential-canary",
-                "tenant": "tenant-credential-canary", "workspace": "workspace-credential-canary",
-                "pool_profile": "pool-credential-canary", "revision": "rev-local-0001",
-                "activation": self.activation, "attempt": "att-local-0001", "iat": 1, "exp": 2,
-                "allowed_capabilities": [{
-                    "family": "http", "interface": "falcone:host/http@0.1.0",
-                    "scope": {"hosts": hosts}
-                }]
-            },
-            "projection": projection,
-            "params": {"__ow_path": "/v1/local"}
-        })
-    }
-}
-
-// --- http client --------------------------------------------------------------------------
-
-struct Reply2 {
-    status: u16,
-    body: Vec<u8>,
-}
-
-impl Reply2 {
-    fn json(&self) -> Value {
-        serde_json::from_slice(&self.body)
-            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&self.body)))
-    }
-}
-
-fn read_reply(mut stream: TcpStream) -> Option<Reply2> {
-    stream.set_read_timeout(Some(LONG)).unwrap();
-    let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw);
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = String::from_utf8_lossy(&raw[..split]).into_owned();
-    let status = head.split(' ').nth(1)?.parse().ok()?;
-    Some(Reply2 {
-        status,
-        body: raw[split + 4..].to_vec(),
-    })
-}
-
-fn connect(addr: SocketAddr) -> TcpStream {
-    let stream = TcpStream::connect(addr).unwrap();
-    stream.set_nodelay(true).unwrap();
-    stream
-}
-
-/// One request in one write, then the whole response.
-fn post(addr: SocketAddr, path: &str, body: &[u8]) -> Reply2 {
-    let mut stream = connect(addr);
-    let mut message = format!(
-        "POST {path} HTTP/1.1\r\nHost: worker\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
-    message.extend_from_slice(body);
-    stream.write_all(&message).unwrap();
-    read_reply(stream).expect("a response")
-}
-
 // --- harness ------------------------------------------------------------------------------
 
 struct Harness {
     server: Server,
     world: Arc<World>,
-    started: Mutex<mpsc::Receiver<()>>,
+    /// The guests' first actions, in order.
+    acted: Mutex<mpsc::Receiver<()>>,
     _dir: TempDir,
 }
 
@@ -479,14 +193,11 @@ impl Harness {
         let world = Arc::new(World::default());
         let server = Server::start(config, world.clone()).unwrap();
         let (send, receive) = mpsc::channel();
-        let send = Mutex::new(send);
-        server.hooks().on_guest_start(move || {
-            let _ = send.lock().unwrap().send(());
-        });
+        *world.actions.sender.lock().unwrap() = Some(send);
         Self {
             server,
             world,
-            started: Mutex::new(receive),
+            acted: Mutex::new(receive),
             _dir: dir,
         }
     }
@@ -503,11 +214,12 @@ impl Harness {
         self.server.control_addr()
     }
 
-    /// Waits for `count` guests to reach their start; the server's own event.
-    fn wait_started(&self, count: usize) {
-        let receive = self.started.lock().unwrap();
+    /// Waits for `count` guests to take their first action: a call that reached the
+    /// platform's bindings from inside the running guest.
+    fn wait_acted(&self, count: usize) {
+        let receive = self.acted.lock().unwrap();
         for _ in 0..count {
-            receive.recv_timeout(LONG).expect("a guest started");
+            receive.recv_timeout(LONG).expect("a guest acted");
         }
     }
 
@@ -542,8 +254,8 @@ impl Harness {
     fn warm(self: &Arc<Self>, spec: &Spec) {
         let handle = self.spawn(spec);
         {
-            let receive = self.started.lock().unwrap();
-            // The request ends first only when it failed before the guest started.
+            let receive = self.acted.lock().unwrap();
+            // The request ends first only when it failed before the guest acted.
             while receive.recv_timeout(Duration::from_millis(20)).is_err() {
                 if handle.is_finished() {
                     let reply = handle.join().unwrap();
@@ -558,23 +270,6 @@ impl Harness {
         assert_eq!(self.cancel(&spec.activation).status, 200);
         assert_eq!(handle.join().unwrap().status, 499);
     }
-}
-
-fn code(reply: &Reply2) -> (u16, String, String) {
-    let value = reply.json();
-    let failure = if value["type"] == "result" {
-        &value["result"]
-    } else {
-        &value
-    };
-    (
-        reply.status,
-        failure["code"].as_str().unwrap_or("").to_owned(),
-        failure["detail"]["reason"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned(),
-    )
 }
 
 // --- tests: the contract ------------------------------------------------------------------
@@ -652,9 +347,9 @@ fn a_non_wasm_request_is_refused_409_and_creates_no_instance_even_when_every_slo
     assert_eq!(harness.run(&image).status, 409);
     assert_eq!(harness.world.binds.load(Ordering::Acquire), 0);
     // Occupy the only slot, then repeat with the body fully buffered.
-    let running = Spec::new(&digest);
+    let running = Spec::blocking(&digest);
     let handle = harness.spawn(&running);
-    harness.wait_started(1);
+    harness.wait_acted(1);
     assert_eq!(harness.server.running(), 1);
     let reply = harness.run(&oci);
     assert_eq!(
@@ -909,6 +604,8 @@ fn many_distinct_credential_strings_and_a_thousand_long_lines_redact_within_a_bo
         s.imports = vec!["logging"];
         s.max_host_calls = 2000;
         s.secrets = secrets.clone();
+        // A debug build scans a great deal here; the budget is not what the test measures.
+        s.timeout_ms = 55_000;
     });
     let started = Instant::now();
     let reply = harness.run(&spec);
@@ -940,9 +637,9 @@ fn stalled(addr: SocketAddr, bytes: &[u8]) -> TcpStream {
 fn with_every_execution_running_and_the_execute_listener_saturated_a_cancel_still_takes_effect() {
     let harness = Arc::new(Harness::new(2));
     let digest = harness.world.add(&spin());
-    let (first, second) = (Spec::new(&digest), Spec::new(&digest));
+    let (first, second) = (Spec::blocking(&digest), Spec::blocking(&digest));
     let (a, b) = (harness.spawn(&first), harness.spawn(&second));
-    harness.wait_started(2);
+    harness.wait_acted(2);
     // 2 running + 4 in admission is the execute listener's whole limit; fill the rest with
     // stalled connections: some mid-header, some with headers promising a body.
     let mut held = Vec::new();
@@ -965,12 +662,13 @@ fn with_every_execution_running_and_the_execute_listener_saturated_a_cancel_stil
     let answer = harness.cancel(&first.activation);
     assert_eq!(answer.status, 200);
     assert_eq!(answer.json()["cancel"]["state"], "acknowledged");
-    assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
     assert_eq!(
         code(&a.join().unwrap()),
         (499, "cancelled".into(), "cancel_requested".into())
     );
+    // The slot is free again within the budget, counted from before the cancel was sent.
     assert!(harness.server.wait_running(1, BUDGET).is_some());
+    assert!(started.elapsed() < BUDGET, "{:?}", started.elapsed());
     // The other execution is untouched until it is cancelled in its turn.
     assert_eq!(harness.cancel(&second.activation).status, 200);
     assert_eq!(b.join().unwrap().status, 499);
@@ -1049,9 +747,9 @@ fn stalled_control_connections_leave_executions_alone_and_the_listener_recovers(
         };
     }));
     let digest = harness.world.add(&spin());
-    let spec = Spec::new(&digest);
+    let spec = Spec::blocking(&digest);
     let handle = harness.spawn(&spec);
-    harness.wait_started(1);
+    harness.wait_acted(1);
     let held: Vec<_> = (0..16)
         .map(|_| stalled(harness.control_addr(), b"POST /v1/can"))
         .collect();
@@ -1072,9 +770,9 @@ fn stalled_control_connections_leave_executions_alone_and_the_listener_recovers(
 fn an_update_moves_forward_only() {
     let harness = Arc::new(Harness::new(1));
     let digest = harness.world.add(&spin());
-    let spec = Spec::new(&digest);
+    let spec = Spec::blocking(&digest);
     let handle = harness.spawn(&spec);
-    harness.wait_started(1);
+    harness.wait_acted(1);
     let update = |sequence: u64| {
         let body = json!({
             "version": "1", "type": "update", "activation_id": spec.activation,
@@ -1104,11 +802,7 @@ fn an_update_moves_forward_only() {
 
 /// A blocking guest runs without a cancel and ends at the shortest limit.
 fn timed(harness: &Arc<Harness>, spec: &Spec, shortest: Duration) {
-    let before = harness
-        .server
-        .hooks()
-        .guests_started
-        .load(Ordering::Acquire);
+    let before = harness.world.actions.count.load(Ordering::Acquire);
     let started = Instant::now();
     let reply = harness.run(spec);
     let elapsed = started.elapsed();
@@ -1121,13 +815,10 @@ fn timed(harness: &Arc<Harness>, spec: &Spec, shortest: Duration) {
     assert_eq!(result["activation_id"], spec.activation);
     assert_eq!(result["identity"]["wasmtime_version"], WORKER_ENGINE);
     assert_eq!(result["class"], "uncertain");
-    // The guest started, and the execution ended at the shortest limit, within the budget.
+    // The guest ran (its own first action reached the bindings), and the execution ended at
+    // the shortest limit, within the budget.
     assert_eq!(
-        harness
-            .server
-            .hooks()
-            .guests_started
-            .load(Ordering::Acquire),
+        harness.world.actions.count.load(Ordering::Acquire),
         before + 1
     );
     assert!(
@@ -1148,9 +839,9 @@ fn the_shortest_of_the_request_the_projection_and_the_worker_limit_wins() {
         config.ceilings.max_wall_clock_ms = 2500
     }));
     let digest = harness.world.add(&spin());
-    harness.warm(&Spec::new(&digest));
+    harness.warm(&Spec::blocking(&digest));
     // The request's own deadline is the shortest (whole seconds: between 1 and 2 s away).
-    let request = Spec::new(&digest).with(|s| s.deadline_secs = 2);
+    let request = Spec::blocking(&digest).with(|s| s.deadline_secs = 2);
     let started = Instant::now();
     let reply = harness.run(&request);
     let elapsed = started.elapsed();
@@ -1165,13 +856,13 @@ fn the_shortest_of_the_request_the_projection_and_the_worker_limit_wins() {
     // The projection's limit is the shortest.
     timed(
         &harness,
-        &Spec::new(&digest).with(|s| s.timeout_ms = 700),
+        &Spec::blocking(&digest).with(|s| s.timeout_ms = 700),
         Duration::from_millis(700),
     );
     // The worker's wall-clock limit is the shortest of all.
     timed(
         &harness,
-        &Spec::new(&digest).with(|s| s.timeout_ms = 20_000),
+        &Spec::blocking(&digest).with(|s| s.timeout_ms = 20_000),
         Duration::from_millis(2500),
     );
     let ok = harness.world.add(&success());
@@ -1182,11 +873,11 @@ fn the_shortest_of_the_request_the_projection_and_the_worker_limit_wins() {
 fn a_host_call_after_the_deadline_ends_the_execution_as_a_timeout() {
     let harness = Arc::new(Harness::new(1));
     let digest = harness.world.add(&calling());
-    harness.warm(&Spec::new(&digest).with(|s| s.imports = vec!["context"]));
+    harness.warm(&Spec::new(&digest).with(|s| s.imports = vec!["context", "progress"]));
     timed(
         &harness,
         &Spec::new(&digest).with(|s| {
-            s.imports = vec!["context"];
+            s.imports = vec!["context", "progress"];
             s.timeout_ms = 600;
             s.max_host_calls = 1 << 50;
         }),
@@ -1215,7 +906,7 @@ fn memory_fuel_and_host_call_budgets_end_the_execution_with_their_own_reason() {
     // Fuel: a small budget stops a looping guest well before `timeout_ms`.
     let looping = harness.world.add(&spin());
     let started = Instant::now();
-    let reply = harness.run(&Spec::new(&looping).with(|s| s.fuel = 100_000));
+    let reply = harness.run(&Spec::blocking(&looping).with(|s| s.fuel = 100_000));
     assert_eq!(code(&reply), failed("fuel_exhausted"));
     assert!(
         started.elapsed() < Duration::from_secs(20),
@@ -1265,6 +956,72 @@ fn memory_fuel_and_host_call_budgets_end_the_execution_with_their_own_reason() {
             .load(Ordering::Acquire),
         validations
     );
+}
+
+// --- tests: a host call blocked across the deadline or a cancel --------------------------
+
+#[test]
+fn a_progress_call_blocked_across_until_is_a_504_timeout_that_stays_uncertain() {
+    let harness = Arc::new(Harness::new(1));
+    let digest = harness.world.add(&spin());
+    harness.warm(&Spec::blocking(&digest));
+    // From now on the binding blocks on its first report until the test lets go.
+    let release = harness.world.actions.block();
+    let spec = Spec::blocking(&digest).with(|s| s.timeout_ms = 1000);
+    let started = Instant::now();
+    let pending = harness.spawn(&spec);
+    // The guest's first action reached the binding, and the binding does not return.
+    harness.wait_acted(1);
+    let reply = pending.join().unwrap();
+    assert_eq!(
+        code(&reply),
+        (504, "timeout".into(), "deadline_exceeded".into()),
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(reply.json()["class"], "uncertain");
+    assert!(
+        started.elapsed() < Duration::from_millis(1000) + BUDGET,
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(harness.server.wait_running(0, BUDGET).is_some());
+    harness.world.actions.unblock();
+    drop(release);
+    // The slot is free: the next execute is admitted.
+    let ok = harness.world.add(&success());
+    assert_eq!(harness.run(&Spec::new(&ok)).status, 200);
+}
+
+#[test]
+fn a_cancel_during_a_blocked_progress_call_is_a_499_cancelled_that_stays_uncertain() {
+    let harness = Arc::new(Harness::new(1));
+    let digest = harness.world.add(&spin());
+    harness.warm(&Spec::blocking(&digest));
+    let release = harness.world.actions.block();
+    let spec = Spec::blocking(&digest);
+    let pending = harness.spawn(&spec);
+    harness.wait_acted(1);
+    let sent = Instant::now();
+    let answer = harness.cancel(&spec.activation);
+    assert_eq!(answer.status, 200);
+    assert!(
+        harness
+            .server
+            .wait_running(0, BUDGET.saturating_sub(sent.elapsed()))
+            .is_some()
+    );
+    assert!(sent.elapsed() < BUDGET, "{:?}", sent.elapsed());
+    let reply = pending.join().unwrap();
+    assert_eq!(
+        code(&reply),
+        (499, "cancelled".into(), "cancel_requested".into()),
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(reply.json()["class"], "uncertain");
+    harness.world.actions.unblock();
+    drop(release);
 }
 
 // --- tests: stalled steps under the deadline and cancellation -----------------------------
@@ -1380,8 +1137,9 @@ fn stalled_step(stall: Stall, leave: Leave) {
             (504, "timeout")
         }
         Leave::Cancel => {
+            // The clock starts before the cancel is sent and stops when the slot is free.
+            let sent = Instant::now();
             let answer = harness.cancel(&spec.activation);
-            let released = Instant::now();
             assert_eq!(answer.status, 200, "{stall:?}");
             assert_eq!(
                 answer.json()["cancel"]["state"],
@@ -1389,11 +1147,14 @@ fn stalled_step(stall: Stall, leave: Leave) {
                 "{stall:?}"
             );
             assert!(
-                harness.server.wait_running(0, BUDGET).is_some(),
+                harness
+                    .server
+                    .wait_running(0, BUDGET.saturating_sub(sent.elapsed()))
+                    .is_some(),
                 "{stall:?}: slot held"
             );
-            assert!(released.elapsed() < BUDGET, "{stall:?}");
-            (499, if true { "cancelled" } else { "" })
+            assert!(sent.elapsed() < BUDGET, "{stall:?}: {:?}", sent.elapsed());
+            (499, "cancelled")
         }
     };
     let reply = pending.join().unwrap();
@@ -1483,9 +1244,16 @@ fn a_large_cold_artifact_is_validated_under_the_deadline_and_cancellation() {
     let gate = install(&harness, Stall::Validate);
     let pending = harness.spawn(&spec);
     gate.reached.recv_timeout(LONG).unwrap();
+    let sent = Instant::now();
     assert_eq!(harness.cancel(&spec.activation).status, 200);
+    assert!(
+        harness
+            .server
+            .wait_running(0, BUDGET.saturating_sub(sent.elapsed()))
+            .is_some()
+    );
+    assert!(sent.elapsed() < BUDGET, "{:?}", sent.elapsed());
     assert_eq!(pending.join().unwrap().status, 499);
-    assert!(harness.server.wait_running(0, BUDGET).is_some());
     drop(gate);
     wait_for_abandoned_steps(&harness);
     // A short timeout during validation.
@@ -1651,7 +1419,6 @@ fn a_slow_reader_of_a_large_response_is_cut_off_and_releases_its_permit() {
     // Both executions finish (their slots are released before the response is written).
     assert!(harness.server.wait_running(0, LONG).is_some());
     // Read one byte at a time, far slower than the response deadline allows.
-    let started = Instant::now();
     for stream in &mut readers {
         let mut byte = [0u8; 1];
         stream.set_read_timeout(Some(LONG)).unwrap();
@@ -1663,263 +1430,6 @@ fn a_slow_reader_of_a_large_response_is_cut_off_and_releases_its_permit() {
         (0, 0),
         Duration::from_millis(900) + BUDGET + Duration::from_secs(2)
     ));
-    assert!(started.elapsed() < Duration::from_millis(900) + BUDGET + Duration::from_secs(2));
     drop(readers);
     recovered(&harness, "slow readers");
-}
-
-// --- tests: the failure code contract -----------------------------------------------------
-
-fn root() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .to_path_buf()
-}
-
-fn read_json(path: &str) -> Value {
-    serde_json::from_slice(&std::fs::read(root().join(path)).unwrap()).unwrap()
-}
-
-#[test]
-fn the_code_table_the_schema_the_spec_and_the_code_enum_agree_on_every_code() {
-    use falcone_serverless_worker::api::{Class, Code, Reason, Refusal};
-    let table = read_json("docs/contracts/worker-execution-api/failure-codes.v1.json");
-    let table = table.as_array().unwrap();
-    let common = read_json("docs/contracts/worker-execution-api/common.v1.schema.json");
-    let failure = &common["$defs"]["failure"];
-    let spec = std::fs::read_to_string(
-        root().join("docs/contracts/worker-execution-api/execution-api-v1.md"),
-    )
-    .unwrap();
-    // Every code of the enum is a row, and every row a code.
-    let names: Vec<String> = Code::ALL
-        .iter()
-        .map(|c| {
-            serde_json::to_value(c)
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned()
-        })
-        .collect();
-    let rows: Vec<String> = table
-        .iter()
-        .map(|r| r["code"].as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(names, rows);
-    let schema_codes: Vec<String> = failure["properties"]["code"]["enum"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|c| c.as_str().unwrap().to_owned())
-        .collect();
-    assert_eq!(schema_codes, names);
-    let mut every_reason = std::collections::BTreeSet::new();
-    for (row, code) in table.iter().zip(Code::ALL) {
-        let name = row["code"].as_str().unwrap();
-        // The enum's reasons are the row's reasons.
-        let reasons: Vec<String> = code
-            .reasons()
-            .iter()
-            .map(|r| {
-                serde_json::to_value(r)
-                    .unwrap()
-                    .as_str()
-                    .unwrap()
-                    .to_owned()
-            })
-            .collect();
-        let listed: Vec<String> = row["reasons"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r.as_str().unwrap().to_owned())
-            .collect();
-        assert_eq!(reasons, listed, "{name}");
-        every_reason.extend(listed.iter().cloned());
-        assert_eq!(
-            u64::from(code.status()),
-            row["status"].as_u64().unwrap(),
-            "{name}"
-        );
-        for reason in &listed {
-            let reason_value: Reason = serde_json::from_value(json!(reason)).unwrap();
-            let refusal = Refusal::new(code, reason_value);
-            let wire = serde_json::to_value(&refusal).unwrap();
-            assert_eq!(wire["status"], row["status"], "{name}");
-            assert_eq!(wire["code"], name);
-            assert_eq!(wire["detail"]["reason"], json!(reason));
-            // The class is the row's, or the reason's own override.
-            let expected = row["class_by_reason"][reason.as_str()]
-                .as_str()
-                .unwrap_or(row["class"].as_str().unwrap());
-            assert_eq!(
-                serde_json::to_value(refusal.class()).unwrap(),
-                json!(expected),
-                "{name}/{reason}"
-            );
-            let retryable = refusal.class() == Class::Retryable;
-            assert_eq!(wire["retryable"], json!(retryable), "{name}/{reason}");
-            assert_eq!(wire["retryable"], row["retryable"], "{name}/{reason}");
-        }
-        // The schema: a status, a retryable value and the reasons, for the code.
-        let block = failure["allOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|b| b["if"]["properties"]["code"]["const"] == json!(name))
-            .unwrap_or_else(|| panic!("{name} has no schema block"));
-        assert_eq!(
-            block["then"]["properties"]["status"]["const"], row["status"],
-            "{name}"
-        );
-        assert_eq!(
-            block["then"]["properties"]["retryable"]["const"], row["retryable"],
-            "{name}"
-        );
-        assert_eq!(
-            block["then"]["properties"]["detail"]["properties"]["reason"]["enum"], row["reasons"],
-            "{name}"
-        );
-        // The spec: one table row with the status, every reason and the class.
-        let line = spec
-            .lines()
-            .find(|l| l.starts_with(&format!("| `{name}` |")))
-            .unwrap_or_else(|| panic!("{name} is not in the spec table"));
-        assert!(line.contains(&format!("| {} |", row["status"])), "{name}");
-        for reason in &listed {
-            assert!(line.contains(reason.as_str()), "{name}/{reason}");
-        }
-        assert!(line.contains(row["class"].as_str().unwrap()), "{name}");
-    }
-    let schema_reasons: std::collections::BTreeSet<String> =
-        failure["properties"]["detail"]["properties"]["reason"]["enum"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r.as_str().unwrap().to_owned())
-            .collect();
-    assert_eq!(schema_reasons, every_reason);
-}
-
-// --- tests: the production binary and image -----------------------------------------------
-
-struct Killed(std::process::Child);
-
-impl Drop for Killed {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-#[test]
-fn the_production_binary_serves_both_listeners_with_its_sibling_compile_child() {
-    let dir = TempDir::new("serve");
-    let artifacts = dir.0.join("artifacts");
-    std::fs::create_dir_all(&artifacts).unwrap();
-    let bytes = success();
-    let digest = format!("sha256:{:x}", Sha256::digest(&bytes));
-    std::fs::write(artifacts.join(format!("{}.wasm", &digest[7..])), &bytes).unwrap();
-    let (execute, control) = (free_port(), free_port());
-    let config = dir.0.join("worker.toml");
-    std::fs::write(
-        &config,
-        format!(
-            "pool_id = \"pool-local\"\nfalcone_api_endpoint = \"https://api.invalid\"\n\
-             falcone_dispatcher_endpoint = \"https://dispatcher.invalid\"\n\
-             listen_port = {execute}\ncontrol_port = {control}\n\
-             cache_path = \"{}\"\nartifact_path = \"{}\"\n",
-            dir.0.join("cache").display(),
-            artifacts.display()
-        ),
-    )
-    .unwrap();
-    let _worker = Killed(
-        std::process::Command::new(env!("CARGO_BIN_EXE_falcone-serverless-worker"))
-            .arg("serve")
-            .arg(&config)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .unwrap(),
-    );
-    let execute_addr: SocketAddr = format!("127.0.0.1:{execute}").parse().unwrap();
-    let control_addr: SocketAddr = format!("127.0.0.1:{control}").parse().unwrap();
-    // Readiness: poll until the listener accepts.
-    let limit = Instant::now() + LONG;
-    while TcpStream::connect(execute_addr).is_err() || TcpStream::connect(control_addr).is_err() {
-        assert!(Instant::now() < limit, "the worker never listened");
-        std::thread::yield_now();
-    }
-    let spec = Spec::new(&digest);
-    let reply = post(
-        execute_addr,
-        "/v1/execute",
-        spec.request().to_string().as_bytes(),
-    );
-    assert_eq!(
-        reply.status,
-        200,
-        "{}",
-        String::from_utf8_lossy(&reply.body)
-    );
-    assert_eq!(reply.json()["identity"]["wasmtime_version"], WORKER_ENGINE);
-    assert_eq!(post(control_addr, "/v1/execute", b"{}").status, 404);
-    assert_eq!(post(execute_addr, "/v1/cancel", b"{}").status, 404);
-    // An artifact the platform does not have is a failure of its own reason, not a crash.
-    let missing = Spec::new(&format!("sha256:{}", "9".repeat(64)));
-    assert_eq!(
-        code(&post(
-            execute_addr,
-            "/v1/execute",
-            missing.request().to_string().as_bytes()
-        )),
-        (
-            500,
-            "execution_failed".into(),
-            "artifact_unavailable".into()
-        )
-    );
-}
-
-#[test]
-fn the_production_image_ships_the_compile_child_beside_the_worker() {
-    let production = std::fs::read_to_string(root().join("worker/Containerfile")).unwrap();
-    let copies: Vec<&str> = production
-        .lines()
-        .filter(|l| l.starts_with("COPY --from=build"))
-        .collect();
-    let target = |binary: &str| {
-        copies
-            .iter()
-            .find(|line| line.contains(&format!("/release/{binary} ")))
-            .and_then(|line| line.split_whitespace().last())
-            .unwrap_or_else(|| panic!("{binary} is not copied into the production image"))
-            .to_owned()
-    };
-    let (worker, child) = (
-        target("falcone-serverless-worker"),
-        target("artifact-compile-child"),
-    );
-    assert_eq!(
-        std::path::Path::new(&worker).parent(),
-        std::path::Path::new(&child).parent()
-    );
-    assert!(child.ends_with("/artifact-compile-child"));
-    // The qualification image ships the same suite, which runs in the restricted pod.
-    let qualification =
-        std::fs::read_to_string(root().join("worker/qualification/Containerfile")).unwrap();
-    assert!(qualification.contains("/usr/local/bin/execute_api_local"));
-    assert!(qualification.contains("--test execute_api_local"));
 }

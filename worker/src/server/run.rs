@@ -163,17 +163,31 @@ fn run(
     if let Some(stop) = supervise::expired(until, cancel) {
         return Err(left(stop));
     }
+    let prepared = match host::Prepared::new(&loaded, host) {
+        Ok(prepared) => prepared,
+        Err(execution) => return outcome(execution, logs, until, cancel),
+    };
+    // Instantiation is done and the handler is about to be invoked: the last point at which
+    // `until` or a cancel keeps guest code from starting.
+    if let Some(stop) = supervise::expired(until, cancel) {
+        return Err(left(stop));
+    }
     #[cfg(any(test, feature = "qualification-hooks"))]
     shared.hooks.guest_start();
-    let execution = match host::Prepared::new(&loaded, host) {
-        Ok(prepared) => prepared.call(&plan.params),
-        Err(execution) => execution,
-    };
-    outcome(execution, logs)
+    outcome(prepared.call(&plan.params), logs, until, cancel)
 }
 
 /// Maps what the guest did to the handler bytes or the failure.
-fn outcome(execution: host::Execution, logs: &Arc<Mutex<Logs>>) -> Result<Vec<u8>, Refusal> {
+///
+/// A host call that was cut off by `until` or a cancel may have left a mutation that still
+/// commits, which the engine reports as `Uncertain`. At this boundary the interruption wins:
+/// the answer is `timeout` or `cancelled`, whose class is `uncertain` as well.
+fn outcome(
+    execution: host::Execution,
+    logs: &Arc<Mutex<Logs>>,
+    until: Instant,
+    cancel: &AtomicBool,
+) -> Result<Vec<u8>, Refusal> {
     match execution.outcome {
         InvocationOutcome::GuestInterrupted => return Err(left(Left::Timeout)),
         InvocationOutcome::Cancelled => return Err(left(Left::Cancelled)),
@@ -181,7 +195,12 @@ fn outcome(execution: host::Execution, logs: &Arc<Mutex<Logs>>) -> Result<Vec<u8
         InvocationOutcome::FuelExhausted => return Err(failed(Reason::FuelExhausted)),
         InvocationOutcome::HostCallBudget => return Err(failed(Reason::HostCallBudgetExceeded)),
         InvocationOutcome::BufferLimit => return Err(failed(Reason::BufferLimitExceeded)),
-        InvocationOutcome::Uncertain => return Err(failed(Reason::UncertainSideEffects)),
+        InvocationOutcome::Uncertain => {
+            return Err(match supervise::expired(until, cancel) {
+                Some(stop) => left(stop),
+                None => failed(Reason::UncertainSideEffects),
+            });
+        }
         InvocationOutcome::Success | InvocationOutcome::Failed => {}
     }
     match execution.result {

@@ -58,6 +58,20 @@ fn opt_in<C: Cluster>(
 }
 
 fn pod_manifest(plan: &NamespacePlan, image: &str) -> Result<serde_json::Value, String> {
+    let mut pod = base_pod_manifest(plan, image)?;
+    // A qualification of a production image names that image too, and the pod runs it.
+    if let Some(name) = PRODUCTION_IMAGE_ENV
+        && let Ok(production) = std::env::var(name)
+    {
+        if !image::pinned_image(&production) {
+            return Err(format!("UNVERIFIED: {name} must be <repo>@sha256:<digest>"));
+        }
+        add_production(&mut pod, image, &production);
+    }
+    Ok(pod)
+}
+
+fn base_pod_manifest(plan: &NamespacePlan, image: &str) -> Result<serde_json::Value, String> {
     if !image::pinned_image(image) {
         return Err("UNVERIFIED: FS_TEST_WAS02_IMAGE must be <repo>@sha256:<digest>".into());
     }
@@ -79,6 +93,46 @@ fn pod_manifest(plan: &NamespacePlan, image: &str) -> Result<serde_json::Value, 
             "volumes":[{"name":"scratch","emptyDir":{"sizeLimit":"256Mi"}}]
         }
     }))
+}
+
+
+/// Runs the digest-pinned production image as a native sidecar next to the runner. They share
+/// the pod's network namespace and one pod-local directory, `/work`: an init step of the
+/// qualification image writes the production worker's configuration there, the production image
+/// serves it (its own entrypoint, unchanged), and the runner drives it over loopback. The
+/// sidecar stops when the runner ends, so the pod ends with the runner. Every container has the
+/// same restricted security context.
+fn add_production(pod: &mut serde_json::Value, image: &str, production: &str) {
+    let restricted = serde_json::json!({
+        "allowPrivilegeEscalation": false, "readOnlyRootFilesystem": true,
+        "capabilities": {"drop": ["ALL"]}
+    });
+    let work = serde_json::json!([{"name": "work", "mountPath": "/work"}]);
+    let spec = &mut pod["spec"];
+    spec["initContainers"] = serde_json::json!([
+        {
+            "name": "prepare", "image": image,
+            "command": ["/usr/local/bin/compile-cache-qualification", "--execute-api-prepare", "/work"],
+            "securityContext": restricted, "volumeMounts": work,
+            "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}, "limits": {"cpu": "1", "memory": "128Mi"}}
+        },
+        {
+            "name": "worker", "image": production, "restartPolicy": "Always",
+            "args": ["serve", "/work/worker.toml"],
+            "securityContext": restricted, "volumeMounts": work,
+            "resources": {"requests": {"cpu": "1", "memory": "512Mi"}, "limits": {"cpu": "2", "memory": "3Gi"}}
+        }
+    ]);
+    let runner = &mut spec["containers"][0];
+    runner["env"] = serde_json::json!([{"name": "EXECUTE_API_PRODUCTION_IMAGE", "value": production}]);
+    runner["volumeMounts"]
+        .as_array_mut()
+        .expect("runner mounts")
+        .push(serde_json::json!({"name": "work", "mountPath": "/work"}));
+    spec["volumes"]
+        .as_array_mut()
+        .expect("pod volumes")
+        .push(serde_json::json!({"name": "work", "emptyDir": {"sizeLimit": "512Mi"}}));
 }
 
 #[test]
