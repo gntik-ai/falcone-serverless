@@ -287,8 +287,12 @@ execution slot is released within the termination budget (500 ms) and the outcom
 or `499 cancelled`, whatever the step later returns. A supervised step that was left is
 abandoned: it is told to stop where it can observe that, it never publishes a cache entry (the
 cache writes a temporary file and renames it atomically, and discards it when abandoned), and at
-most `max(concurrency, 4)` abandoned steps may still be running; past that a new step is
-`503 busy`. A deadline or cancel always outranks `busy` and every admission result, including the
+most `max(concurrency, 4)` abandoned plus in-flight supervised steps may be running. Each step
+atomically reserves a unit before its thread starts; without one it is `503 busy` and its work
+never runs. A unit is released before the step returns its result, or when its abandoned thread
+ends, or if spawning fails. Still-running abandoned steps therefore reduce capacity for new
+executions, and a refused execution holds no execution slot. A deadline or cancel always
+outranks `busy` and every admission result, including the
 refusal of a duplicate registration: a request for an `(activation_id, attempt_id)` that is already
 running is `503 busy` before `until` and `504 timeout` once it has passed.
 
