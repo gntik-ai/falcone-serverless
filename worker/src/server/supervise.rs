@@ -5,8 +5,8 @@
 //! flag. When `until` passes or a cancel arrives the execution leaves at once, whatever the
 //! step would later return, and the step's thread is abandoned. An abandoned thread is told to
 //! stop through its own flag (a cancel) or through `until` (the deadline) where the step can
-//! observe them, and the number of abandoned threads that are still running is bounded: past the
-//! bound a new step is refused as busy.
+//! observe them. Abandoned plus in-flight steps share a bounded reservation: without a free
+//! unit a new step is refused as busy before its thread starts.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -22,14 +22,16 @@ pub enum Left {
     Timeout,
     /// A cancel arrived.
     Cancelled,
-    /// Too many abandoned steps are still running, or no thread could be started.
+    /// Too many abandoned or in-flight steps, or no thread could be started.
     Busy,
 }
 
-/// The bound on abandoned steps that are still running.
+/// The bound on abandoned plus in-flight supervised steps.
 pub struct Abandoned {
     running: AtomicUsize,
     max: usize,
+    #[cfg(any(test, feature = "qualification-hooks"))]
+    peak: AtomicUsize,
 }
 
 impl Abandoned {
@@ -37,12 +39,46 @@ impl Abandoned {
         Self {
             running: AtomicUsize::new(0),
             max,
+            #[cfg(any(test, feature = "qualification-hooks"))]
+            peak: AtomicUsize::new(0),
         }
     }
 
     #[cfg(any(test, feature = "qualification-hooks"))]
     pub fn running(&self) -> usize {
         self.running.load(Ordering::Acquire)
+    }
+
+    #[cfg(any(test, feature = "qualification-hooks"))]
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::Acquire)
+    }
+
+    fn reserve(&self) -> bool {
+        match self
+            .running
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |running| {
+                if running < self.max {
+                    Some(running + 1)
+                } else {
+                    None
+                }
+            }) {
+            Ok(_previous) => {
+                #[cfg(any(test, feature = "qualification-hooks"))]
+                self.peak.fetch_max(_previous + 1, Ordering::AcqRel);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "qualification-hooks"))]
+impl super::Server {
+    /// Peak abandoned plus in-flight supervised steps in this server.
+    pub fn supervised_steps_peak(&self) -> usize {
+        self.shared.abandoned.peak()
     }
 }
 
@@ -68,7 +104,7 @@ const RUNNING: u8 = 0;
 const ABANDONED: u8 = 1;
 const FINISHED: u8 = 2;
 
-/// Counts a running step that was abandoned; the count falls when its thread ends.
+/// Transfers release to an abandoned thread; otherwise the waiter releases its reservation.
 struct Tally {
     bound: Arc<Abandoned>,
     state: Arc<AtomicU8>,
@@ -98,8 +134,8 @@ pub fn step<T: Send + 'static>(
     if let Some(left) = expired(until, cancelled) {
         return Err(left);
     }
-    if bound.running.load(Ordering::Acquire) >= bound.max {
-        return Err(Left::Busy);
+    if !bound.reserve() {
+        return Err(busy(until, cancelled));
     }
     let abandoned = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AtomicU8::new(RUNNING));
@@ -115,7 +151,11 @@ pub fn step<T: Send + 'static>(
             let _tally = tally;
             let _ = send.send(work(flag));
         })
-        .map_err(|_| busy(until, cancelled))?;
+        .map_err(|_| {
+            // A failed spawn drops the closure (and its RUNNING tally), so release here.
+            bound.running.fetch_sub(1, Ordering::AcqRel);
+            busy(until, cancelled)
+        })?;
     loop {
         // A result that arrives after the deadline or a cancel is not used.
         if let Some(left) = expired(until, cancelled) {
@@ -125,6 +165,9 @@ pub fn step<T: Send + 'static>(
         let wait = until.saturating_duration_since(Instant::now()).min(POLL);
         match receive.recv_timeout(wait) {
             Ok(value) => {
+                // Work ended, but its tally may not have dropped yet. The waiter owns this
+                // unit while RUNNING, and must return it before the next sequential step.
+                bound.running.fetch_sub(1, Ordering::AcqRel);
                 return match expired(until, cancelled) {
                     Some(left) => Err(left),
                     None => Ok(value),
@@ -134,19 +177,20 @@ pub fn step<T: Send + 'static>(
             // A step that set the cancel flag and then died is a cancellation, and one that died
             // past `until` is a timeout: the interruption is looked at again before the exit
             // is mapped to a capacity result.
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(busy(until, cancelled)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                bound.running.fetch_sub(1, Ordering::AcqRel);
+                return Err(busy(until, cancelled));
+            }
         }
     }
 }
 
-/// Marks the step abandoned. The count rises here and falls when its thread ends, so a
-/// thread that already ended is never counted.
+/// Transfers the existing reservation to the thread, or releases it if the thread ended first.
 ///
 /// The step's flag records the reason it was left: it is set for a cancellation and stays clear
 /// for a timeout, where the step observes `until` itself. A compile child that is stopped at
 /// the deadline is therefore never mistaken for a cancelled one.
 fn abandon(bound: &Arc<Abandoned>, state: &AtomicU8, abandoned: &AtomicBool, reason: Left) {
-    bound.running.fetch_add(1, Ordering::AcqRel);
     if state
         .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
@@ -166,6 +210,149 @@ mod tests {
 
     fn flag() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    fn concurrent_steps_reserve_capacity_before_their_work_runs() {
+        let bound = Arc::new(Abandoned::new(4));
+        let until = Instant::now() + Duration::from_secs(30);
+        let mut releases = Vec::new();
+        for _ in 0..3 {
+            let (release, hold) = mpsc::channel::<()>();
+            releases.push(release);
+            let cancelled = Arc::new(flag());
+            let signal = cancelled.clone();
+            assert_eq!(
+                step(&bound, until, &cancelled, move |_| {
+                    signal.store(true, Ordering::Release);
+                    let _ = hold.recv();
+                }),
+                Err(Left::Cancelled)
+            );
+        }
+        assert_eq!(bound.running(), 3);
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (events, observed) = mpsc::channel();
+        let mut pending = Vec::new();
+        let mut cancels = Vec::new();
+        let mut ran = Vec::new();
+        for _ in 0..2 {
+            let (release, hold) = mpsc::channel::<()>();
+            releases.push(release);
+            let cancelled = Arc::new(flag());
+            cancels.push(cancelled.clone());
+            let started = Arc::new(flag());
+            ran.push(started.clone());
+            let bound = bound.clone();
+            let barrier = barrier.clone();
+            let events = events.clone();
+            pending.push(std::thread::spawn(move || {
+                let began = events.clone();
+                barrier.wait();
+                let result = step(&bound, until, &cancelled, move |_| {
+                    started.store(true, Ordering::Release);
+                    began.send(true).unwrap();
+                    let _ = hold.recv();
+                });
+                if result == Err(Left::Busy) {
+                    events.send(false).unwrap();
+                }
+                result
+            }));
+        }
+        barrier.wait();
+        let admitted = (0..2)
+            .filter(|_| observed.recv_timeout(Duration::from_secs(30)).unwrap())
+            .count();
+        let in_flight = bound.running();
+        for cancel in cancels {
+            cancel.store(true, Ordering::Release);
+        }
+        let results: Vec<_> = pending.into_iter().map(|p| p.join().unwrap()).collect();
+        let retained = bound.running();
+        let peak = bound.peak();
+        drop(releases);
+        let limit = Instant::now() + Duration::from_secs(30);
+        while bound.running() != 0 {
+            assert!(Instant::now() < limit, "steps never released their units");
+            std::thread::yield_now();
+        }
+        assert_eq!(admitted, 1, "only one of the two closures may run");
+        assert_eq!(in_flight, 4);
+        assert_eq!(retained, 4);
+        assert_eq!(peak, 4);
+        for (result, started) in results.into_iter().zip(ran) {
+            assert_eq!(
+                result,
+                if started.load(Ordering::Acquire) {
+                    Err(Left::Cancelled)
+                } else {
+                    Err(Left::Busy)
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_spawn_abandon_and_finish_cycles_stay_within_the_bound() {
+        let bound = Arc::new(Abandoned::new(2));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut pending = Vec::new();
+        for caller in 0..8 {
+            let bound = bound.clone();
+            let barrier = barrier.clone();
+            pending.push(std::thread::spawn(move || {
+                barrier.wait();
+                for cycle in 0..100 {
+                    let cancelled = Arc::new(flag());
+                    let signal = cancelled.clone();
+                    let (release, hold) = mpsc::channel::<()>();
+                    let cancel = (caller + cycle) % 2 == 0;
+                    let result = step(
+                        &bound,
+                        Instant::now() + Duration::from_secs(30),
+                        &cancelled,
+                        move |_| {
+                            if cancel {
+                                signal.store(true, Ordering::Release);
+                                let _ = hold.recv();
+                            } else {
+                                std::thread::yield_now();
+                            }
+                            42
+                        },
+                    );
+                    drop(release);
+                    assert!(
+                        result == Err(Left::Busy)
+                            || result == if cancel { Err(Left::Cancelled) } else { Ok(42) }
+                    );
+                    assert!(bound.running() <= 2);
+                }
+            }));
+        }
+        for thread in pending {
+            thread.join().unwrap();
+        }
+        let until = Instant::now() + Duration::from_secs(30);
+        while bound.running() != 0 {
+            assert!(Instant::now() < until, "steps never released their units");
+            std::thread::yield_now();
+        }
+        assert!(bound.peak() <= 2);
+    }
+
+    #[test]
+    fn sequential_steps_never_keep_their_earlier_unit() {
+        let bound = Arc::new(Abandoned::new(1));
+        let until = Instant::now() + Duration::from_secs(30);
+        for _ in 0..1000 {
+            assert_eq!(step(&bound, until, &flag(), |_| 42), Ok(42));
+            assert_eq!(bound.running(), 0);
+            assert_eq!(step(&bound, until, &flag(), |_| 7), Ok(7));
+            assert_eq!(bound.running(), 0);
+        }
     }
 
     #[test]

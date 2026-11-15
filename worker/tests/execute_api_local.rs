@@ -1351,14 +1351,22 @@ enum Stall {
 }
 
 fn install(harness: &Harness, stall: Stall) -> Gate {
+    install_n(harness, stall, 1)
+}
+
+/// Every arrival announces itself before waiting, so several steps can be held together.
+fn install_n(harness: &Harness, stall: Stall, count: usize) -> Gate {
     use falcone_serverless_worker::cache::hooks::Stage;
     let (reached_tx, reached) = mpsc::channel();
     let (release, release_rx) = mpsc::channel::<()>();
     let reached_tx = Mutex::new(reached_tx);
     let release_rx = Mutex::new(release_rx);
-    let first = std::sync::atomic::AtomicBool::new(true);
+    let remaining = AtomicUsize::new(count);
     let stop = move || {
-        if first.swap(false, Ordering::AcqRel) {
+        if remaining
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
             let _ = reached_tx.lock().unwrap().send(());
             let _ = release_rx.lock().unwrap().recv_timeout(LONG);
         }
@@ -1398,6 +1406,116 @@ fn wait_for_abandoned_steps(harness: &Harness) {
         assert!(Instant::now() < limit, "an abandoned step never ended");
         std::thread::yield_now();
     }
+}
+
+fn concurrent_stalled_steps(concurrency: usize, already_abandoned: usize) {
+    let harness = Arc::new(Harness::new(concurrency));
+    let digest = harness.world.add(&success());
+    assert_eq!(harness.run(&Spec::new(&digest)).status, 200);
+    let limit = concurrency.max(4);
+    let gate = install_n(&harness, Stall::Setup, limit + concurrency);
+    for retained in 1..=already_abandoned {
+        let spec = Spec::new(&digest);
+        let pending = harness.spawn(&spec);
+        gate.reached.recv_timeout(LONG).unwrap();
+        assert_eq!(harness.cancel(&spec.activation).status, 200);
+        assert_eq!(pending.join().unwrap().status, 499);
+        assert_eq!(harness.server.abandoned_running(), retained);
+    }
+
+    // Start the requests together. Each either reaches the setup gate or returns busy;
+    // waiting for both outcomes also reproduces the old over-admission without a sleep.
+    let barrier = Arc::new(std::sync::Barrier::new(concurrency + 1));
+    let mut pending = Vec::new();
+    let mut specs = Vec::new();
+    for _ in 0..concurrency {
+        let spec = Spec::new(&digest);
+        let run = spec.clone();
+        let harness = harness.clone();
+        let barrier = barrier.clone();
+        specs.push(spec);
+        pending.push(std::thread::spawn(move || {
+            barrier.wait();
+            harness.run(&run)
+        }));
+    }
+    barrier.wait();
+    let until = Instant::now() + LONG;
+    let mut started = 0;
+    loop {
+        while gate.reached.try_recv().is_ok() {
+            started += 1;
+        }
+        let refused = pending.iter().filter(|p| p.is_finished()).count();
+        if started + refused == concurrency {
+            break;
+        }
+        assert!(
+            Instant::now() < until,
+            "a request neither stalled nor ended"
+        );
+        std::thread::yield_now();
+    }
+    let in_flight = harness.server.abandoned_running();
+    let running = harness.server.running();
+
+    let cancel_barrier = std::sync::Barrier::new(concurrency);
+    let cancels = std::thread::scope(|scope| {
+        let cancels: Vec<_> = specs
+            .iter()
+            .map(|spec| {
+                let barrier = &cancel_barrier;
+                let harness = &harness;
+                scope.spawn(move || {
+                    barrier.wait();
+                    harness.cancel(&spec.activation).status
+                })
+            })
+            .collect();
+        cancels
+            .into_iter()
+            .map(|p| p.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    let replies: Vec<_> = pending.into_iter().map(|p| p.join().unwrap()).collect();
+    let retained = harness.server.abandoned_running();
+    let peak = harness.server.supervised_steps_peak();
+    // Save the verdicts until the gates are dropped, even when reproducing an overshoot.
+    let busy = harness.run(&Spec::new(&digest));
+    let slots_after_busy = harness.server.running();
+    drop(gate);
+    wait_for_abandoned_steps(&harness);
+    assert_eq!(harness.run(&Spec::new(&digest)).status, 200);
+
+    assert_eq!(started, limit - already_abandoned);
+    assert_eq!(running, started, "refused requests hold no execution slot");
+    assert_eq!(in_flight, limit);
+    assert_eq!(retained, limit);
+    assert_eq!(peak, limit);
+    assert_eq!(slots_after_busy, 0);
+    assert_eq!(code(&busy), (503, "busy".into(), "at_capacity".into()));
+    for (reply, cancel) in replies.iter().zip(cancels) {
+        match reply.status {
+            499 => assert_eq!(cancel, 200),
+            503 => {
+                assert_eq!(code(reply), (503, "busy".into(), "at_capacity".into()));
+                assert_eq!(cancel, 404);
+            }
+            status => panic!("unexpected stalled execute status {status}"),
+        }
+    }
+    assert_eq!(replies.iter().filter(|r| r.status == 499).count(), started);
+}
+
+#[test]
+fn concurrent_cancels_with_three_abandoned_steps_keep_the_limit_of_four() {
+    concurrent_stalled_steps(2, 3);
+}
+
+#[test]
+fn concurrent_cancels_at_higher_concurrency_keep_the_supervised_step_limit() {
+    concurrent_stalled_steps(6, 0);
+    concurrent_stalled_steps(6, 3);
 }
 
 fn cache_entries(harness: &Harness) -> Vec<String> {
