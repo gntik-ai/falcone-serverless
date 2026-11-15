@@ -2,8 +2,8 @@
 //! `fs-test-run01-*` namespace: the local suite (`execute_api_local`) runs unchanged inside a
 //! Pod Security restricted pod with seccomp RuntimeDefault, a read-only root filesystem and an
 //! arbitrary non-root UID. It covers identity, refusal, credential absence, imports, saturation,
-//! timeout selection, budgets, HTTP ceilings and deadlines, and supervised validation and cache
-//! stalls, and records one evidence line per case next to the saturation cases. Gated by
+//! timeout selection, budgets, late host calls, HTTP ceilings and deadlines, and supervised
+//! matcher construction, validation and cache stalls, and records one evidence line per case next to the saturation cases. Gated by
 //! FS_TEST_CLUSTER; without it the case is skipped with an explicit message and no client call.
 //! Test namespaces follow testNamespaceMode: `create` (the default) creates and deletes a
 //! dedicated namespace; `shared` uses FS_TEST_NAMESPACE and touches only labelled objects.

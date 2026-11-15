@@ -198,6 +198,12 @@ one request per connection, `Content-Length` bodies only, and JSON responses.
 | execute | `listen_port` (default 8080) | `POST /v1/execute` | everything else, `404 not_found` (`unknown_operation`) |
 | control | `control_port` (default 8082), a second pod-local port | `POST /v1/cancel` and `POST /v1/update` | everything else, including execute, `404 not_found` (`unknown_operation`) |
 
+`control_port` and `artifact_path` are the two keys that runtime configuration `version = 2` adds
+to the closed v1 contract (`worker-runtime-config.md`). A `version = 1` file does not accept them
+(unknown keys are rejected) and serves their defaults (`8082`, `/var/run/falcone/artifacts`); a
+`version = 2` file is v1 plus exactly these two optional keys, and `--check-config` prints them.
+The two ports must differ.
+
 The dispatcher uses `<pod address>:control_port` for control. Each listener has its own fixed
 connection limit and its own header, body, idle and response deadlines, and nothing moves capacity
 between them, so no execute traffic can consume control capacity and no connection is evicted.

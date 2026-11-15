@@ -643,6 +643,71 @@ fn oversized_credential_claims_fail_closed_to_exactly_the_marker_within_a_bound_
     assert_eq!(harness.run(&Spec::new(&ok)).status, 200);
 }
 
+#[test]
+fn a_cancel_during_matcher_construction_releases_the_slot_within_the_budget() {
+    let harness = Arc::new(Harness::new(2));
+    let digest = harness.world.add(&success());
+    // A valid credential with a large claim: building its matcher is real work.
+    let spec = Spec::new(&digest).with(|s| s.secrets = vec![pseudo_random_claim(1_000_000, 3)]);
+    let (reached_tx, reached) = mpsc::channel();
+    let reached_tx = Mutex::new(reached_tx);
+    let first = std::sync::atomic::AtomicBool::new(true);
+    // The server's own event: the build asked for its first claim. It is held there until the
+    // execution's cancel flag is set, so the cancel arrives while the matcher is being built.
+    harness.server.hooks().on_build(move |cancelled| {
+        if first.swap(false, Ordering::AcqRel) {
+            let _ = reached_tx.lock().unwrap().send(());
+            let limit = Instant::now() + LONG;
+            while !cancelled.load(Ordering::Acquire) && Instant::now() < limit {
+                std::thread::yield_now();
+            }
+        }
+    });
+    let guests = harness
+        .server
+        .hooks()
+        .guests_started
+        .load(Ordering::Acquire);
+    let pending = harness.spawn(&spec);
+    reached
+        .recv_timeout(LONG)
+        .expect("the matcher build was reached");
+    let sent = Instant::now();
+    let answer = harness.cancel(&spec.activation);
+    assert_eq!(answer.status, 200);
+    assert_eq!(answer.json()["cancel"]["state"], "acknowledged");
+    assert!(
+        harness
+            .server
+            .wait_running(0, BUDGET.saturating_sub(sent.elapsed()))
+            .is_some(),
+        "the slot was held while the matcher was being built"
+    );
+    assert!(sent.elapsed() < BUDGET, "{:?}", sent.elapsed());
+    let reply = pending.join().unwrap();
+    assert_eq!(
+        code(&reply),
+        (499, "cancelled".into(), "cancel_requested".into()),
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    // An interrupted build fails closed: only the marker, never text.
+    assert_eq!(reply.json()["logs"], json!(["<redacted>"]));
+    assert_eq!(
+        harness
+            .server
+            .hooks()
+            .guests_started
+            .load(Ordering::Acquire),
+        guests
+    );
+    // The next execute is admitted.
+    let ok = harness
+        .world
+        .add(&guest(&[], 64, &[(1024, OK_JSON)], &ret(OK_JSON.len())));
+    assert_eq!(harness.run(&Spec::new(&ok)).status, 200);
+}
+
 // --- tests: saturation, control and cancel ------------------------------------------------
 
 fn stalled(addr: SocketAddr, bytes: &[u8]) -> TcpStream {
@@ -925,6 +990,68 @@ fn a_host_call_after_the_deadline_ends_the_execution_as_a_timeout() {
         }),
         Duration::from_millis(600),
     );
+}
+
+/// A guest that makes two progress reports one after the other. A report that the host cuts
+/// off hands control back to the guest, which then makes the second.
+fn two_reports() -> Vec<u8> {
+    guest(
+        &["progress"],
+        64,
+        &[(1024, OK_JSON)],
+        &format!("{ANNOUNCE} {ANNOUNCE} {}", ret(OK_JSON.len())),
+    )
+}
+
+#[test]
+fn a_host_call_entered_after_until_through_the_linked_interface_never_reaches_the_host() {
+    let harness = Arc::new(Harness::new(1));
+    let digest = harness.world.add(&two_reports());
+    // One call fits the budget, so the second would also exceed it.
+    let spec = Spec::new(&digest).with(|s| {
+        s.imports = vec!["progress"];
+        s.timeout_ms = 1000;
+        s.max_host_calls = 1;
+    });
+    // Control: with the binding answering at once, the guest does make its second call, which
+    // the budget refuses before it reaches the host. The host saw exactly the first.
+    let before = harness.world.host_calls.load(Ordering::Acquire);
+    let reply = harness.run(&spec);
+    assert_eq!(
+        code(&reply),
+        (
+            500,
+            "execution_failed".into(),
+            "host_call_budget_exceeded".into()
+        )
+    );
+    assert_eq!(harness.world.host_calls.load(Ordering::Acquire) - before, 1);
+    // Late: the first call blocks in the binding until `until` cuts it off and returns control
+    // to the guest, so the guest's second call is entered after `until` by construction.
+    let release = harness.world.actions.block();
+    let before = harness.world.host_calls.load(Ordering::Acquire);
+    let started = Instant::now();
+    let reply = harness.run(&Spec::new(&digest).with(|s| {
+        s.imports = vec!["progress"];
+        s.timeout_ms = 1000;
+        s.max_host_calls = 1;
+    }));
+    let elapsed = started.elapsed();
+    harness.world.actions.unblock();
+    drop(release);
+    // The deadline outranks the exhausted budget, and the host saw only the first call.
+    assert_eq!(
+        code(&reply),
+        (504, "timeout".into(), "deadline_exceeded".into()),
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(harness.world.host_calls.load(Ordering::Acquire) - before, 1);
+    assert!(
+        elapsed < Duration::from_millis(1000) + BUDGET,
+        "{elapsed:?}"
+    );
+    assert!(harness.server.wait_running(0, BUDGET).is_some());
 }
 
 #[test]

@@ -32,7 +32,7 @@ const MAX_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 pub fn prepare(directory: &str) -> ExitCode {
     let root = std::path::Path::new(directory);
     let config = format!(
-        "pool_id = \"pool-qualification\"\n\
+        "version = 2\npool_id = \"pool-qualification\"\n\
          falcone_api_endpoint = \"https://api.invalid\"\n\
          falcone_dispatcher_endpoint = \"https://dispatcher.invalid\"\n\
          listen_port = {EXECUTE_PORT}\ncontrol_port = {CONTROL_PORT}\n\

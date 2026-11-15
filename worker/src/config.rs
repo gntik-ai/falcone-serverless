@@ -10,9 +10,6 @@ pub struct RuntimeConfig {
     /// The execute listener: serves only `POST /v1/execute`.
     #[serde(default = "default_u16::<8080>")]
     pub listen_port: u16,
-    /// The control listener, a second pod-local port: serves only cancel and execution update.
-    #[serde(default = "default_u16::<8082>")]
-    pub control_port: u16,
     #[serde(default = "default_u16::<9090>")]
     pub metrics_port: u16,
     #[serde(default = "default_u16::<8081>")]
@@ -42,15 +39,59 @@ pub struct RuntimeConfig {
     pub kill_grace_ms: u64,
     #[serde(default = "cache_path")]
     pub cache_path: String,
-    /// Where the local platform finds artifacts: `<artifact_path>/<hex digest>.wasm`.
-    #[serde(default = "artifact_path")]
-    pub artifact_path: String,
     #[serde(default)]
     pub egress: EgressConfig,
     pub falcone_api_endpoint: String,
     pub falcone_dispatcher_endpoint: String,
     #[serde(default = "dispatcher_key_path")]
     pub dispatcher_key_path: String,
+    /// The execution API's two keys, present only in a `version = 2` file. Version 1 is a
+    /// closed contract: it never accepts them, and a v1 file serves the defaults.
+    #[serde(skip)]
+    pub execute_api: Option<ExecuteApiConfig>,
+}
+
+/// What version 2 adds to version 1 for the execution API.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ExecuteApiConfig {
+    /// The control listener, a second pod-local port: serves only cancel and execution update.
+    pub control_port: u16,
+    /// Where the local platform finds artifacts: `<artifact_path>/<hex digest>.wasm`.
+    pub artifact_path: String,
+}
+
+impl Default for ExecuteApiConfig {
+    fn default() -> Self {
+        Self {
+            control_port: 8082,
+            artifact_path: artifact_path(),
+        }
+    }
+}
+
+impl RuntimeConfig {
+    /// The control listener's port: the `version = 2` key, or its default.
+    pub fn control_port(&self) -> u16 {
+        self.execute_api.clone().unwrap_or_default().control_port
+    }
+
+    /// The artifact directory: the `version = 2` key, or its default.
+    pub fn artifact_path(&self) -> String {
+        self.execute_api.clone().unwrap_or_default().artifact_path
+    }
+
+    /// The effective configuration as JSON: version 2 adds its two keys to the v1 fields.
+    pub fn effective(&self) -> Result<serde_json::Value, String> {
+        let mut value = serde_json::to_value(self).map_err(|error| error.to_string())?;
+        if let (Some(extension), Some(object)) = (&self.execute_api, value.as_object_mut()) {
+            object.insert("control_port".into(), extension.control_port.into());
+            object.insert(
+                "artifact_path".into(),
+                extension.artifact_path.clone().into(),
+            );
+        }
+        Ok(value)
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -101,10 +142,35 @@ fn resolver_path() -> String {
 
 /// Parse only: no key/cache/resolver files are opened and no endpoints are contacted.
 pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
-    let config: RuntimeConfig =
-        toml::from_str(input).map_err(|error: toml::de::Error| error.message().to_owned())?;
-    if config.version != 1 {
-        return Err("version: only v1 (version = 1) is supported".into());
+    let parse = |error: toml::de::Error| error.message().to_owned();
+    let mut table: toml::Table = toml::from_str(input).map_err(parse)?;
+    // Version 2 is version 1 plus `control_port` and `artifact_path`. Version 1 stays closed:
+    // there the two keys are unknown like any other.
+    let extension = if table.get("version").and_then(toml::Value::as_integer) == Some(2) {
+        let mut extension = ExecuteApiConfig::default();
+        if let Some(value) = table.remove("control_port") {
+            extension.control_port = value
+                .as_integer()
+                .and_then(|port| u16::try_from(port).ok())
+                .ok_or("control_port: must be a port number")?;
+        }
+        if let Some(value) = table.remove("artifact_path") {
+            extension.artifact_path = value
+                .as_str()
+                .ok_or("artifact_path: must be a string")?
+                .to_owned();
+        }
+        table.insert("version".into(), toml::Value::Integer(1));
+        Some(extension)
+    } else {
+        None
+    };
+    let mut config: RuntimeConfig = table.try_into().map_err(parse)?;
+    if let Some(extension) = extension {
+        config.version = 2;
+        config.execute_api = Some(extension);
+    } else if config.version != 1 {
+        return Err("version: only v1 and v2 (version = 1 or 2) are supported".into());
     }
     for (field, value) in [
         ("pool_id", &config.pool_id),
@@ -118,10 +184,13 @@ pub fn load_from_str(input: &str) -> Result<RuntimeConfig, String> {
             return Err(format!("{field}: must not be empty"));
         }
     }
+    if config.artifact_path().trim().is_empty() {
+        return Err("artifact_path: must not be empty".into());
+    }
     if config.concurrency == 0 {
         return Err("concurrency: must be at least 1".into());
     }
-    if config.listen_port == config.control_port {
+    if config.listen_port == config.control_port() {
         return Err("control_port: must differ from listen_port".into());
     }
     if config.default_wall_clock_ms > config.max_wall_clock_ms {
@@ -305,7 +374,6 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "listen_port": 8080,
-                "control_port": 8082,
                 "metrics_port": 9090,
                 "probe_port": 8081,
                 "startup_probe_path": "/startupz",
@@ -321,7 +389,6 @@ mod tests {
                 "checkpoint_reserve_ms": 10000,
                 "kill_grace_ms": 5000,
                 "cache_path": "/var/cache/falcone-worker",
-                "artifact_path": "/var/run/falcone/artifacts",
                 "egress": { "resolver": "/etc/resolv.conf", "allow_list": [] },
                 "falcone_api_endpoint": "https://falcone.example.test/api",
                 "falcone_dispatcher_endpoint": "https://dispatcher.example.test",
@@ -417,8 +484,60 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_version() {
-        let error = super::load_from_str(&format!("version = 2\n{MINIMAL}")).unwrap_err();
+        let error = super::load_from_str(&format!("version = 3\n{MINIMAL}")).unwrap_err();
         assert!(error.contains("version"), "{error}");
+    }
+
+    #[test]
+    fn version_one_stays_closed_to_the_execution_api_keys() {
+        for key in ["control_port = 8083", "artifact_path = \"/artifacts\""] {
+            for prefix in ["", "version = 1\n"] {
+                let error = super::load_from_str(&format!("{prefix}{key}\n{MINIMAL}")).unwrap_err();
+                assert!(error.contains(key.split(' ').next().unwrap()), "{error}");
+            }
+        }
+        // A v1 file serves the execution API's defaults and prints only v1 fields.
+        let config = super::load_from_str(MINIMAL).unwrap();
+        assert_eq!(
+            (config.control_port(), config.artifact_path().as_str()),
+            (8082, "/var/run/falcone/artifacts")
+        );
+        let effective = config.effective().unwrap();
+        assert!(
+            effective.get("control_port").is_none() && effective.get("artifact_path").is_none()
+        );
+    }
+
+    #[test]
+    fn version_two_adds_the_control_port_and_artifact_path() {
+        let config = super::load_from_str(&format!(
+            "version = 2\ncontrol_port = 8083\nartifact_path = \"/artifacts\"\n{MINIMAL}"
+        ))
+        .expect("v2 config");
+        assert_eq!(config.version, 2);
+        assert_eq!(
+            (config.control_port(), config.artifact_path().as_str()),
+            (8083, "/artifacts")
+        );
+        let effective = config.effective().unwrap();
+        assert_eq!(effective["version"], 2);
+        assert_eq!(effective["control_port"], 8083);
+        assert_eq!(effective["artifact_path"], "/artifacts");
+        // Omitted keys take their defaults; the v1 fields are still closed.
+        let config = super::load_from_str(&format!("version = 2\n{MINIMAL}")).unwrap();
+        assert_eq!(config.control_port(), 8082);
+        for bad in [
+            "unknown = 1",
+            "control_port = 70000",
+            "control_port = \"x\"",
+            "control_port = 8080",
+            "artifact_path = \" \"",
+        ] {
+            assert!(
+                super::load_from_str(&format!("version = 2\n{bad}\n{MINIMAL}")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

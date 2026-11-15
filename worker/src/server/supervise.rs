@@ -58,6 +58,12 @@ pub fn expired(until: Instant, cancelled: &AtomicBool) -> Option<Left> {
     }
 }
 
+/// The result for an exit that is not a result: the deadline or a cancel if either has
+/// happened by now, and only otherwise a capacity result.
+fn busy(until: Instant, cancelled: &AtomicBool) -> Left {
+    expired(until, cancelled).unwrap_or(Left::Busy)
+}
+
 const RUNNING: u8 = 0;
 const ABANDONED: u8 = 1;
 const FINISHED: u8 = 2;
@@ -109,7 +115,7 @@ pub fn step<T: Send + 'static>(
             let _tally = tally;
             let _ = send.send(work(flag));
         })
-        .map_err(|_| Left::Busy)?;
+        .map_err(|_| busy(until, cancelled))?;
     loop {
         // A result that arrives after the deadline or a cancel is not used.
         if let Some(left) = expired(until, cancelled) {
@@ -125,7 +131,10 @@ pub fn step<T: Send + 'static>(
                 };
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Left::Busy),
+            // A step that set the cancel flag and then died is a cancellation, and one that died
+            // past `until` is a timeout: the interruption is looked at again before the exit
+            // is mapped to a capacity result.
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(busy(until, cancelled)),
         }
     }
 }
@@ -173,6 +182,47 @@ mod tests {
         );
         // Before until, with no capacity, the answer is busy.
         assert_eq!(step(&bound, future, &flag(), |_| ()), Err(Left::Busy));
+    }
+
+    #[test]
+    fn a_step_that_cancels_and_then_dies_is_cancelled_never_busy() {
+        // The step sets the cancel flag and panics before it sends anything, so the waiting
+        // execution sees a disconnected channel. Whichever wakes first, the answer is the
+        // cancellation: the flag is set before the thread dies.
+        let bound = Arc::new(Abandoned::new(2));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let result: Result<(), Left> = step(
+            &bound,
+            Instant::now() + Duration::from_secs(30),
+            &cancelled,
+            move |_| {
+                signal.store(true, Ordering::Release);
+                panic!("step died after the cancel");
+            },
+        );
+        assert_eq!(result, Err(Left::Cancelled));
+        // Without a cancel, the same death is a capacity result.
+        let result: Result<(), Left> = step(
+            &bound,
+            Instant::now() + Duration::from_secs(30),
+            &flag(),
+            |_| panic!("step died"),
+        );
+        assert_eq!(result, Err(Left::Busy));
+    }
+
+    #[test]
+    fn a_step_that_dies_past_until_is_a_timeout_never_busy() {
+        let bound = Arc::new(Abandoned::new(2));
+        let until = Instant::now() + Duration::from_millis(30);
+        let result: Result<(), Left> = step(&bound, until, &flag(), move |_| {
+            while Instant::now() < until {
+                std::thread::yield_now();
+            }
+            panic!("step died after until");
+        });
+        assert_eq!(result, Err(Left::Timeout));
     }
 
     #[test]

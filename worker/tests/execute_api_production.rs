@@ -135,7 +135,7 @@ impl Target {
         std::fs::write(
             &config,
             format!(
-                "pool_id = \"pool-local\"\nfalcone_api_endpoint = \"https://api.invalid\"\n\
+                "version = 2\npool_id = \"pool-local\"\nfalcone_api_endpoint = \"https://api.invalid\"\n\
                  falcone_dispatcher_endpoint = \"https://dispatcher.invalid\"\n\
                  listen_port = {execute}\ncontrol_port = {control}\n\
                  concurrency = {CONCURRENCY}\nmax_wall_clock_ms = {MAX_WALL_CLOCK_MS}\n\

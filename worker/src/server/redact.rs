@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 /// What replaces a protected run, and the only line of an over-budget execution.
@@ -83,9 +84,14 @@ impl Redactor {
     ///
     /// The bounds are enforced as each window is inserted, never after a whole claim: the set
     /// stops at [`MAX_WINDOWS`] distinct windows, the build examines at most
-    /// [`MAX_BUILD_STEPS`] windows, and it looks at the clock as it goes, so it ends at `until`
-    /// whatever the claims hold. Past any bound the matcher fails closed.
-    pub fn new<'a>(secrets: impl IntoIterator<Item = &'a str>, until: Instant) -> Self {
+    /// [`MAX_BUILD_STEPS`] windows, and it looks at the clock and at `cancelled` as it goes, so
+    /// it ends at `until` or at a cancel whatever the claims hold. Past any bound, or on either
+    /// interruption, the matcher fails closed; the caller's outcome is then the interruption.
+    pub fn new<'a>(
+        secrets: impl IntoIterator<Item = &'a str>,
+        until: Instant,
+        cancelled: &AtomicBool,
+    ) -> Self {
         let mut redactor = Self {
             keys: Keys::default(),
             lengths: [false; WINDOW + 1],
@@ -102,7 +108,8 @@ impl Redactor {
             redactor.lengths[length] = true;
             for window in chars.windows(length) {
                 if redactor.examined >= MAX_BUILD_STEPS
-                    || (redactor.examined.is_multiple_of(CLOCK_INTERVAL) && Instant::now() >= until)
+                    || (redactor.examined.is_multiple_of(CLOCK_INTERVAL)
+                        && (cancelled.load(Ordering::Acquire) || Instant::now() >= until))
                 {
                     redactor.fail_closed();
                     break 'build;
@@ -243,8 +250,12 @@ mod tests {
         Instant::now() + Duration::from_secs(600)
     }
 
+    fn live() -> AtomicBool {
+        AtomicBool::new(false)
+    }
+
     fn redact(secrets: &[&str], text: &str) -> String {
-        let redactor = Redactor::new(secrets.iter().copied(), soon());
+        let redactor = Redactor::new(secrets.iter().copied(), soon(), &live());
         redactor.line(text, &mut SCAN_BUDGET_CHARS.clone()).unwrap()
     }
 
@@ -301,7 +312,7 @@ mod tests {
 
     #[test]
     fn over_budget_fails_closed_to_one_marker_line() {
-        let mut logs = Logs::new(Redactor::new(["secretvalue"], soon()));
+        let mut logs = Logs::new(Redactor::new(["secretvalue"], soon(), &live()));
         logs.push("kept line");
         for _ in 0..(SCAN_BUDGET_CHARS / 8192 + 2) {
             logs.push(&"x".repeat(8192));
@@ -314,6 +325,7 @@ mod tests {
                 .iter()
                 .map(String::as_str),
             soon(),
+            &live(),
         ));
         logs.push("anything");
         assert_eq!(logs.finish(), [MARKER]);
@@ -338,7 +350,7 @@ mod tests {
         // 2.5 M characters is as much claim as one request can carry: far past the cap.
         let claim = distinct(2_500_000, 7);
         let started = Instant::now();
-        let redactor = Redactor::new([claim.as_str()], soon());
+        let redactor = Redactor::new([claim.as_str()], soon(), &live());
         let elapsed = started.elapsed();
         assert!(redactor.overflowed());
         // The cap is exact: the window that crosses it is the last one examined.
@@ -356,7 +368,7 @@ mod tests {
     fn the_work_over_repeated_claims_is_bounded_by_the_fixed_step_budget() {
         // The same window over and over never grows the set, so only the step budget stops it.
         let repeated = "ab".repeat(1 << 20);
-        let redactor = Redactor::new([repeated.as_str(); 8], soon());
+        let redactor = Redactor::new([repeated.as_str(); 8], soon(), &live());
         assert!(redactor.overflowed());
         assert_eq!(redactor.examined(), MAX_BUILD_STEPS);
     }
@@ -364,11 +376,47 @@ mod tests {
     #[test]
     fn construction_under_a_passed_deadline_fails_closed_after_at_most_one_clock_interval() {
         let claim = distinct(500_000, 11);
-        let redactor = Redactor::new([claim.as_str()], Instant::now());
+        let redactor = Redactor::new([claim.as_str()], Instant::now(), &live());
         assert!(redactor.overflowed());
         assert_eq!(redactor.examined(), 0);
         let mut logs = Logs::new(redactor);
         logs.push("anything");
         assert_eq!(logs.finish(), [MARKER]);
+    }
+
+    #[test]
+    fn a_cancel_during_construction_ends_it_within_one_clock_interval() {
+        // The claims are an iterator that raises the cancel flag when the build asks for the
+        // second one: the cancel arrives while the matcher is being built, at a point the
+        // test controls, so no timing is involved.
+        // The first claim ends on a clock interval, where the next look at the flag falls.
+        let first = distinct(10 * CLOCK_INTERVAL + WINDOW - 1, 5);
+        let second = distinct(200_000, 6);
+        let cancelled = AtomicBool::new(false);
+        let claims = [first.as_str(), second.as_str()]
+            .into_iter()
+            .enumerate()
+            .map(|(index, claim)| {
+                if index == 1 {
+                    cancelled.store(true, Ordering::Release);
+                }
+                claim
+            });
+        let redactor = Redactor::new(claims, soon(), &cancelled);
+        assert!(redactor.overflowed());
+        // The first claim was inserted in full; the second stopped at its first window.
+        assert_eq!(redactor.examined(), 10 * CLOCK_INTERVAL);
+        let mut logs = Logs::new(redactor);
+        logs.push("anything");
+        assert_eq!(logs.finish(), [MARKER]);
+    }
+
+    #[test]
+    fn a_cancel_that_is_already_set_stops_construction_before_the_first_window() {
+        let claim = distinct(500_000, 13);
+        let cancelled = AtomicBool::new(true);
+        let redactor = Redactor::new([claim.as_str()], soon(), &cancelled);
+        assert!(redactor.overflowed());
+        assert_eq!(redactor.examined(), 0);
     }
 }

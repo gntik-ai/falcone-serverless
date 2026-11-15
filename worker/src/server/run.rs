@@ -61,11 +61,16 @@ pub(super) fn execute(shared: &Arc<Shared>, body: &[u8], slot: Permit) -> (u16, 
         return request.failure(refusal, Vec::new());
     };
     let cancel = registration.entry.cancel.clone();
-    // Building the matcher holds the slot, so it is bounded by the same `until`.
-    let logs = Arc::new(Mutex::new(Logs::new(Redactor::new(
-        plan.secrets.iter().map(String::as_str),
-        until,
-    ))));
+    // Building the matcher holds the slot, so it ends at the same `until` and at a cancel. An
+    // interrupted build fails closed, and the step that follows reports the interruption.
+    #[cfg(any(test, feature = "qualification-hooks"))]
+    let hooks = shared.hooks.clone();
+    let claims = plan.secrets.iter().map(|claim| {
+        #[cfg(any(test, feature = "qualification-hooks"))]
+        hooks.build(&cancel);
+        claim.as_str()
+    });
+    let logs = Arc::new(Mutex::new(Logs::new(Redactor::new(claims, until, &cancel))));
     let ended = run(shared, &plan, limits, until, &cancel, &logs);
     // Every exit path takes its log lines from the redacting collector, here and only here.
     let lines = logs

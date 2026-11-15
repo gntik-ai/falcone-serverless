@@ -51,7 +51,7 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let input = std::fs::read_to_string(path)
                 .map_err(|error| format!("read config {}: {error}", path.display()))?;
             let config = config::load_from_str(&input)?;
-            serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
+            serde_json::to_string_pretty(&config.effective()?).map_err(|error| error.to_string())?
         }
         [command, path] if command == "serve" => {
             return serve_command(std::path::Path::new(path));
@@ -84,7 +84,7 @@ fn serve_command(path: &std::path::Path) -> Result<(), String> {
         .with_file_name("artifact-compile-child");
     let server_config = server::ServerConfig::new(
         SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.listen_port)),
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.control_port)),
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.control_port())),
         config.concurrency as usize,
         Ceilings {
             max_memory_bytes: config.max_memory_bytes,
@@ -93,7 +93,7 @@ fn serve_command(path: &std::path::Path) -> Result<(), String> {
         std::path::PathBuf::from(&config.cache_path),
         compiler,
     );
-    let platform = std::sync::Arc::new(server::LocalPlatform::new(&config.artifact_path));
+    let platform = std::sync::Arc::new(server::LocalPlatform::new(config.artifact_path()));
     let _server = server::Server::start(server_config, platform)
         .map_err(|error| format!("start listeners: {error}"))?;
     loop {

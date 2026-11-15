@@ -189,14 +189,16 @@ impl Entry {
 /// `qualification-hooks` feature and are absent from every release build.
 #[cfg(any(test, feature = "qualification-hooks"))]
 pub mod hooks {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{Arc, Mutex};
 
     type Callback = Arc<dyn Fn() + Send + Sync>;
+    type BuildCallback = Arc<dyn Fn(&AtomicBool) + Send + Sync>;
 
     #[derive(Default)]
     pub struct Hooks {
         setup: Mutex<Option<Callback>>,
+        build: Mutex<Option<BuildCallback>>,
         guest_start: Mutex<Option<Callback>>,
         /// Executions that instantiated their guest and were about to invoke its handler. This is
         /// not proof that guest code ran; tests wait for the guest's own first action.
@@ -208,6 +210,15 @@ pub mod hooks {
         pub fn on_setup(&self, callback: impl Fn() + Send + Sync + 'static) {
             *self
                 .setup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(callback));
+        }
+
+        /// Runs while the redaction matcher is being built, each time the build takes the next
+        /// credential claim, with the execution's cancel flag.
+        pub fn on_build(&self, callback: impl Fn(&AtomicBool) + Send + Sync + 'static) {
+            *self
+                .build
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(callback));
         }
@@ -228,6 +239,17 @@ pub mod hooks {
                 .clone();
             if let Some(callback) = callback {
                 callback();
+            }
+        }
+
+        pub(crate) fn build(&self, cancelled: &AtomicBool) {
+            let callback = self
+                .build
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(callback) = callback {
+                callback(cancelled);
             }
         }
 
