@@ -615,6 +615,101 @@ fn the_credential_never_reaches_guest_visible_output_or_logs_including_across_th
     }
 }
 
+/// Every credential claim, and a secret that the revision's grants carry as a host scope.
+const CLAIM_CANARIES: [&str; 5] = [
+    "issuer-credential-canary",
+    "audience-credential-canary",
+    "tenant-credential-canary",
+    "workspace-credential-canary",
+    "pool-credential-canary",
+];
+const SCOPE_SECRET: &str = "cr0ss1ng-s3cret-v4lue";
+
+#[test]
+fn a_guest_scanning_its_own_memory_finds_no_credential_material_but_does_find_what_the_host_wrote()
+{
+    let harness = Harness::new(2);
+    let mut secrets = CLAIM_CANARIES.to_vec();
+    secrets.push(SCOPE_SECRET);
+    // The positive controls: the params and the invocation key are what the host writes into
+    // a guest's memory, so a scan that cannot see them proves nothing about absence.
+    let digest = harness
+        .world
+        .add(&memory_probe(&secrets, &["/v1/local", "inv-local-0001"]));
+    let spec = Spec::new(&digest).with(|s| {
+        s.imports = vec!["context"];
+        s.secrets = vec![SCOPE_SECRET.to_owned()];
+    });
+    let reply = harness.run(&spec);
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
+    );
+    assert_eq!(probe_report(&reply.json()), (0, 2));
+    // The platform's binding layer did receive the credential: the guest saw none of it.
+    let held = harness.world.credential.lock().unwrap().clone().unwrap();
+    assert!(CLAIM_CANARIES.iter().all(|canary| held.contains(canary)));
+    // The probe itself detects material that is in its memory: it finds a needle that the
+    // host put there, in a second guest that searches for the invocation key as a "secret".
+    let detecting = harness
+        .world
+        .add(&memory_probe(&["inv-local-0001"], &["/v1/local"]));
+    let spec = Spec::new(&detecting).with(|s| s.imports = vec!["context"]);
+    assert_eq!(probe_report(&harness.run(&spec).json()), (1, 1));
+}
+
+#[test]
+fn guest_access_to_the_environment_or_a_file_is_refused_by_name_before_any_guest_runs() {
+    let harness = Harness::new(2);
+    for prohibited in ["wasi-environment", "wasi-preopens", "wasi-filesystem"] {
+        let digest = harness.world.add(&guest(
+            &[prohibited],
+            64,
+            &[(1024, OK_JSON)],
+            &ret(OK_JSON.len()),
+        ));
+        let refused = (
+            422,
+            "undeclared_import".to_owned(),
+            "import_not_declared".to_owned(),
+        );
+        // Not declared by the revision, and declared by it: the worker's own list decides.
+        assert_eq!(
+            code(&harness.run(&Spec::new(&digest))),
+            refused,
+            "{prohibited}"
+        );
+        let declared = Spec::new(&digest).with(|s| s.imports = vec![prohibited]);
+        assert_eq!(code(&harness.run(&declared)), refused, "{prohibited}");
+    }
+    // A component that exports anything beside the handler is refused as well.
+    let extra = harness.world.add(&guest_with(
+        &[],
+        64,
+        &[(1024, OK_JSON)],
+        "",
+        r#"(export "wasi:cli/run@0.2.6" (instance $handler))"#,
+        &ret(OK_JSON.len()),
+    ));
+    let (status, failure, reason) = code(&harness.run(&Spec::new(&extra)));
+    assert_eq!(
+        (status, failure.as_str(), reason.as_str()),
+        (500, "execution_failed", "artifact_rejected")
+    );
+    assert_eq!(
+        harness
+            .server
+            .hooks()
+            .guests_started
+            .load(Ordering::Acquire),
+        0
+    );
+    assert_eq!(harness.world.binds.load(Ordering::Acquire), 0);
+    assert_eq!(harness.world.host_calls.load(Ordering::Acquire), 0);
+}
+
 #[test]
 fn over_budget_redaction_fails_closed_to_a_single_marker_line() {
     let harness = Harness::new(1);

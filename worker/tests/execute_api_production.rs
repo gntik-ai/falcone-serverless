@@ -398,6 +398,80 @@ fn the_credential_never_reaches_logs_including_across_the_capture_cut() {
     }
 }
 
+const CLAIM_CANARIES: [&str; 5] = [
+    "issuer-credential-canary",
+    "audience-credential-canary",
+    "tenant-credential-canary",
+    "workspace-credential-canary",
+    "pool-credential-canary",
+];
+const SCOPE_SECRET: &str = "cr0ss1ng-s3cret-v4lue";
+
+#[test]
+fn a_guest_scanning_its_own_memory_finds_no_credential_material_but_does_find_what_the_host_wrote()
+{
+    let target = Target::start();
+    let mut secrets = CLAIM_CANARIES.to_vec();
+    secrets.push(SCOPE_SECRET);
+    // The positive controls: what the host writes into a guest's memory (its params and the
+    // invocation key), so that a scan which cannot see it proves nothing about absence.
+    let digest = target.add(&memory_probe(&secrets, &["/v1/local", "inv-local-0001"]));
+    let spec = Spec::new(&digest).with(|s| {
+        s.imports = vec!["context"];
+        s.secrets = vec![SCOPE_SECRET.to_owned()];
+    });
+    let reply = target.run(&spec);
+    assert_eq!(reply.status, 200, "{}", text(&reply));
+    assert_eq!(probe_report(&reply.json()), (0, 2));
+    // The same probe finds material that is in its memory.
+    let detecting = target.add(&memory_probe(&["inv-local-0001"], &["/v1/local"]));
+    let spec = Spec::new(&detecting).with(|s| s.imports = vec!["context"]);
+    assert_eq!(probe_report(&target.run(&spec).json()), (1, 1));
+}
+
+#[test]
+fn guest_access_to_the_environment_or_a_file_is_refused_by_name_before_any_guest_runs() {
+    let target = Target::start();
+    for prohibited in ["wasi-environment", "wasi-preopens", "wasi-filesystem"] {
+        let digest = target.add(&guest(
+            &[prohibited],
+            64,
+            &[(1024, OK_JSON)],
+            &ret(OK_JSON.len()),
+        ));
+        let refused = (
+            422,
+            "undeclared_import".to_owned(),
+            "import_not_declared".to_owned(),
+        );
+        // Not declared by the revision, and declared by it: the worker's own list decides.
+        assert_eq!(
+            code(&target.run(&Spec::new(&digest))),
+            refused,
+            "{prohibited}"
+        );
+        let declared = Spec::new(&digest).with(|s| s.imports = vec![prohibited]);
+        assert_eq!(code(&target.run(&declared)), refused, "{prohibited}");
+    }
+    // A component that exports anything beside the handler is refused as well.
+    let extra = target.add(&guest_with(
+        &[],
+        64,
+        &[(1024, OK_JSON)],
+        "",
+        r#"(export "wasi:cli/run@0.2.6" (instance $handler))"#,
+        &ret(OK_JSON.len()),
+    ));
+    let (status, failure, reason) = code(&target.run(&Spec::new(&extra)));
+    assert_eq!(
+        (status, failure.as_str(), reason.as_str()),
+        (500, "execution_failed", "artifact_rejected")
+    );
+    // Nothing was left running: a normal execute is admitted.
+    let ok = target.add(&success());
+    assert_eq!(target.run(&Spec::new(&ok)).status, 200);
+}
+
 #[test]
 fn a_cancel_on_the_control_listener_takes_effect_within_the_budget_with_the_execute_listener_full()
 {

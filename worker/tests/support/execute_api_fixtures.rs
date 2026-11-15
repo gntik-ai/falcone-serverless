@@ -22,6 +22,22 @@ pub fn wat_bytes(text: &str) -> String {
 /// A handler component. `body` is the WAT body of `handle(ptr, len) -> i32`; the result area
 /// is at 0. `data` are (offset, text) segments; `pages` is the initial memory in 64 KiB pages.
 pub fn guest(imports: &[&str], pages: u32, data: &[(u32, &str)], body: &str) -> Vec<u8> {
+    guest_with(imports, pages, data, "", "", body)
+}
+
+/// `guest` with `functions` (core functions beside `handle`) and `exports`, component-level
+/// exports added to the handler export. Besides the Falcone interfaces, `imports` names the
+/// prohibited WASI surfaces a guest could reach the environment or a file through
+/// (`wasi-environment`, `wasi-preopens`, `wasi-filesystem`): they are imported but never used,
+/// because the worker must refuse them by name before any guest code exists.
+pub fn guest_with(
+    imports: &[&str],
+    pages: u32,
+    data: &[(u32, &str)],
+    functions: &str,
+    exports: &str,
+    body: &str,
+) -> Vec<u8> {
     let error = r#"(type $error-type (variant (case "denied") (case "limit-exceeded") (case "timeout") (case "cancelled")))
       (export "host-error" (type $error (eq $error-type)))"#;
     let mut wat = String::from("(component\n");
@@ -66,6 +82,15 @@ pub fn guest(imports: &[&str], pages: u32, data: &[(u32, &str)], body: &str) -> 
                 core_args += r#"(export "key" (func $key))"#;
             }
             "other" => wat += r#"(import "falcone:host/other@0.2.0" (instance))"#,
+            "wasi-environment" => {
+                wat += r#"(import "wasi:cli/environment@0.2.6" (instance
+                      (export "get-environment" (func (result (list (tuple string string)))))))"#;
+            }
+            "wasi-preopens" => {
+                wat += r#"(import "wasi:filesystem/preopens@0.2.6" (instance
+                      (export "get-directories" (func (result (list (tuple u32 string)))))))"#;
+            }
+            "wasi-filesystem" => wat += r#"(import "wasi:filesystem/types@0.2.6" (instance))"#,
             other => panic!("unknown import {other}"),
         }
     }
@@ -96,6 +121,7 @@ pub fn guest(imports: &[&str], pages: u32, data: &[(u32, &str)], body: &str) -> 
         (import "host" "memory" (memory {pages}))
         {core_imports}
         {segments}
+        {functions}
         (func (export "handle") (param $ptr i32) (param $len i32) (result i32)
           {body}))
       (core instance $host (export "memory" (memory $memory)) {core_args})
@@ -103,7 +129,8 @@ pub fn guest(imports: &[&str], pages: u32, data: &[(u32, &str)], body: &str) -> 
       (func $handle (type $handle) (canon lift (core func $guest "handle")
         (memory $memory) (realloc (func $realloc)) string-encoding=utf8))
       (instance $handler (export "handler-error" (type $herror)) (export "handle" (func $handle)))
-      (export "falcone:host/handler@0.2.0" (instance $handler)))"#
+      (export "falcone:host/handler@0.2.0" (instance $handler))
+      {exports})"#
     );
     wat::parse_str(&wat).unwrap_or_else(|error| panic!("{error}\n{wat}"))
 }
@@ -166,6 +193,86 @@ pub fn logging_then_returning(message: &str, times: u32, json: &str) -> Vec<u8> 
             ret(json.len())
         ),
     )
+}
+
+/// What `memory_probe` reports: one digit counts the secrets it found outside their own copy,
+/// another the positive controls.
+const PROBE_RESULT: &str = r#"{"statusCode":200,"body":{"leaked":"0","seen":"0"}}"#;
+
+/// Where the digit of `name` sits in `PROBE_RESULT`.
+fn digit_at(name: &str) -> usize {
+    PROBE_RESULT.find(&format!("\"{name}\":\"")).unwrap() + name.len() + 4
+}
+
+/// The count of `needle` in the guest's whole linear memory, outside the needle's own copy.
+const FIND: &str = "(func $find (param $needle i32) (param $len i32) (result i32)
+    (local $p i32) (local $end i32) (local $k i32) (local $count i32)
+    (local.set $end (i32.sub (i32.mul (memory.size) (i32.const 65536)) (local.get $len)))
+    (block $done
+      (loop $next
+        (br_if $done (i32.gt_u (local.get $p) (local.get $end)))
+        (local.set $k (i32.const 0))
+        (block $miss
+          (loop $compare
+            (br_if $miss (i32.ne (i32.load8_u (i32.add (local.get $p) (local.get $k)))
+                                 (i32.load8_u (i32.add (local.get $needle) (local.get $k)))))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br_if $compare (i32.lt_u (local.get $k) (local.get $len))))
+          (if (i32.ne (local.get $p) (local.get $needle))
+            (then (local.set $count (i32.add (local.get $count) (i32.const 1))))))
+        (local.set $p (i32.add (local.get $p) (i32.const 1)))
+        (br $next)))
+    (local.get $count))";
+
+/// A guest that looks for credential material in everything it can see: its whole linear
+/// memory, after it took what the host hands a guest (its params and the invocation key).
+/// `secrets` are searched for and must be absent; `controls` are searched for and must be
+/// present, which proves that the scan reads the memory that the host wrote. The result
+/// reports both counts as `{"leaked":"<n>","seen":"<n>"}`, each count capped at 9.
+pub fn memory_probe(secrets: &[&str], controls: &[&str]) -> Vec<u8> {
+    let mut data: Vec<(u32, String)> = vec![(1024, PROBE_RESULT.to_owned())];
+    let mut at = 8192;
+    let mut calls = String::new();
+    for (needles, counter) in [(secrets, "$leaked"), (controls, "$seen")] {
+        for needle in needles {
+            data.push((at, (*needle).to_owned()));
+            calls += &format!(
+                "(local.set {counter} (i32.add (local.get {counter}) (i32.gt_u (call $find (i32.const {at}) (i32.const {})) (i32.const 0))))",
+                needle.len()
+            );
+            at += 256;
+        }
+    }
+    let segments: Vec<(u32, &str)> = data.iter().map(|(at, text)| (*at, text.as_str())).collect();
+    guest_with(
+        &["context"],
+        4,
+        &segments,
+        FIND,
+        "",
+        &format!(
+            "(local $leaked i32) (local $seen i32)
+             (call $key (i32.const 3000))
+             {calls}
+             (i32.store8 (i32.const {}) (i32.add (i32.const 48) (select (local.get $leaked) (i32.const 9) (i32.lt_u (local.get $leaked) (i32.const 9)))))
+             (i32.store8 (i32.const {}) (i32.add (i32.const 48) (select (local.get $seen) (i32.const 9) (i32.lt_u (local.get $seen) (i32.const 9)))))
+             {}",
+            1024 + digit_at("leaked"),
+            1024 + digit_at("seen"),
+            ret(PROBE_RESULT.len())
+        ),
+    )
+}
+
+/// What `memory_probe` reported: (secrets found, controls found).
+pub fn probe_report(result: &Value) -> (u8, u8) {
+    let digit = |name: &str| {
+        result["result"]["body"][name]
+            .as_str()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or_else(|| panic!("no {name} in {result}"))
+    };
+    (digit("leaked"), digit("seen"))
 }
 
 /// A guest that makes `calls` progress reports, which reach the platform's bindings.
@@ -278,8 +385,12 @@ impl Spec {
             "engine_version": self.engine,
             "wasi_version": "0.2.6",
             "interface_version": "0.2.0",
-            "imports": self.imports.iter().map(|i| {
-                format!("falcone:host/{}@0.2.0", if *i == "context" { "invocation-context" } else { i })
+            "imports": self.imports.iter().map(|i| match *i {
+                "context" => "falcone:host/invocation-context@0.2.0".to_owned(),
+                "wasi-environment" => "wasi:cli/environment@0.2.6".to_owned(),
+                "wasi-preopens" => "wasi:filesystem/preopens@0.2.6".to_owned(),
+                "wasi-filesystem" => "wasi:filesystem/types@0.2.6".to_owned(),
+                other => format!("falcone:host/{other}@0.2.0"),
             }).collect::<Vec<_>>(),
             "budgets": {
                 "fuel": self.fuel,
