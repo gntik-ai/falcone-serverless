@@ -4,8 +4,9 @@
 //! execution waits for the first of its result, the absolute deadline `until`, and the cancel
 //! flag. When `until` passes or a cancel arrives the execution leaves at once, whatever the
 //! step would later return, and the step's thread is abandoned. An abandoned thread is told to
-//! stop through its own flag where the step can observe it, and the number of abandoned
-//! threads that are still running is bounded: past the bound a new step is refused as busy.
+//! stop through its own flag (a cancel) or through `until` (the deadline) where the step can
+//! observe them, and the number of abandoned threads that are still running is bounded: past the
+//! bound a new step is refused as busy.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
@@ -77,8 +78,10 @@ impl Drop for Tally {
 
 /// Runs `work` on its own thread and waits for it under `until` and `cancelled`.
 ///
-/// `work` receives a flag that is set when the execution leaves; a step that can observe it
-/// (a supervised compile child, a cache publication) stops and discards its result.
+/// `work` receives a flag that is set when the execution leaves because of a cancel. A step
+/// that can observe it (a supervised compile child, a cache publication) stops and discards its
+/// result, and checks `until` itself for the deadline. The flag is never set for a timeout, so
+/// the reason the step stopped is the reason the execution left.
 pub fn step<T: Send + 'static>(
     bound: &Arc<Abandoned>,
     until: Instant,
@@ -110,7 +113,7 @@ pub fn step<T: Send + 'static>(
     loop {
         // A result that arrives after the deadline or a cancel is not used.
         if let Some(left) = expired(until, cancelled) {
-            abandon(bound, &state, &abandoned);
+            abandon(bound, &state, &abandoned, left);
             return Err(left);
         }
         let wait = until.saturating_duration_since(Instant::now()).min(POLL);
@@ -129,13 +132,19 @@ pub fn step<T: Send + 'static>(
 
 /// Marks the step abandoned. The count rises here and falls when its thread ends, so a
 /// thread that already ended is never counted.
-fn abandon(bound: &Arc<Abandoned>, state: &AtomicU8, abandoned: &AtomicBool) {
+///
+/// The step's flag records the reason it was left: it is set for a cancellation and stays clear
+/// for a timeout, where the step observes `until` itself. A compile child that is stopped at
+/// the deadline is therefore never mistaken for a cancelled one.
+fn abandon(bound: &Arc<Abandoned>, state: &AtomicU8, abandoned: &AtomicBool, reason: Left) {
     bound.running.fetch_add(1, Ordering::AcqRel);
     if state
         .compare_exchange(RUNNING, ABANDONED, Ordering::AcqRel, Ordering::Acquire)
         .is_ok()
     {
-        abandoned.store(true, Ordering::Release);
+        if reason == Left::Cancelled {
+            abandoned.store(true, Ordering::Release);
+        }
     } else {
         // The thread ended first: nothing is left running.
         bound.running.fetch_sub(1, Ordering::AcqRel);
@@ -200,6 +209,45 @@ mod tests {
             },
         );
         assert_eq!(result, Err(Left::Cancelled));
+    }
+
+    #[test]
+    fn a_timeout_leaves_the_stop_flag_clear_so_the_deadline_stays_the_reason() {
+        // The flag handed to a step means "cancelled" only. A step that is left because
+        // `until` passed observes `until` itself, and must never read a cancellation.
+        let bound = Arc::new(Abandoned::new(2));
+        let (release, hold) = mpsc::channel::<()>();
+        let (seen, observed) = mpsc::channel();
+        let until = Instant::now() + Duration::from_millis(20);
+        let left = step(&bound, until, &flag(), move |stop| {
+            let _ = hold.recv();
+            let _ = seen.send(stop.load(Ordering::Acquire));
+        });
+        assert_eq!(left, Err(Left::Timeout));
+        drop(release);
+        assert_eq!(observed.recv_timeout(Duration::from_secs(30)), Ok(false));
+    }
+
+    #[test]
+    fn a_cancel_sets_the_stop_flag_of_the_abandoned_step() {
+        let bound = Arc::new(Abandoned::new(2));
+        let (release, hold) = mpsc::channel::<()>();
+        let (seen, observed) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let left = step(
+            &bound,
+            Instant::now() + Duration::from_secs(30),
+            &cancelled,
+            move |stop| {
+                signal.store(true, Ordering::Release);
+                let _ = hold.recv();
+                let _ = seen.send(stop.load(Ordering::Acquire));
+            },
+        );
+        assert_eq!(left, Err(Left::Cancelled));
+        drop(release);
+        assert_eq!(observed.recv_timeout(Duration::from_secs(30)), Ok(true));
     }
 
     #[test]

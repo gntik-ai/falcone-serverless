@@ -202,13 +202,14 @@ pub fn civil(seconds: u64) -> String {
     )
 }
 
-pub fn deadline_in(seconds: u64) -> String {
+/// The civil time `seconds` from now; a negative count is a deadline that has passed.
+pub fn deadline_in(seconds: i64) -> String {
     civil(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs()
-            + seconds,
+            .saturating_add_signed(seconds),
     )
 }
 
@@ -221,8 +222,8 @@ pub struct Spec {
     pub imports: Vec<&'static str>,
     pub runtime_mode: &'static str,
     pub timeout_ms: u64,
-    /// Seconds until the request's own absolute deadline.
-    pub deadline_secs: u64,
+    /// Seconds until the request's own absolute deadline (negative: already passed).
+    pub deadline_secs: i64,
     pub memory_bytes: u64,
     pub fuel: u64,
     pub max_host_calls: u64,

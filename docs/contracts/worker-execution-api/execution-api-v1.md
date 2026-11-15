@@ -282,11 +282,15 @@ or `499 cancelled`, whatever the step later returns. A supervised step that was 
 abandoned: it is told to stop where it can observe that, it never publishes a cache entry (the
 cache writes a temporary file and renames it atomically, and discards it when abandoned), and at
 most `max(concurrency, 4)` abandoned steps may still be running; past that a new step is
-`503 busy`. A deadline or cancel always outranks `busy` and every admission result.
+`503 busy`. A deadline or cancel always outranks `busy` and every admission result, including the
+refusal of a duplicate registration: a request for an `(activation_id, attempt_id)` that is already
+running is `503 busy` before `until` and `504 timeout` once it has passed.
 
 A compile child that the supervisor stopped is classified by the reason it was stopped, recorded
 before the kill: `compile_deadline_exceeded` for the deadline and `compile_cancelled` for a cancel,
-whatever status or signal the killed child reports.
+whatever status or signal the killed child reports. The stop flag a supervised step receives is
+set only for a cancel; a step that was left at `until` observes the deadline itself, so a child
+stopped at the deadline is never reported as `compile_cancelled`.
 
 ### Budgets
 
@@ -318,8 +322,11 @@ the worker never formats it. Log lines that reach a result are redacted on every
   the cut, crosses it, or ends exactly at it is gone before the cut; each replaced run is the
   marker `<redacted>`;
 - redaction is bounded: the matcher holds at most 2^20 secret windows and one execution scans at
-  most 4 Mi characters. Past either bound the execution fails closed: every log line is dropped
-  and `logs` is the single line `<redacted>`.
+  most 4 Mi characters. Building the matcher is bounded while it runs, not after: the cap on
+  windows is checked as each window is inserted, a build examines at most 4 Mi windows
+  (duplicates included), and it ends at the execution's absolute deadline `until`. Past any bound
+  the execution fails closed: every log line is dropped and `logs` is the single line
+  `<redacted>`.
 
 ## Test-only hooks
 

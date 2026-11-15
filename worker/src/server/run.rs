@@ -52,11 +52,19 @@ pub(super) fn execute(shared: &Arc<Shared>, body: &[u8], slot: Permit) -> (u16, 
         ));
     let Some(registration) = shared.register((plan.activation_id.clone(), plan.attempt_id.clone()))
     else {
-        return request.failure(Refusal::new(Code::Busy, Reason::AtCapacity), Vec::new());
+        // The deadline outranks an admission refusal: a duplicate of a running attempt whose
+        // own deadline has already passed is a timeout, not busy.
+        let refusal = match Instant::now() >= until {
+            true => left(Left::Timeout),
+            false => Refusal::new(Code::Busy, Reason::AtCapacity),
+        };
+        return request.failure(refusal, Vec::new());
     };
     let cancel = registration.entry.cancel.clone();
+    // Building the matcher holds the slot, so it is bounded by the same `until`.
     let logs = Arc::new(Mutex::new(Logs::new(Redactor::new(
         plan.secrets.iter().map(String::as_str),
+        until,
     ))));
     let ended = run(shared, &plan, limits, until, &cancel, &logs);
     // Every exit path takes its log lines from the redacting collector, here and only here.

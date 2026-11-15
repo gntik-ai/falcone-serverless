@@ -5,14 +5,16 @@
 //! consecutive characters of it. A secret shorter than eight characters is protected whole.
 //! Matching is by character, so a replaced run never splits a character.
 //!
-//! The work is bounded twice. Building the matcher is capped by [`MAX_WINDOWS`], and scanning is
-//! capped per execution by [`SCAN_BUDGET_CHARS`]. When either cap is exceeded the execution
-//! fails closed: every log line is dropped and the logs become the single line
+//! The work is bounded three times. Building the matcher is capped by [`MAX_WINDOWS`] distinct
+//! windows and [`MAX_BUILD_STEPS`] examined windows, both enforced as each window is inserted,
+//! and it ends at the execution's deadline. Scanning is capped per execution by
+//! [`SCAN_BUDGET_CHARS`]. When any cap is exceeded the execution fails closed: every log line is dropped and the logs become the single line
 //! [`MARKER`]. Text is redacted in full and only then cut to [`LINE_CHARS`], so a secret that
 //! crosses the cut point is gone before the cut.
 
 use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::time::Instant;
 
 /// What replaces a protected run, and the only line of an over-budget execution.
 pub const MARKER: &str = "<redacted>";
@@ -24,6 +26,10 @@ pub const MAX_LINES: usize = 1000;
 pub const MAX_WINDOWS: usize = 1 << 20;
 /// The most characters one execution scans for redaction.
 pub const SCAN_BUDGET_CHARS: usize = 4 << 20;
+/// The most secret windows one build examines, duplicates included.
+pub const MAX_BUILD_STEPS: usize = 4 << 20;
+/// How many windows a build examines between looks at the clock.
+const CLOCK_INTERVAL: usize = 4096;
 const WINDOW: usize = 8;
 
 /// Keys are already mixed; the set uses them as their own hash.
@@ -60,37 +66,34 @@ fn key(hash: u64, length: usize) -> u64 {
     z ^ (z >> 31)
 }
 
-fn window_keys(chars: &[char], length: usize) -> impl Iterator<Item = u64> + '_ {
-    chars.windows(length).map(move |window| {
-        key(
-            window
-                .iter()
-                .fold(0xcbf2_9ce4_8422_2325, |h, c| step(h, *c)),
-            length,
-        )
-    })
-}
-
 /// The redaction matcher of one execution.
 pub struct Redactor {
     keys: Keys,
     /// Which lengths from one to `WINDOW` have any secret, so absent lengths cost nothing.
     lengths: [bool; WINDOW + 1],
     starts: [bool; 256],
-    /// Set when the secrets exceed the matcher's bound: every log is replaced by the marker.
+    /// Set when building the matcher exceeded a bound: every log is replaced by the marker.
     overflow: bool,
+    /// How many secret windows building the matcher examined.
+    examined: usize,
 }
 
 impl Redactor {
     /// Builds the matcher over the secrets' characters, in work linear in their total length.
-    pub fn new<'a>(secrets: impl IntoIterator<Item = &'a str>) -> Self {
+    ///
+    /// The bounds are enforced as each window is inserted, never after a whole claim: the set
+    /// stops at [`MAX_WINDOWS`] distinct windows, the build examines at most
+    /// [`MAX_BUILD_STEPS`] windows, and it looks at the clock as it goes, so it ends at `until`
+    /// whatever the claims hold. Past any bound the matcher fails closed.
+    pub fn new<'a>(secrets: impl IntoIterator<Item = &'a str>, until: Instant) -> Self {
         let mut redactor = Self {
             keys: Keys::default(),
             lengths: [false; WINDOW + 1],
             starts: [false; 256],
             overflow: false,
+            examined: 0,
         };
-        for secret in secrets {
+        'build: for secret in secrets {
             let chars: Vec<char> = secret.chars().collect();
             if chars.is_empty() {
                 continue;
@@ -98,18 +101,36 @@ impl Redactor {
             let length = chars.len().min(WINDOW);
             redactor.lengths[length] = true;
             for window in chars.windows(length) {
+                if redactor.examined >= MAX_BUILD_STEPS
+                    || (redactor.examined.is_multiple_of(CLOCK_INTERVAL) && Instant::now() >= until)
+                {
+                    redactor.fail_closed();
+                    break 'build;
+                }
+                redactor.examined += 1;
                 redactor.starts[start(window[0])] = true;
-            }
-            for key in window_keys(&chars, length) {
-                redactor.keys.insert(key);
-            }
-            if redactor.keys.len() > MAX_WINDOWS {
-                redactor.keys = Keys::default();
-                redactor.overflow = true;
-                break;
+                let hash = window
+                    .iter()
+                    .fold(0xcbf2_9ce4_8422_2325, |h, c| step(h, *c));
+                redactor.keys.insert(key(hash, length));
+                if redactor.keys.len() > MAX_WINDOWS {
+                    redactor.fail_closed();
+                    break 'build;
+                }
             }
         }
         redactor
+    }
+
+    fn fail_closed(&mut self) {
+        self.keys = Keys::default();
+        self.overflow = true;
+    }
+
+    /// How many secret windows building the matcher examined.
+    #[cfg(test)]
+    pub fn examined(&self) -> usize {
+        self.examined
     }
 
     /// Whether the secrets were too many for the matcher.
@@ -216,9 +237,14 @@ impl Logs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(600)
+    }
 
     fn redact(secrets: &[&str], text: &str) -> String {
-        let redactor = Redactor::new(secrets.iter().copied());
+        let redactor = Redactor::new(secrets.iter().copied(), soon());
         redactor.line(text, &mut SCAN_BUDGET_CHARS.clone()).unwrap()
     }
 
@@ -275,7 +301,7 @@ mod tests {
 
     #[test]
     fn over_budget_fails_closed_to_one_marker_line() {
-        let mut logs = Logs::new(Redactor::new(["secretvalue"]));
+        let mut logs = Logs::new(Redactor::new(["secretvalue"], soon()));
         logs.push("kept line");
         for _ in 0..(SCAN_BUDGET_CHARS / 8192 + 2) {
             logs.push(&"x".repeat(8192));
@@ -287,7 +313,61 @@ mod tests {
                 .collect::<Vec<_>>()
                 .iter()
                 .map(String::as_str),
+            soon(),
         ));
+        logs.push("anything");
+        assert_eq!(logs.finish(), [MARKER]);
+    }
+
+    /// A string of `length` characters in which every eight-character window is distinct: the
+    /// characters come from a 20,992-symbol alphabet by a full-period generator.
+    fn distinct(length: usize, seed: u64) -> String {
+        let mut state = seed;
+        (0..length)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                char::from_u32(0x4E00 + ((state >> 33) % 20_992) as u32).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_oversized_claim_stops_at_the_cap_while_it_is_inserted_not_after() {
+        // 2.5 M characters is as much claim as one request can carry: far past the cap.
+        let claim = distinct(2_500_000, 7);
+        let started = Instant::now();
+        let redactor = Redactor::new([claim.as_str()], soon());
+        let elapsed = started.elapsed();
+        assert!(redactor.overflowed());
+        // The cap is exact: the window that crosses it is the last one examined.
+        assert_eq!(redactor.examined(), MAX_WINDOWS + 1);
+        // A release build builds this in well under a second; a debug build gets a wide bound.
+        let bound = if cfg!(debug_assertions) { 20 } else { 1 };
+        assert!(elapsed < Duration::from_secs(bound), "{elapsed:?}");
+        // And the answer is exactly the marker line, never text.
+        let mut logs = Logs::new(redactor);
+        logs.push(&claim.chars().take(64).collect::<String>());
+        assert_eq!(logs.finish(), [MARKER]);
+    }
+
+    #[test]
+    fn the_work_over_repeated_claims_is_bounded_by_the_fixed_step_budget() {
+        // The same window over and over never grows the set, so only the step budget stops it.
+        let repeated = "ab".repeat(1 << 20);
+        let redactor = Redactor::new([repeated.as_str(); 8], soon());
+        assert!(redactor.overflowed());
+        assert_eq!(redactor.examined(), MAX_BUILD_STEPS);
+    }
+
+    #[test]
+    fn construction_under_a_passed_deadline_fails_closed_after_at_most_one_clock_interval() {
+        let claim = distinct(500_000, 11);
+        let redactor = Redactor::new([claim.as_str()], Instant::now());
+        assert!(redactor.overflowed());
+        assert_eq!(redactor.examined(), 0);
+        let mut logs = Logs::new(redactor);
         logs.push("anything");
         assert_eq!(logs.finish(), [MARKER]);
     }

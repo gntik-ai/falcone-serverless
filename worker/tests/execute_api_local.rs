@@ -591,36 +591,54 @@ fn over_budget_redaction_fails_closed_to_a_single_marker_line() {
     assert_eq!(reply.json()["logs"], json!(["<redacted>"]));
 }
 
+/// `length` ASCII characters in which every eight-character window is distinct in practice: a
+/// 64-bit generator over the 62 letters and digits.
+fn pseudo_random_claim(length: usize, seed: u64) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut state = seed;
+    (0..length)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ALPHABET[((state >> 33) % 62) as usize] as char
+        })
+        .collect()
+}
+
 #[test]
-fn many_distinct_credential_strings_and_a_thousand_long_lines_redact_within_a_bound_and_release_the_slot()
+fn oversized_credential_claims_fail_closed_to_exactly_the_marker_within_a_bound_and_release_the_slot()
  {
     let harness = Harness::new(1);
     let message = "q".repeat(8192);
     let digest = harness.world.add(&logging(&message, 1000));
-    let secrets: Vec<String> = (0..60_000)
-        .map(|i| format!("distinct-secret-{i:08}"))
-        .collect();
+    // Two 1,000,000-character claims are 2 M distinct windows: past the 2^20 cap, and about
+    // 4 MB of request once the projection repeats them.
+    let secrets = vec![
+        pseudo_random_claim(1_000_000, 1),
+        pseudo_random_claim(1_000_000, 2),
+    ];
     let spec = Spec::new(&digest).with(|s| {
         s.imports = vec!["logging"];
         s.max_host_calls = 2000;
-        s.secrets = secrets.clone();
-        // A debug build scans a great deal here; the budget is not what the test measures.
-        s.timeout_ms = 55_000;
+        s.secrets = secrets;
     });
     let started = Instant::now();
     let reply = harness.run(&spec);
-    assert_eq!(reply.status, 200);
-    // Over the scan budget the answer is the marker; within it, redacted lines. Either way it
-    // finishes within the documented bound (a debug build here; far less in release).
-    let logs = reply.json()["logs"].clone();
-    assert!(logs == json!(["<redacted>"]) || logs.as_array().is_some_and(|l| l.len() <= 1000));
-    assert!(
-        started.elapsed() < Duration::from_secs(120),
-        "{:?}",
-        started.elapsed()
+    let elapsed = started.elapsed();
+    assert_eq!(
+        reply.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&reply.body)
     );
+    // Fail closed: no line of the thousand reaches the result, only the marker.
+    assert_eq!(reply.json()["logs"], json!(["<redacted>"]));
+    // The whole request, parse and compile included, is bounded; a debug build gets more room.
+    let bound = if cfg!(debug_assertions) { 60 } else { 5 };
+    assert!(elapsed < Duration::from_secs(bound), "{elapsed:?}");
+    // The slot is released, and the next request is admitted.
     assert!(harness.server.wait_running(0, BUDGET).is_some());
-    // The next request is admitted.
     let ok = harness.world.add(&success());
     assert_eq!(harness.run(&Spec::new(&ok)).status, 200);
 }
@@ -673,6 +691,30 @@ fn with_every_execution_running_and_the_execute_listener_saturated_a_cancel_stil
     assert_eq!(harness.cancel(&second.activation).status, 200);
     assert_eq!(b.join().unwrap().status, 499);
     drop(held);
+}
+
+#[test]
+fn a_duplicate_of_a_running_attempt_past_its_deadline_is_a_timeout_not_busy() {
+    let harness = Arc::new(Harness::new(2));
+    let digest = harness.world.add(&spin());
+    let running = Spec::blocking(&digest);
+    let first = harness.spawn(&running);
+    harness.wait_acted(1);
+    // The same activation and attempt, with a request deadline that has already passed.
+    let expired = running.clone().with(|s| s.deadline_secs = -5);
+    let reply = harness.run(&expired);
+    assert_eq!(
+        code(&reply),
+        (504, "timeout".into(), "deadline_exceeded".into())
+    );
+    // Before its deadline the same duplicate is refused as busy, and the first is untouched.
+    let live = running.clone();
+    assert_eq!(
+        code(&harness.run(&live)),
+        (503, "busy".into(), "at_capacity".into())
+    );
+    assert_eq!(harness.cancel(&running.activation).status, 200);
+    assert_eq!(first.join().unwrap().status, 499);
 }
 
 #[test]
