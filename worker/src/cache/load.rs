@@ -90,6 +90,8 @@ pub(super) fn cached(
     expected: &Provenance,
 ) -> Option<Loaded> {
     witness!(cache, LoadEvent::Read);
+    #[cfg(any(test, feature = "qualification-hooks"))]
+    cache.hooks.reach(super::hooks::Stage::Read);
     match read(path).and_then(|bytes| verified(cache, &bytes, key, expected, true)) {
         Ok(loaded) => Some(loaded),
         Err(reason) => {

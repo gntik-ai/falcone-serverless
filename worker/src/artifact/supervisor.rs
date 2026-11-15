@@ -3,7 +3,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,7 @@ use rustix::process::{Pid, Resource, Rlimit, prlimit};
 
 use super::Error;
 use super::cache_key::{CacheKey, ENGINE_CONFIG, ENGINE_VERSION, INTERFACE_VERSION};
-use super::validate::validate;
+use super::validate::{Validated, validate};
 
 /// Version 3 bounds native compiler output independently of raw input limits.
 pub const MAX_COMPILED_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
@@ -24,6 +24,60 @@ pub struct CompileLimits {
     /// RLIMIT_AS: virtual address space, not resident memory.
     pub memory_bytes: u64,
     pub wall_clock_deadline: Instant,
+}
+
+/// Why the supervisor stopped a child. It is recorded before the kill, so the outcome follows
+/// the reason and never the status or signal the killed child then reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Stop {
+    Running = 0,
+    Deadline = 1,
+    Cancelled = 2,
+}
+
+impl Stop {
+    fn code(self) -> Option<&'static str> {
+        match self {
+            Self::Running => None,
+            Self::Deadline => Some("compile_deadline_exceeded"),
+            Self::Cancelled => Some("compile_cancelled"),
+        }
+    }
+}
+
+/// The stop reason of one supervised child, set at most once before any kill.
+struct StopReason(AtomicU8);
+
+impl StopReason {
+    fn new() -> Self {
+        Self(AtomicU8::new(Stop::Running as u8))
+    }
+
+    fn get(&self) -> Stop {
+        match self.0.load(Ordering::Acquire) {
+            1 => Stop::Deadline,
+            2 => Stop::Cancelled,
+            _ => Stop::Running,
+        }
+    }
+
+    /// Records the first reason; cancellation outranks the deadline when both hold.
+    fn observe(&self, deadline: Instant, cancelled: &AtomicBool) -> Stop {
+        let observed = if cancelled.load(Ordering::Acquire) {
+            Stop::Cancelled
+        } else if Instant::now() >= deadline {
+            Stop::Deadline
+        } else {
+            return self.get();
+        };
+        let _ = self.0.compare_exchange(
+            Stop::Running as u8,
+            observed as u8,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        self.get()
+    }
 }
 
 pub struct Supervisor {
@@ -77,6 +131,17 @@ impl Supervisor {
         cancelled: &AtomicBool,
     ) -> Result<(CacheKey, Vec<u8>), Error> {
         let validated = validate(bytes, limits.input_bytes)?;
+        self.compile_validated(&validated, limits, cancelled)
+    }
+
+    /// As `compile_output` for bytes the caller has already validated, so an execution
+    /// validates each artifact exactly once.
+    pub fn compile_validated(
+        &mut self,
+        validated: &Validated<'_>,
+        limits: CompileLimits,
+        cancelled: &AtomicBool,
+    ) -> Result<(CacheKey, Vec<u8>), Error> {
         if limits.input_bytes == 0
             || limits.cpu_seconds == 0
             || limits.cpu_seconds == u64::MAX
@@ -92,21 +157,54 @@ impl Supervisor {
             ENGINE_CONFIG,
             INTERFACE_VERSION,
         )?;
-        let child = Command::new(&self.child_path)
+        let stop = StopReason::new();
+        let child = spawn(
+            &self.child_path,
+            limits.wall_clock_deadline,
+            cancelled,
+            &stop,
+        )?;
+        self.last_child = Some(child);
+        self.spawned.fetch_add(1, Ordering::Release);
+        let child = self.last_child.as_mut().expect("just spawned child");
+        // Before this returns, even setup and I/O failures terminate and reap.
+        let result = run(child, validated.bytes(), limits, cancelled, &stop);
+        let cleanup = terminate_and_reap(child);
+        // A child the supervisor stopped is reported by the reason it was stopped, even when
+        // reaping it failed or the child reported some other status on its way out.
+        if let Some(code) = stop.get().code() {
+            return Err(Error::new(code));
+        }
+        cleanup?;
+        Ok((key, result?))
+    }
+}
+
+/// Starts the trusted child. `ETXTBSY` is the transient refusal to execute a file that another
+/// thread's fork still holds open for writing; it is retried until the deadline or a cancel.
+fn spawn(
+    path: &std::path::Path,
+    deadline: Instant,
+    cancelled: &AtomicBool,
+    stop: &StopReason,
+) -> Result<Child, Error> {
+    loop {
+        match Command::new(path)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|_| Error::new("compile_failed"))?;
-        self.last_child = Some(child);
-        self.spawned.fetch_add(1, Ordering::Release);
-        let child = self.last_child.as_mut().expect("just spawned child");
-        // Before this returns, even setup and I/O failures terminate and reap.
-        let result = run(child, validated.bytes(), limits, cancelled);
-        let cleanup = terminate_and_reap(child);
-        cleanup?;
-        Ok((key, result?))
+        {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(26) => {
+                if let Some(code) = stop.observe(deadline, cancelled).code() {
+                    return Err(Error::new(code));
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+            Err(_) => return Err(Error::new("compile_failed")),
+        }
     }
 }
 
@@ -136,6 +234,7 @@ fn run(
     bytes: &[u8],
     limits: CompileLimits,
     cancelled: &AtomicBool,
+    stop: &StopReason,
 ) -> Result<Vec<u8>, Error> {
     apply_limits(child, limits)?;
     let stdin = child
@@ -158,6 +257,7 @@ fn run(
         bytes,
         limits.wall_clock_deadline,
         cancelled,
+        stop,
     )
 }
 
@@ -168,6 +268,7 @@ fn monitor(
     bytes: &[u8],
     deadline: Instant,
     cancelled: &AtomicBool,
+    stop: &StopReason,
 ) -> Result<Vec<u8>, Error> {
     let mut stdin = Some(stdin);
     let mut written = 0;
@@ -176,11 +277,9 @@ fn monitor(
     let mut eof = false;
     let mut exited = false;
     loop {
-        if cancelled.load(Ordering::Acquire) {
-            return Err(Error::new("compile_cancelled"));
-        }
-        if Instant::now() >= deadline {
-            return Err(Error::new("compile_deadline_exceeded"));
+        // The reason is recorded here, before any kill or reap.
+        if let Some(code) = stop.observe(deadline, cancelled).code() {
+            return Err(Error::new(code));
         }
         let mut progressed = false;
         if !eof {
@@ -230,6 +329,13 @@ fn monitor(
         if !exited
             && let Some(status) = child.try_wait().map_err(|_| Error::new("compile_failed"))?
         {
+            // A child that exits abnormally after the deadline or a cancel was stopped by
+            // that reason as far as the supervisor can tell: report the reason, not the exit.
+            if status.code() != Some(0)
+                && let Some(code) = stop.observe(deadline, cancelled).code()
+            {
+                return Err(Error::new(code));
+            }
             match (status.code(), status.signal()) {
                 (Some(0), None) => exited = true,
                 (_, Some(24 | 9)) => return Err(Error::new("compile_cpu_limit_exceeded")),

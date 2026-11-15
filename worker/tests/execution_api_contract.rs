@@ -4,10 +4,7 @@
 //! vendored capability-grants and credential-claims schemas registered offline), and the runtime
 //! parsers must agree with the schemas. `jsonschema` is a dev-dependency only.
 
-#[path = "../src/api/mod.rs"]
-mod api;
-
-use api::{
+use falcone_serverless_worker::api::{
     Malformed, Rejection, parse_cancel, parse_projection, parse_request, parse_result, parse_update,
 };
 use jsonschema::{Draft, Registry, Validator};
@@ -1033,7 +1030,8 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
         .map(String::from)
         .into()
     );
-    // The only worker-only codes: the non-wasm refusal and the two legacy rejections.
+    // The worker-only codes: the non-wasm refusal, the two legacy rejections, and the
+    // execution API's own outcome and refusal codes (RUN-01.t3).
     let worker_only: BTreeSet<_> = table
         .iter()
         .filter(|row| row["origin"] == "worker")
@@ -1042,16 +1040,31 @@ fn every_functions_api_code_matches_the_pinned_error_fixtures() {
     assert_eq!(
         worker_only,
         [
+            "busy",
+            "cancelled",
+            "execution_failed",
             "invalid_request",
+            "not_found",
             "request_too_large",
-            "runtime_mode_not_supported"
+            "runtime_mode_not_supported",
+            "stale_update",
+            "timeout",
+            "undeclared_import",
         ]
         .map(String::from)
         .into()
     );
     for row in &table {
-        assert_eq!(row["retryable"], false, "{}", row["code"]);
-        assert_eq!(row["class"], "non_retryable", "{}", row["code"]);
+        // `retryable` is true exactly for class `retryable`; the GW_ codes stay non_retryable.
+        assert_eq!(
+            row["retryable"],
+            json!(row["class"] == "retryable"),
+            "{}",
+            row["code"]
+        );
+        if row["origin"] == "functions-api" {
+            assert_eq!(row["class"], "non_retryable", "{}", row["code"]);
+        }
     }
 }
 
@@ -1087,7 +1100,7 @@ fn the_code_table_matches_the_schema_the_spec_and_the_fixtures() {
             .find(|line| line.starts_with(&format!("| `{code}` |")))
             .unwrap_or_else(|| panic!("{code} is not in the spec table"));
         assert!(line.contains(&format!("| {} |", row["status"])), "{code}");
-        assert!(line.contains("non_retryable"), "{code}");
+        assert!(line.contains(row["class"].as_str().unwrap()), "{code}");
         for reason in row["reasons"].as_array().unwrap() {
             assert!(line.contains(reason.as_str().unwrap()), "{code}");
         }

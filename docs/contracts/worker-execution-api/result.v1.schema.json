@@ -100,6 +100,461 @@
             "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/failure"
           },
           "class": {
+            "$ref": "urn:falcone:contracts:worker-execution-api:1:common#/$defs/class"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "GW_OCI_NOT_AUTHORIZED"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "GW_BASE_DISABLED"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "GW_BASE_MISMATCH"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "runtime_mode_not_supported"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "invalid_request"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "request_too_large"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "execution_failed"
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "const": "uncertain_side_effects"
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "detail"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "uncertain"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "execution_failed"
+              },
+              "detail": {
+                "properties": {
+                  "reason": {
+                    "enum": [
+                      "handler_failed",
+                      "invalid_input",
+                      "invalid_handler_result",
+                      "guest_trapped",
+                      "instantiation_failed",
+                      "artifact_rejected",
+                      "artifact_unavailable",
+                      "memory_budget_exceeded",
+                      "fuel_exhausted",
+                      "host_call_budget_exceeded",
+                      "buffer_limit_exceeded",
+                      "internal_error"
+                    ]
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            },
+            "required": [
+              "code",
+              "detail"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "timeout"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "uncertain"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "cancelled"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "uncertain"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "busy"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "undeclared_import"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "not_found"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
+            "const": "non_retryable"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "failure"
+          },
+          "result": {
+            "properties": {
+              "code": {
+                "const": "stale_update"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "result"
+        ]
+      },
+      "then": {
+        "properties": {
+          "class": {
             "const": "non_retryable"
           }
         }

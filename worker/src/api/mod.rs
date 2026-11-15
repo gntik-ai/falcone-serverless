@@ -15,16 +15,17 @@ mod projection;
 mod refusal;
 mod request;
 mod result;
+mod service;
 mod types;
 mod wire;
 
 pub use messages::{CancelMessage, UpdateMessage};
 pub use projection::Projection;
-pub use refusal::Refusal;
+pub use refusal::{Class, Code, Reason, Refusal};
 pub use request::ExecuteRequest;
 pub use result::{ExecutionResult, Pinned};
+pub use service::{Ceilings, ExecutionLimits, Plan};
 
-use refusal::{Code, Reason};
 use serde::Deserialize;
 use std::fmt;
 use types::{Id, Positive};
@@ -164,6 +165,12 @@ pub fn parse_request(bytes: &[u8]) -> Result<ExecuteRequest, Rejection> {
             false => Rejection::Malformed(error.into()),
         }),
     }
+}
+
+/// Whether a message names a runtime mode, as a string, other than `wasm`. Only the one
+/// field is read, so it is cheap enough to answer while every execution slot is busy.
+pub fn refuses_runtime_mode(bytes: &[u8]) -> bool {
+    other_runtime_mode(bytes)
 }
 
 /// Whether the message names a runtime mode that is a string other than `wasm`.

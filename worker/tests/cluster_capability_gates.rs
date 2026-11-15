@@ -14,6 +14,9 @@ const QUALIFICATION_CHECK: &str = "capability_gates";
 const CLUSTER_TEST: &str = "cluster_capability_gates";
 const SKIP_EXPLICIT_REQUEST_WITHOUT_GATE: bool = false;
 
+/// This qualification runs no production image.
+const PRODUCTION_IMAGE_ENV: Option<&str> = None;
+
 include!("support/was02_cluster.rs");
 
 #[test]

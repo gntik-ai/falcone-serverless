@@ -6,6 +6,7 @@ use super::{
 };
 use crate::artifact::validate::HANDLER_EXPORT;
 use crate::cache::Loaded;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use wasmtime::component::{ComponentType, Lift, TypedFunc};
 use wasmtime::{CallHook, Store};
@@ -48,19 +49,29 @@ impl Prepared {
     pub fn new(loaded: &Loaded, host: Host) -> Result<Self, Execution> {
         let component = loaded.component();
         let engine = component.engine();
-        let deadline = Instant::now() + host.guest_duration();
+        // The execution's absolute deadline, fixed at admission when the caller set it; the
+        // duration form is only the local-command path with no admission step.
+        let deadline = host
+            .until()
+            .unwrap_or_else(|| Instant::now() + host.guest_duration());
+        let fuel = host.fuel();
         let mut store = Store::new(engine, host);
         let result = (|| {
             if !engine.get_epoch_interruption() {
                 return Err(error("epoch_interruption_required"));
             }
-            // The trusted engine enables fuel. Guest time is bounded by the
-            // invocation's epoch deadline, independently of compilation budgets.
-            store
-                .set_fuel(u64::MAX)
-                .map_err(|_| error("fuel_required"))?;
+            // The trusted engine enables fuel. The store gets the revision's fuel budget;
+            // the epoch deadline still applies independently.
+            store.set_fuel(fuel).map_err(|_| error("fuel_required"))?;
+            // No guest code, not even a start function, begins at or after the deadline.
+            if Instant::now() >= deadline || store.data().cancellation().load(Ordering::Acquire) {
+                return Err(error("deadline_exceeded"));
+            }
             let instance = runtime::instantiate_in_store(engine, component, &mut store, deadline)
-                .map_err(|_| error("instantiation_failed"))?;
+                .map_err(|trap| {
+                store.data().note_trap(&trap);
+                error("instantiation_failed")
+            })?;
             let (_, handler) = instance
                 .get_export(&mut store, None, HANDLER_EXPORT)
                 .ok_or_else(|| error("missing_handler_export"))?;
@@ -98,6 +109,17 @@ impl Prepared {
         }
     }
     pub fn call(mut self, params: &[u8]) -> Execution {
+        // The handler never starts at or after the deadline, or after a cancel.
+        if Instant::now() >= self.deadline
+            || self.store.data().cancellation().load(Ordering::Acquire)
+        {
+            return finish(
+                self.store.data(),
+                self.deadline,
+                Err(error("expired")),
+                None,
+            );
+        }
         if params.len() > self.store.data().output_limit() {
             self.store
                 .data()
@@ -127,6 +149,7 @@ impl Prepared {
                 )
             }
             Err(trap) => {
+                self.store.data().note_trap(&trap);
                 // 49.0.5 keeps HostcallFuelExhausted private. Match its exact,
                 // pinned engine diagnostic; never classify arbitrary guest text.
                 if trap.root_cause().to_string()
@@ -178,6 +201,8 @@ fn finish(
         InvocationOutcome::GuestInterrupted => Err(error("deadline_exceeded")),
         InvocationOutcome::GuestMemoryLimit => Err(error("guest_memory_limit_exceeded")),
         InvocationOutcome::BufferLimit => Err(error("buffer_limit_exceeded")),
+        InvocationOutcome::FuelExhausted => Err(error("fuel_exhausted")),
+        InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
     Execution { outcome, result }
@@ -187,7 +212,8 @@ pub fn execute(loaded: &Loaded, host: Host, params: &[u8]) -> Execution {
         host.record(&Err::<(), _>(HostError::LimitExceeded));
         return finish(
             &host,
-            Instant::now() + host.guest_duration(),
+            host.until()
+                .unwrap_or_else(|| Instant::now() + host.guest_duration()),
             Err(error("buffer_limit_exceeded")),
             None,
         );

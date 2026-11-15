@@ -12,6 +12,9 @@ const QUALIFICATION_FLAG: &str = "--guest-execute=echo";
 const QUALIFICATION_CHECK: &str = "guest_execute";
 const CLUSTER_TEST: &str = "cluster_guest_execute";
 const SKIP_EXPLICIT_REQUEST_WITHOUT_GATE: bool = true;
+/// This qualification runs no production image.
+const PRODUCTION_IMAGE_ENV: Option<&str> = None;
+
 include!("support/was02_cluster.rs");
 
 #[test]

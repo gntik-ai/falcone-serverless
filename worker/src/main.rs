@@ -2,11 +2,6 @@
 //!
 //! Explicit local handler execution; no runtime adapter or platform routing.
 
-// Dead code until the dispatcher adopts the execution API; the dispatcher issue that first
-// calls `api` removes this allowance.
-#[cfg_attr(not(test), allow(dead_code))]
-mod api;
-
 #[cfg_attr(not(test), allow(dead_code))]
 mod checkpoint;
 
@@ -56,7 +51,10 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
             let input = std::fs::read_to_string(path)
                 .map_err(|error| format!("read config {}: {error}", path.display()))?;
             let config = config::load_from_str(&input)?;
-            serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?
+            serde_json::to_string_pretty(&config.effective()?).map_err(|error| error.to_string())?
+        }
+        [command, path] if command == "serve" => {
+            return serve_command(std::path::Path::new(path));
         }
         [command, component, params] if command == "execute" => {
             return execute_command(component, params, None, stdout);
@@ -66,11 +64,41 @@ fn command(args: &[std::ffi::OsString], stdout: &mut dyn std::io::Write) -> Resu
         }
         _ => {
             return Err(
-                "usage: falcone-serverless-worker [--version | --check-config PATH | execute COMPONENT PARAMS [LIMITS]]".into(),
+                "usage: falcone-serverless-worker [--version | --check-config PATH | serve CONFIG | execute COMPONENT PARAMS [LIMITS]]".into(),
             );
         }
     };
     writeln!(stdout, "{output}").map_err(|error| error.to_string())
+}
+
+/// Serves the execution API: the execute listener on `listen_port` and the control listener
+/// on `control_port`. It returns only when the listeners cannot start.
+fn serve_command(path: &std::path::Path) -> Result<(), String> {
+    use falcone_serverless_worker::{api::Ceilings, server};
+    use std::net::{Ipv4Addr, SocketAddr};
+    let input = std::fs::read_to_string(path)
+        .map_err(|error| format!("read config {}: {error}", path.display()))?;
+    let config = config::load_from_str(&input)?;
+    let compiler = std::env::current_exe()
+        .map_err(|_| "compile_failed")?
+        .with_file_name("artifact-compile-child");
+    let server_config = server::ServerConfig::new(
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.listen_port)),
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, config.control_port())),
+        config.concurrency as usize,
+        Ceilings {
+            max_memory_bytes: config.max_memory_bytes,
+            max_wall_clock_ms: config.max_wall_clock_ms,
+        },
+        std::path::PathBuf::from(&config.cache_path),
+        compiler,
+    );
+    let platform = std::sync::Arc::new(server::LocalPlatform::new(config.artifact_path()));
+    let _server = server::Server::start(server_config, platform)
+        .map_err(|error| format!("start listeners: {error}"))?;
+    loop {
+        std::thread::park();
+    }
 }
 
 fn execute_command(

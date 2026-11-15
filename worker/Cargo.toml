@@ -16,6 +16,12 @@ workspace = true
 # Shared crates for the first contract tasks (#60, #65, #67, #100). The worker sandbox is
 # offline and only reads crates already in Cargo.lock, so they are added here once, at
 # reviewed versions released at least two weeks ago.
+# Test-only hooks (stalled stages, delay points, counters) exist only with this feature or
+# under cfg(test); a release build of the worker never contains them. The self dev-dependency
+# enables the feature for this package's own integration tests and nothing else.
+[features]
+qualification-hooks = []
+
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { workspace = true }
@@ -39,6 +45,7 @@ name = "compile-cache-qualification"
 path = "src/qualification/compile_cache_runner.rs"
 
 [dev-dependencies]
+falcone-serverless-worker = { path = ".", features = ["qualification-hooks"] }
 wat = "=1.258.3"
 wit-parser = "=0.262.0"
 # WAS-01 static checks (#115).
