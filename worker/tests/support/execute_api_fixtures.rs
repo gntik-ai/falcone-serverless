@@ -146,10 +146,15 @@ pub fn spin() -> Vec<u8> {
 
 /// A guest that logs `message` `times` times, then returns the legacy result.
 pub fn logging(message: &str, times: u32) -> Vec<u8> {
+    logging_then_returning(message, times, OK_JSON)
+}
+
+/// A guest that logs `message` `times` times, then returns `json` as its handler result.
+pub fn logging_then_returning(message: &str, times: u32, json: &str) -> Vec<u8> {
     guest(
         &["logging"],
         64,
-        &[(1024, OK_JSON), (2048, message)],
+        &[(1024, json), (2048, message)],
         &format!(
             "(local $i i32)
              (loop $again
@@ -158,7 +163,7 @@ pub fn logging(message: &str, times: u32) -> Vec<u8> {
                (br_if $again (i32.lt_u (local.get $i) (i32.const {times}))))
              {}",
             message.len(),
-            ret(OK_JSON.len())
+            ret(json.len())
         ),
     )
 }

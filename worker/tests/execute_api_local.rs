@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -314,6 +314,50 @@ fn a_wasm_execute_returns_the_legacy_envelope_with_the_runtime_identity() {
             .load(Ordering::Acquire),
         2
     );
+}
+
+#[test]
+fn an_invalid_handler_result_is_a_500_invalid_handler_result_that_keeps_its_logs() {
+    let harness = Harness::new(2);
+    // Each is JSON, so it is a handler result, but none is a valid legacy result.
+    for text in [
+        r#"{"statusCode":600}"#,
+        r#"{"statusCode":99,"body":"x"}"#,
+        r#"{"statusCode":"200"}"#,
+        r#"{"statusCode":200,"headers":{"a":1}}"#,
+        r#"{"statusCode":200,"extra":true}"#,
+    ] {
+        let digest = harness
+            .world
+            .add(&logging_then_returning("kept log line", 1, text));
+        let spec = Spec::new(&digest).with(|s| s.imports = vec!["logging"]);
+        let reply = harness.run(&spec);
+        assert_eq!(
+            code(&reply),
+            (
+                500,
+                "execution_failed".into(),
+                "invalid_handler_result".into()
+            ),
+            "{text}"
+        );
+        let result = reply.json();
+        assert_eq!(result["status"], "failure", "{text}");
+        assert_eq!(result["logs"], json!(["info kept log line"]), "{text}");
+        assert_eq!(result["class"], "non_retryable", "{text}");
+        assert_eq!(
+            result["identity"]["wasmtime_version"], WORKER_ENGINE,
+            "{text}"
+        );
+    }
+    // A valid result keeps HTTP 200, whatever its own statusCode.
+    let digest = harness
+        .world
+        .add(&logging_then_returning("ok", 1, r#"{"statusCode":201}"#));
+    let spec = Spec::new(&digest).with(|s| s.imports = vec!["logging"]);
+    let reply = harness.run(&spec);
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["result"]["statusCode"], 201);
 }
 
 // --- tests: refusal and admission order ---------------------------------------------------
@@ -1587,18 +1631,62 @@ fn a_slow_reader_of_a_large_response_is_cut_off_and_releases_its_permit() {
     }
     // Both executions finish (their slots are released before the response is written).
     assert!(harness.server.wait_running(0, LONG).is_some());
-    // Read one byte at a time, far slower than the response deadline allows.
-    for stream in &mut readers {
-        let mut byte = [0u8; 1];
-        stream.set_read_timeout(Some(LONG)).unwrap();
-        assert_eq!(stream.read(&mut byte).unwrap(), 1);
+    // Each client keeps reading, a few hundred bytes every ten milliseconds, so every write
+    // the server makes progresses within a small fraction of the response deadline. A
+    // deadline renewed per write would never expire for such a reader.
+    let stop = Arc::new(AtomicBool::new(false));
+    let (started_tx, started_rx) = mpsc::channel();
+    let handles: Vec<_> = readers
+        .into_iter()
+        .map(|mut stream| {
+            let stop = Arc::clone(&stop);
+            let started = started_tx.clone();
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 256];
+                let (mut total, mut reads) = (0usize, 0usize);
+                stream.set_read_timeout(Some(LONG)).unwrap();
+                while !stop.load(Ordering::Acquire) {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(count) => {
+                            if reads == 0 {
+                                let _ = started.send(());
+                            }
+                            total += count;
+                            reads += 1;
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Past the cut-off, what the server had queued is drained at full speed.
+                let mut rest = Vec::new();
+                let _ = stream.read_to_end(&mut rest);
+                (reads, total + rest.len())
+            })
+        })
+        .collect();
+    drop(started_tx);
+    // The response deadline runs from the first byte of the response written.
+    for _ in 0..2 {
+        started_rx.recv_timeout(LONG).expect("a response started");
     }
-    // The permits are released within the response deadline plus the budget, however slowly
-    // the clients read.
-    assert!(harness.server.wait_connections(
-        (0, 0),
-        Duration::from_millis(900) + BUDGET + Duration::from_secs(2)
-    ));
-    drop(readers);
+    // The permits are released at the one absolute response deadline, within the termination
+    // budget, although both clients are still reading with continuing progress.
+    assert!(
+        harness
+            .server
+            .wait_connections((0, 0), Duration::from_millis(900) + BUDGET),
+        "a slow reader held its permit past the absolute response deadline"
+    );
+    stop.store(true, Ordering::Release);
+    for handle in handles {
+        let (reads, total) = handle.join().unwrap();
+        assert!(reads >= 3, "the client was not reading: {reads} reads");
+        // The response was cut off: a maximum-size result carries over 8,000,000 bytes.
+        assert!(
+            total < 8_000_000,
+            "the whole response was delivered: {total}"
+        );
+    }
     recovered(&harness, "slow readers");
 }

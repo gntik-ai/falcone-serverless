@@ -121,13 +121,20 @@ impl ExecuteRequest {
     /// value is the body of a 200. A result that is not JSON or breaks the envelope is the
     /// failure `invalid_handler_result`.
     pub fn success(&self, handler: &[u8], logs: Vec<String>) -> (u16, Vec<u8>) {
-        match legacy_result(handler) {
-            Some(result) => (200, self.envelope("success", result, None, logs)),
-            None => self.failure(
-                Refusal::new(Code::ExecutionFailed, Reason::InvalidHandlerResult),
-                logs,
-            ),
+        // The status is chosen only after the success envelope validates, so a legacy-shaped
+        // result the contract refuses (a `statusCode` of 600, say) is never answered 200.
+        if let Some(result) = legacy_result(handler) {
+            let bytes = self
+                .subject()
+                .envelope("success", result, None, logs.clone());
+            if parse_result(&bytes, self).is_ok() {
+                return (200, bytes);
+            }
         }
+        self.failure(
+            Refusal::new(Code::ExecutionFailed, Reason::InvalidHandlerResult),
+            logs,
+        )
     }
 
     /// A failure envelope carrying the activation identity. `logs` must already be redacted.
@@ -140,6 +147,15 @@ impl ExecuteRequest {
         )
     }
 
+    fn subject(&self) -> Subject<'_> {
+        Subject {
+            activation_id: self.activation_id(),
+            attempt_id: self.attempt_id(),
+            attempt_number: self.attempt_number(),
+            projection: &self.projection,
+        }
+    }
+
     fn envelope(
         &self,
         status: &str,
@@ -147,12 +163,7 @@ impl ExecuteRequest {
         class: Option<Class>,
         logs: Vec<String>,
     ) -> Vec<u8> {
-        let subject = Subject {
-            activation_id: self.activation_id(),
-            attempt_id: self.attempt_id(),
-            attempt_number: self.attempt_number(),
-            projection: &self.projection,
-        };
+        let subject = self.subject();
         // The envelope the worker sends always validates against the request it answers.
         let bytes = subject.envelope(status, result, class, logs);
         if parse_result(&bytes, self).is_ok() {
