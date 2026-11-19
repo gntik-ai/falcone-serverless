@@ -1,0 +1,11 @@
+{
+  "source": "require('node:crypto')",
+  "packageManifest": "{}",
+  "expected": {
+    "code": "WASM-UNSUPPORTED-API",
+    "construct": "node:crypto API",
+    "source": 0,
+    "line": 1,
+    "column": 9
+  }
+}

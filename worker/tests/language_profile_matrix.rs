@@ -12,6 +12,8 @@ const DIAGNOSTICS: &[&str] = &[
     "WASM-GPU",
     "WASM-PROCESS-SPAWN",
     "WASM-INSTALL-HOOK",
+    "WASM-PACKAGE-NOT-IN-CATALOGUE",
+    "WASM-UNSUPPORTED-API",
 ];
 const EVIDENCE: &[&str] = &["compatibility", "adversarial", "leakage", "crashRecovery"];
 const VERSIONS: &[&str] = &[
@@ -387,6 +389,28 @@ fn language_profile_matrix_json_contract() {
             .is_valid(&no_evidence),
         "enabled-requires-evidence weakening witness"
     );
+}
+
+#[test]
+fn revision_two_requires_six_codes_and_accepts_no_wasi() {
+    let schema = schema();
+    let mut matrix = read_json(contracts().join("language-profile-matrix.json"));
+    assert_eq!(matrix["matrixVersion"], "2");
+    for language in LANGUAGES {
+        matrix["profiles"][*language]["wasiVersion"] = serde_json::json!("none");
+        validate(&schema, &matrix).unwrap();
+        for code in ["WASM-PACKAGE-NOT-IN-CATALOGUE", "WASM-UNSUPPORTED-API"] {
+            rejected(&schema, &format!("missing-{language}-{code}"), code);
+        }
+        for floating in ["*", "latest", "^0.2.0", ">=0.2.0", "0.2.x"] {
+            let mut copy = matrix.clone();
+            copy["profiles"][*language]["wasiVersion"] = serde_json::json!(floating);
+            assert!(validate(&schema, &copy).is_err());
+        }
+    }
+    let mut enabled = fixture("valid", "enabled-all-evidence");
+    enabled["profiles"]["javascript"]["wasiVersion"] = serde_json::json!("none");
+    validate(&schema, &enabled).unwrap();
 }
 
 #[test]

@@ -1,5 +1,5 @@
 {
-  "matrixVersion": "1",
+  "matrixVersion": "2",
   "profiles": {
     "javascript": {
       "id": "javascript-wasi-v1",
@@ -26,7 +26,9 @@
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",
         "WASM-PROCESS-SPAWN",
-        "WASM-INSTALL-HOOK"
+        "WASM-INSTALL-HOOK",
+        "WASM-PACKAGE-NOT-IN-CATALOGUE",
+        "WASM-UNSUPPORTED-API"
       ],
       "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
       "evidence": {}
@@ -44,7 +46,9 @@
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",
         "WASM-PROCESS-SPAWN",
-        "WASM-INSTALL-HOOK"
+        "WASM-INSTALL-HOOK",
+        "WASM-PACKAGE-NOT-IN-CATALOGUE",
+        "WASM-UNSUPPORTED-API"
       ],
       "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
       "evidence": {}

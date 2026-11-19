@@ -1,0 +1,11 @@
+{
+  "source": "navigator.gpu",
+  "packageManifest": "{}",
+  "expected": {
+    "code": "WASM-GPU",
+    "construct": "navigator.gpu",
+    "source": 0,
+    "line": 1,
+    "column": 1
+  }
+}

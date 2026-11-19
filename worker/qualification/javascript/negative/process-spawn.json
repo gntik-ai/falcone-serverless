@@ -1,0 +1,11 @@
+{
+  "source": "require('child_process')",
+  "packageManifest": "{}",
+  "expected": {
+    "code": "WASM-PROCESS-SPAWN",
+    "construct": "child_process",
+    "source": 0,
+    "line": 1,
+    "column": 9
+  }
+}

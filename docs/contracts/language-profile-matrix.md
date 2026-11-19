@@ -12,7 +12,7 @@ and the [AGENTS.md hard rules](../../AGENTS.md#hard-rules-design-6-do-not-relax-
 ## Versioning and compatibility
 
 `matrixVersion` identifies an immutable published matrix revision. It is a
-non-empty string; the initial revision is `1`. Publish a new revision whenever
+non-empty string; the current revision is `2` (superseding `1`). Publish a new revision whenever
 profile pins, capability ceilings, diagnostic meanings, evidence or lifecycle
 policy change. Consumers must pin a revision and explicitly revalidate before
 adopting another. Never silently reinterpret an existing revision or profile id.
@@ -21,7 +21,8 @@ migration. Diagnostic codes are stable after publication.
 
 Enabled profiles require exact versions in three-part version notation, with
 optional prerelease/build identifiers, for the runtime, WASI, toolchain and
-package catalogue. Ranges and floating aliases are rejected. Disabled profiles
+package catalogue. `wasiVersion` also accepts `none` for a component with no WASI imports.
+Ranges and floating aliases are rejected. Disabled profiles
 may use the literal `unqualified` for choices not yet made. The seeds' Wasmtime
 version is `49.0.5`, cross-checked against the workspace's exact dependency pin;
 this pin alone makes no language compatibility claim. A package catalogue
@@ -40,12 +41,12 @@ evidence object make the absence of qualification explicit.
 | `id` | Stable, unique language-profile identifier, independent of catalogue entries. |
 | `status` | `disabled` or `enabled`; evidence records use `pending`, `failed` or `passed`. |
 | `wasmtimeVersion` | Exact trusted engine version. |
-| `wasiVersion` | Exact WASI interface release qualified for this profile. |
+| `wasiVersion` | Exact WASI interface release, or `none` when no WASI is imported. |
 | `toolchainVersion` | Exact release of the chosen trusted language toolchain. Its identity is fixed by the profile id and qualification evidence. |
 | `packageCatalogueVersion` | Exact immutable package/version catalogue revision; no base-catalog dependency is introduced here. |
 | `allowedInterfaces` | Explicit, unique list of fully qualified WIT interface identifiers. |
 | `testedExamples` | Unique, non-empty example identifiers for representative qualified workloads; at least one is required for enablement. |
-| `diagnostics` | Unique stable codes covering every unsupported feature below. All four are mandatory per profile. |
+| `diagnostics` | Unique stable codes covering every unsupported feature below. All six are mandatory per profile. |
 | `eolPolicy` | Published support end and migration/retirement policy; an unqualified seed has no support window. |
 | `evidence` | Object containing qualification records, empty for these seeds. |
 | `compatibility` | Evidence of expected results and real dependency behavior for representative workloads. |
@@ -71,6 +72,8 @@ verified invocation grants and enforce scope, limits and cancellation.
 | `WASM-GPU` | A workload requires GPU/device access outside the declared WIT host. Reject qualification. |
 | `WASM-PROCESS-SPAWN` | A workload or package requires subprocess creation or an OS shell. Reject qualification. |
 | `WASM-INSTALL-HOOK` | A dependency requires an install hook, build script, Dockerfile or tenant-controlled installer execution. Reject qualification. |
+| `WASM-PACKAGE-NOT-IN-CATALOGUE` | A package or version is outside the pinned catalogue. Reject qualification without installing it. |
+| `WASM-UNSUPPORTED-API` | An unsupported module, API, dynamic load or toolchain construct. Reject qualification. |
 
 No diagnostic implies a native fallback. Diagnostics may name OCI as an explicit
 alternative, but must never select it or switch modes. OCI requires separate
@@ -113,11 +116,15 @@ human review must assess the policy and prose.
 | Python | `python-wasi-v1` | Disabled; no evidence or tested examples. |
 | Go | `go-wasi-v1` | Disabled; no evidence or tested examples. |
 
-Every committed seed is disabled, with an empty evidence object and empty
-capability ceiling. WASI and package catalogues remain unqualified. JavaScript
+Every committed seed is disabled, with an empty evidence object.
+Python and Go retain empty capability ceilings and unqualified WASI and catalogues. JavaScript
+records `wasiVersion: none` and exactly the eight imports of the WIT function world;
+its catalogue remains empty and unqualified. JavaScript
 records the operator-approved jco toolchain version `1.41.0`; the other language
 toolchains remain unqualified. Recording this pin does not qualify JavaScript.
 No profile is enabled and no real evidence is produced by this contract change.
+The [JavaScript qualification report](../qualification/profiles/javascript.md)
+records the blocked reference function and the evidence still required.
 Publication is merge-only; rollback is a revert until a later consumer pins a
 matrix revision.
 

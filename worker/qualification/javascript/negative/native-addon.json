@@ -1,0 +1,11 @@
+{
+  "source": "require('addon.node')",
+  "packageManifest": "{}",
+  "expected": {
+    "code": "WASM-NATIVE-LIBRARY",
+    "construct": ".node",
+    "source": 0,
+    "line": 1,
+    "column": 9
+  }
+}

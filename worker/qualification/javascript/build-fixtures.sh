@@ -9,6 +9,13 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TMPDIR/legacy-cargo}"
+mode=${1:-legacy}
+[[ "$mode" == legacy || "$mode" == --profile ]] || { echo 'expected legacy or --profile' >&2; exit 1; }
+if [[ "$mode" == --profile ]]; then
+    # The reference currently fails this source-only gate. No package installation,
+    # bundling shim or grammar relaxation is permitted to make it build.
+    cargo test --offline --locked -p falcone-serverless-worker --test profile_javascript -- --ignored --exact reference_is_build_eligible --nocapture
+fi
 
 # Verify the operator's exact archives, installed package versions and trusted-image git
 # receipt before executing the preinstalled tools. No npm, git, cargo install or extraction.
@@ -37,6 +44,26 @@ virt="$FS_TOOLCHAIN_CACHE/bin/wasi-virt"
 stage=$(mktemp -d "$TMPDIR/legacy-js.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
 mkdir "$stage/components"
+
+if [[ "$mode" == --profile ]]; then
+    "$node" "$jco" componentize worker/qualification/javascript/reference/actions/openapi-spec-serve.mjs --wit worker/wit/host.wit --world-name function --disable all -o "$stage/reference.raw.wasm"
+    "$virt" --deny-all "$stage/reference.raw.wasm" -o "$stage/components/reference.wasm"
+    FS_JS_PROFILE_COMPONENT="$stage/components/reference.wasm" cargo test --offline --locked -p falcone-serverless-worker --test profile_javascript -- --ignored --exact built_reference_imports --nocapture
+    mkdir -p "$FS_LEGACY_COMPONENTS/bin"
+    cp "$stage/components/reference.wasm" "$FS_LEGACY_COMPONENTS/"
+    cargo test --offline --locked -p falcone-serverless-worker --test cluster_profile_javascript --no-run --message-format=json > "$stage/build.jsonl"
+    python3 - "$stage/build.jsonl" "$FS_LEGACY_COMPONENTS/bin/profile-javascript" <<'PY'
+import json, pathlib, shutil, sys
+artifacts = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+tests = [a['executable'] for a in artifacts if a.get('target', {}).get('name') == 'cluster_profile_javascript' and a.get('executable')]
+if len(tests) != 1:
+    raise SystemExit('missing unique cluster_profile_javascript executable')
+shutil.copy2(tests[0], sys.argv[2])
+PY
+    cp "$CARGO_TARGET_DIR/debug/artifact-compile-child" "$FS_LEGACY_COMPONENTS/bin/"
+    (cd "$FS_LEGACY_COMPONENTS" && sha256sum reference.wasm bin/* > SHA256SUMS)
+    exit 0
+fi
 
 # Static checks precede componentization. Every source is synthetic; none is tenant input.
 cargo test --offline --locked -p falcone-serverless-worker --test compat_static

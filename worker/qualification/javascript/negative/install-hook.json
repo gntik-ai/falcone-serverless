@@ -1,0 +1,11 @@
+{
+  "source": "function main(params) { return null; }",
+  "packageManifest": "{\"scripts\":{\"postinstall\":\"synthetic\"}}",
+  "expected": {
+    "code": "WASM-INSTALL-HOOK",
+    "construct": "lifecycle script",
+    "source": 1,
+    "line": 1,
+    "column": 2
+  }
+}

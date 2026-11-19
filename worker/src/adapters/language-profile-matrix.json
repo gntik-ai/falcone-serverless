@@ -1,20 +1,31 @@
 {
-  "matrixVersion": "1",
+  "matrixVersion": "2",
   "profiles": {
     "javascript": {
       "id": "javascript-wasi-v1",
       "status": "disabled",
       "wasmtimeVersion": "49.0.5",
-      "wasiVersion": "unqualified",
+      "wasiVersion": "none",
       "toolchainVersion": "1.41.0",
       "packageCatalogueVersion": "unqualified",
-      "allowedInterfaces": [],
+      "allowedInterfaces": [
+        "falcone:host/storage@0.2.0",
+        "falcone:host/http@0.2.0",
+        "falcone:host/events@0.2.0",
+        "falcone:host/workflows@0.2.0",
+        "falcone:host/logging@0.2.0",
+        "falcone:host/cancellation@0.2.0",
+        "falcone:host/progress@0.2.0",
+        "falcone:host/invocation-context@0.2.0"
+      ],
       "testedExamples": [],
       "diagnostics": [
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",
         "WASM-PROCESS-SPAWN",
-        "WASM-INSTALL-HOOK"
+        "WASM-INSTALL-HOOK",
+        "WASM-PACKAGE-NOT-IN-CATALOGUE",
+        "WASM-UNSUPPORTED-API"
       ],
       "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
       "evidence": {}
@@ -32,7 +43,9 @@
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",
         "WASM-PROCESS-SPAWN",
-        "WASM-INSTALL-HOOK"
+        "WASM-INSTALL-HOOK",
+        "WASM-PACKAGE-NOT-IN-CATALOGUE",
+        "WASM-UNSUPPORTED-API"
       ],
       "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
       "evidence": {}
@@ -50,7 +63,9 @@
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",
         "WASM-PROCESS-SPAWN",
-        "WASM-INSTALL-HOOK"
+        "WASM-INSTALL-HOOK",
+        "WASM-PACKAGE-NOT-IN-CATALOGUE",
+        "WASM-UNSUPPORTED-API"
       ],
       "eolPolicy": "Unqualified; no support window. Publish an EOL date and migration window before enablement.",
       "evidence": {}

@@ -31,3 +31,18 @@ version = "v26.13.0"
 source = "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz"
 archive = "node-v26.13.0-linux-x64.tar.xz"
 sha256 = "d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997"
+
+[wasmtime]
+version = "49.0.5"
+
+[wit]
+name = "falcone:host"
+version = "0.2.0"
+
+[wasi]
+version = "none"
+
+[catalogue]
+revision = "unqualified"
+# The current compatibility checker accepts no third-party packages or local modules.
+packages = {}

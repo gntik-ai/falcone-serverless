@@ -1,0 +1,101 @@
+{
+  "id": "javascript-wasi-v1",
+  "runtime_mode": "wasm",
+  "checks": {
+    "pins": true,
+    "interfaces": true,
+    "sourceHashes": true,
+    "compatibility": false,
+    "sourceClosure": false,
+    "componentImports": false,
+    "negativeFixtures": true,
+    "envelopeInventory": true
+  },
+  "diagnostics": {
+    "bundle": [
+      {
+        "code": "WASM-UNSUPPORTED-API",
+        "construct": "source bundle",
+        "source": 0,
+        "line": 1,
+        "column": 1
+      }
+    ],
+    "files": {
+      "actions/openapi-spec-serve.mjs": [
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 1,
+          "column": 16
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 2,
+          "column": 23
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 3,
+          "column": 24
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 4,
+          "column": 32
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 5,
+          "column": 43
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 6,
+          "column": 34
+        }
+      ],
+      "src/config.mjs": [
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 1,
+          "column": 41
+        }
+      ],
+      "src/spec-cache.mjs": [
+        {
+          "code": "WASM-UNSUPPORTED-API",
+          "construct": "unresolved syntax",
+          "source": 0,
+          "line": 8,
+          "column": 12
+        }
+      ],
+      "src/spec-version-repo.mjs": [
+        {
+          "code": "WASM-UNSUPPORTED-API",
+          "construct": "unresolved syntax",
+          "source": 0,
+          "line": 1,
+          "column": 23
+        }
+      ]
+    }
+  },
+  "cluster": "UNVERIFIED",
+  "envelopes": [],
+  "verdict": "blocked"
+}

@@ -1,0 +1,251 @@
+{
+  "id": "javascript-wasi-v1",
+  "pinsFile": "versions.toml",
+  "pins": {
+    "engine": "StarlingMonkey",
+    "qualification_status": "disabled",
+    "jco": {
+      "name": "@bytecodealliance/jco",
+      "version": "1.41.0",
+      "source": "https://registry.npmjs.org/@bytecodealliance/jco/-/jco-1.41.0.tgz",
+      "archive": "jco-1.41.0.tgz",
+      "sha256": "abe7ab13d0fb1b6ecc6f7d3fffd6ff27862d158936a11d6f48bcb0ada00af4c6",
+      "integrity": "sha512-hsl9PEj5kOQLMsUhMqaho6yYooQ8SqULjPCuUuUSXu0D3huVQKFwmbUH0B9JTBpLPZPuJJNfnpKnZx6rV53VOA=="
+    },
+    "componentize_js": {
+      "name": "@bytecodealliance/componentize-js",
+      "version": "0.23.0",
+      "source": "https://registry.npmjs.org/@bytecodealliance/componentize-js/-/componentize-js-0.23.0.tgz",
+      "archive": "componentize-js-0.23.0.tgz",
+      "sha256": "b2e4b6fdee055805370950f127c21d7c549dcc7a1e907f20c5ee769ebba7ad10",
+      "integrity": "sha512-Qc2+lrwJHU7lq4CBMyVVYE8ASyUFeegMYdRnMVG0wNpNiATzGDF/mWpjDNTeVZeT8L9chhK3vuLaQE9FVANvfw=="
+    },
+    "wasi_virt": {
+      "name": "wasi-virt",
+      "version": "0.2.0",
+      "source": "https://github.com/bytecodealliance/WASI-Virt",
+      "rev": "bca61c27499d2c290b5431cfcff013737b3ba01d"
+    },
+    "node": {
+      "name": "Node.js",
+      "version": "v26.13.0",
+      "source": "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz",
+      "archive": "node-v26.13.0-linux-x64.tar.xz",
+      "sha256": "d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997"
+    },
+    "wasmtime": {
+      "version": "49.0.5"
+    },
+    "wit": {
+      "name": "falcone:host",
+      "version": "0.2.0"
+    },
+    "wasi": {
+      "version": "none"
+    },
+    "catalogue": {
+      "revision": "unqualified",
+      "packages": {}
+    }
+  },
+  "runtime_mode": "wasm",
+  "verdict": "blocked",
+  "allowedInterfaces": [
+    "falcone:host/storage@0.2.0",
+    "falcone:host/http@0.2.0",
+    "falcone:host/events@0.2.0",
+    "falcone:host/workflows@0.2.0",
+    "falcone:host/logging@0.2.0",
+    "falcone:host/cancellation@0.2.0",
+    "falcone:host/progress@0.2.0",
+    "falcone:host/invocation-context@0.2.0"
+  ],
+  "diagnostics": [
+    "WASM-NATIVE-LIBRARY",
+    "WASM-GPU",
+    "WASM-PROCESS-SPAWN",
+    "WASM-INSTALL-HOOK",
+    "WASM-PACKAGE-NOT-IN-CATALOGUE",
+    "WASM-UNSUPPORTED-API"
+  ],
+  "negativeFixtures": [
+    "negative/native-addon.json",
+    "negative/process-spawn.json",
+    "negative/install-hook.json",
+    "negative/gpu.json",
+    "negative/package.json",
+    "negative/unsupported-api.json"
+  ],
+  "reference": {
+    "repository": "gntik-ai/falcone",
+    "revision": "10a3c6e7a23c9a29b934c35f0682bbdef232099f",
+    "entrypoint": "actions/openapi-spec-serve.mjs",
+    "sources": [
+      {
+        "path": "actions/openapi-spec-serve.mjs",
+        "sha256": "3827f5e2c7c14cc3cf5abb4eb8272d8cb67938dc4d195723efcf695bf8924ce1"
+      },
+      {
+        "path": "src/config.mjs",
+        "sha256": "749d3fefde37945e57607ae462a6a55ee193181c898ae4bbbd641f1dae0a30e5"
+      },
+      {
+        "path": "src/spec-version-repo.mjs",
+        "sha256": "5b13e9bd885954900ddf1d4e2d7b780d5e46d73e09074b31bdf5aa013f5de437"
+      },
+      {
+        "path": "src/spec-cache.mjs",
+        "sha256": "74883a947b993384a4fe3fd697e7cf4f73bdb2f36ac688ec4303bea43d17e2dc"
+      }
+    ],
+    "missingSources": [
+      "src/network.mjs",
+      "src/spec-audit.mjs"
+    ]
+  },
+  "component": null,
+  "clusterEvidence": null,
+  "envelopes": [
+    {
+      "id": "401",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/401.json",
+      "expectedCalls": []
+    },
+    {
+      "id": "400",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/400.json",
+      "expectedCalls": []
+    },
+    {
+      "id": "429",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/429.json",
+      "expectedCalls": []
+    },
+    {
+      "id": "404",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/404.json",
+      "expectedCalls": [
+        "storage.read"
+      ]
+    },
+    {
+      "id": "403",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/403.json",
+      "expectedCalls": [
+        "storage.read"
+      ]
+    },
+    {
+      "id": "304",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/304.json",
+      "expectedCalls": [
+        "storage.read"
+      ]
+    },
+    {
+      "id": "200-json",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/200-json.json",
+      "expectedCalls": [
+        "storage.read",
+        "events.publish"
+      ]
+    },
+    {
+      "id": "200-yaml",
+      "fixture": "../../../docs/contracts/fixtures/legacy-envelope/valid/200-yaml.json",
+      "expectedCalls": [
+        "storage.read",
+        "events.publish"
+      ]
+    }
+  ],
+  "referenceDiagnostics": {
+    "bundle": [
+      {
+        "code": "WASM-UNSUPPORTED-API",
+        "construct": "source bundle",
+        "source": 0,
+        "line": 1,
+        "column": 1
+      }
+    ],
+    "files": {
+      "actions/openapi-spec-serve.mjs": [
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 1,
+          "column": 16
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 2,
+          "column": 23
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 3,
+          "column": 24
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 4,
+          "column": 32
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 5,
+          "column": 43
+        },
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 6,
+          "column": 34
+        }
+      ],
+      "src/config.mjs": [
+        {
+          "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+          "construct": "package import",
+          "source": 0,
+          "line": 1,
+          "column": 41
+        }
+      ],
+      "src/spec-cache.mjs": [
+        {
+          "code": "WASM-UNSUPPORTED-API",
+          "construct": "unresolved syntax",
+          "source": 0,
+          "line": 8,
+          "column": 12
+        }
+      ],
+      "src/spec-version-repo.mjs": [
+        {
+          "code": "WASM-UNSUPPORTED-API",
+          "construct": "unresolved syntax",
+          "source": 0,
+          "line": 1,
+          "column": 23
+        }
+      ]
+    }
+  },
+  "staticEvidence": {
+    "path": "evidence/static.json",
+    "artifactId": "repo:worker/qualification/javascript/evidence/static.json",
+    "sha256": "c4332a154081257dd0e50a869fd1b26afc5aedc3932a478aeeb973dc7bca951c"
+  }
+}

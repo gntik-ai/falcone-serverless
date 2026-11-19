@@ -1,0 +1,11 @@
+{
+  "source": "require('unlisted-package')",
+  "packageManifest": "{}",
+  "expected": {
+    "code": "WASM-PACKAGE-NOT-IN-CATALOGUE",
+    "construct": "package import",
+    "source": 0,
+    "line": 1,
+    "column": 9
+  }
+}
