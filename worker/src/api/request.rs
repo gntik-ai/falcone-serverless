@@ -136,6 +136,13 @@ pub struct ExecuteRequest {
 redacted!(ExecuteRequest);
 
 impl Credential {
+    /// Read-only adapter guard; claims never leave the host binding layer.
+    pub(super) fn matches_context(&self, context: &crate::host::Context, revision: &str) -> bool {
+        self.tenant.as_str() == context.tenant
+            && self.workspace.as_str() == context.workspace
+            && self.revision.as_str() == revision
+    }
+
     /// Every claim string. These are the values redaction must keep out of any output.
     fn secrets(&self) -> Vec<String> {
         let mut out: Vec<String> = [

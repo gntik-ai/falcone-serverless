@@ -69,7 +69,20 @@ pub struct Plan {
     pub request_deadline_millis: u64,
 }
 
+impl Plan {
+    /// The adapter consumes the already verified credential, without changing the wire API.
+    pub(crate) fn context_matches_credential(&self) -> bool {
+        serde_json::from_str::<super::request::Credential>(&self.credential)
+            .is_ok_and(|credential| credential.matches_context(&self.context, &self.revision))
+    }
+}
+
 impl ExecuteRequest {
+    /// The pinned profile, for the adapter registry; never taken from guest params.
+    pub(crate) fn language_profile_name(&self) -> &str {
+        self.projection.language_profile.name()
+    }
+
     pub fn plan(&self) -> Plan {
         Plan {
             activation_id: self.activation_id().as_str().to_owned(),

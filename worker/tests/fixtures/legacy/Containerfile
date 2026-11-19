@@ -1,0 +1,26 @@
+# Operator builds this only in the offline trusted compiler image with its prefilled crates.
+# Supply a reviewed digest-pinned image; there is deliberately no floating default.
+ARG TRUSTED_COMPILER_IMAGE
+FROM ${TRUSTED_COMPILER_IMAGE} AS build
+WORKDIR /build
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY compiler/Cargo.toml compiler/Cargo.toml
+COPY compiler/src compiler/src
+COPY worker/Cargo.toml worker/Cargo.toml
+COPY worker/src worker/src
+COPY worker/tests worker/tests
+COPY worker/qualification/javascript worker/qualification/javascript
+COPY docs/contracts docs/contracts
+RUN cargo test --offline --locked --release -p falcone-serverless-worker --test compat_static --no-run --message-format=json > /build/suites.json \
+    && python3 -c 'import json, shutil; a=[j["executable"] for l in open("/build/suites.json") if (j:=json.loads(l)).get("executable") and j.get("target",{}).get("name")=="compat_static"]; assert len(a)==1; shutil.copyfile(a[0],"/build/legacy-suite")'
+RUN cargo build --offline --locked --release -p falcone-serverless-worker --bin artifact-compile-child --message-format=json > /build/child.json \
+    && python3 -c 'import json, shutil; a=[j["executable"] for l in open("/build/child.json") if (j:=json.loads(l)).get("executable") and j.get("target",{}).get("name")=="artifact-compile-child"]; assert len(a)==1; shutil.copyfile(a[0],"/build/artifact-compile-child")'
+
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
+COPY --from=build --chmod=0555 /build/legacy-suite /usr/local/bin/compile-cache-qualification
+COPY --from=build --chmod=0555 /build/artifact-compile-child /usr/local/bin/artifact-compile-child
+# The operator stages only build.py's verified output at components/ in the build context.
+COPY --chmod=0555 components/ /opt/legacy-components/
+ENV FS_TOOLCHAIN_CACHE=/opt/legacy-components FS_LEGACY_COMPONENTS=/opt/legacy-components RUST_TEST_NOCAPTURE=1 RUST_TEST_THREADS=1
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/compile-cache-qualification", "--ignored"]

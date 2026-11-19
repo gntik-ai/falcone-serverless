@@ -1,0 +1,9 @@
+{
+  "success": {"http_status": 200, "status": "success", "result": {"statusCode": 200, "body": {"ok": true}}, "logs": ["handler started", "handler finished"]},
+  "throw": {"http_status": 500, "status": "failure", "reason": "handler_failed", "logs": ["handler started", "handler finished"]},
+  "reject": {"http_status": 500, "status": "failure", "reason": "handler_failed", "logs": ["handler started", "handler finished"]},
+  "identity": {"http_status": 200, "status": "success", "result": {"statusCode": 200, "body": {"invocation_key": "inv-0000007", "attempt_id": "att-synthetic-0001", "idempotency_key": "idem-0000007"}}, "logs": []},
+  "forged-tenant": {"http_status": 500, "status": "failure", "reason": "handler_failed", "logs": []},
+  "forged-workspace": {"http_status": 500, "status": "failure", "reason": "handler_failed", "logs": []},
+  "guessed-handle": {"http_status": 500, "status": "failure", "reason": "handler_failed", "logs": []}
+}

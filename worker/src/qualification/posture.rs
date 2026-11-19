@@ -15,6 +15,9 @@ pub mod cache;
 #[path = "../api/mod.rs"]
 pub mod api;
 
+#[path = "../adapters/mod.rs"]
+pub mod adapters;
+
 #[path = "../server/mod.rs"]
 pub mod server;
 

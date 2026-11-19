@@ -43,6 +43,12 @@ pub struct LanguageProfile {
 }
 redacted!(LanguageProfile);
 
+impl LanguageProfile {
+    pub(super) fn name(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Budgets {
