@@ -52,6 +52,106 @@ impl Bindings for Platform {
 }
 
 #[test]
+fn host_storage_scope_denials_reach_the_adapter_as_inventory_failures() {
+    struct Storage(AtomicUsize);
+    impl Bindings for Storage {
+        fn call(&self, context: &Context, operation: Operation) -> Result<Reply, HostError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(context.tenant, "tenant-synthetic-0001");
+            assert_eq!(context.workspace, "ws-synthetic-0001");
+            match operation {
+                Operation::Read { key, .. } if key == "tenants/synthetic/good" => {
+                    Ok(Reply::Data(vec![]))
+                }
+                _ => panic!("unauthorized input reached platform bindings"),
+            }
+        }
+    }
+    let directory = std::env::temp_dir().join(format!("legacy-host-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let scratch = Scratch(directory);
+    let mut compiler =
+        cache::Cache::new(&scratch.0, env!("CARGO_BIN_EXE_artifact-compile-child")).unwrap();
+    let bytes = wat::parse_str(include_str!("fixtures/legacy/host-storage.wat")).unwrap();
+    let loaded = compiler
+        .compile(
+            cache::CONTRACT_VERSION,
+            &bytes,
+            CompileLimits {
+                input_bytes: 64 * 1024 * 1024,
+                cpu_seconds: 120,
+                memory_bytes: 4 * 1024 * 1024 * 1024,
+                wall_clock_deadline: Instant::now() + Duration::from_secs(300),
+            },
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let expected: Value =
+        serde_json::from_str(include_str!("fixtures/legacy/expected.json")).unwrap();
+    for (key, allowed) in [
+        ("tenants/synthetic/good", true),
+        ("tenants/forged-tenant/object", false),
+        ("workspaces/forged-workspace/object", false),
+    ] {
+        let mut wire: Value = serde_json::from_str(include_str!(
+            "fixtures/contract/request/valid/wasm-no-base.json"
+        ))
+        .unwrap();
+        wire["projection"]["artifact_digest"] =
+            json!(format!("sha256:{:x}", Sha256::digest(&bytes)));
+        wire["projection"]["imports"] = json!(["falcone:host/storage@0.2.0"]);
+        wire["params"]["key"] = json!(key);
+        let request = api::parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        let context = request.plan().context;
+        let storage = Arc::new(Storage(AtomicUsize::new(0)));
+        let (status, response) = javascript::qualify(
+            &request,
+            Some(&context),
+            include_str!("fixtures/legacy/denied.js"),
+            "{}",
+            |input| {
+                let params: Value = serde_json::from_slice(&input.params).unwrap();
+                // This WAT probe drives the same WIT storage interface as denied.js.
+                // It receives the key directly; it does not exercise JS packet decoding.
+                let execution = host::execute(
+                    &loaded,
+                    host::Host::new(input.context, storage.clone()),
+                    params["key"].as_str().unwrap().as_bytes(),
+                );
+                if !allowed {
+                    // The guest returns this only after observing host-error.denied.
+                    // Traps, instantiation failures and other host errors cannot pass.
+                    assert_eq!(
+                        execution.result.as_ref().unwrap_err().code,
+                        "handler_failed"
+                    );
+                }
+                javascript::Outcome::from_execution(execution, vec![])
+            },
+        )
+        .unwrap();
+        assert_eq!(storage.0.load(Ordering::Relaxed), usize::from(allowed));
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        if allowed {
+            assert_eq!(status, 200);
+            assert_eq!(response["status"], "success");
+            assert_eq!(response["result"], json!({"statusCode":200,"body":true}));
+        } else {
+            assert_eq!(status, 500);
+            assert_eq!(response["status"], "failure");
+            oracle::compare(
+                &serde_json::to_vec(&response["result"]).unwrap(),
+                &serde_json::to_vec(&expected["error"]).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            assert!(!response.to_string().contains("forged-"));
+        }
+    }
+}
+
+#[test]
 #[ignore = "UNVERIFIED: requires FS_TOOLCHAIN_CACHE and trusted-image-built JS components"]
 fn built_legacy_components() {
     let Some(cache_root) = std::env::var_os("FS_TOOLCHAIN_CACHE") else {

@@ -153,7 +153,10 @@ fn request() -> ExecuteRequest {
 
 #[test]
 fn disabled_registry_refuses_supported_sources_before_instantiation() {
-    let request = request();
+    let mut wire = serde_json::to_value(request()).unwrap();
+    wire["projection"]["language_profile"] =
+        json!({"name":"javascript-wasi-v1","version":"1.41.0"});
+    let request = api::parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
     let context = request.plan().context;
     let starts = std::cell::Cell::new(0);
     let error = Registry
@@ -180,6 +183,36 @@ fn disabled_registry_refuses_supported_sources_before_instantiation() {
     let response: Value = serde_json::from_slice(&response).unwrap();
     assert_eq!(response["status"], "failure");
     assert_eq!(response["result"]["detail"]["reason"], "artifact_rejected");
+}
+
+#[test]
+fn registry_refuses_mismatched_profile_pins_before_instantiation() {
+    for (name, version) in [
+        ("other-profile", "1.41.0"),
+        ("javascript-wasi-v1", "unqualified"),
+        ("other-profile", "unqualified"),
+    ] {
+        let mut wire = serde_json::to_value(request()).unwrap();
+        wire["projection"]["language_profile"] = json!({"name":name,"version":version});
+        let request = api::parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        let context = request.plan().context;
+        let error = Registry
+            .invoke(
+                &request,
+                Some(&context),
+                include_str!("fixtures/legacy/success.js"),
+                "{}",
+                |_| panic!("an unpinned profile must not start a guest"),
+            )
+            .unwrap_err();
+        assert_eq!(error.message, "javascript qualification missing");
+        let (status, response) = error.response(&request);
+        assert_eq!(status, 500);
+        api::parse_result(&response, &request).unwrap();
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["status"], "failure");
+        assert_eq!(response["result"]["detail"]["reason"], "artifact_rejected");
+    }
 }
 
 #[test]
@@ -250,8 +283,6 @@ fn failed_executor_outcomes_match_inventory_without_exception_details() {
     for source in [
         include_str!("fixtures/legacy/throw.js"),
         include_str!("fixtures/legacy/reject.js"),
-        include_str!("fixtures/legacy/denied.js"),
-        include_str!("fixtures/legacy/guessed.js"),
     ] {
         let (status, response) =
             javascript::qualify(&request, Some(&context), source, "{}", |_| {
@@ -329,8 +360,41 @@ fn adapter_maps_raw_handler_values_to_legacy_results_and_preserves_log_order() {
 fn adapter_preserves_inventoried_legacy_shaped_results_and_ordered_logs() {
     let request = request();
     let context = request.plan().context;
-    for name in [
-        "200-json", "200-yaml", "304", "400", "401", "403", "404", "429",
+    // Independently specified executor outputs, never the inventory's expected value.
+    // Null optional fields and reordered fields exercise the adapter's normalization.
+    for (name, raw) in [
+        (
+            "200-json",
+            r#"{"body":"{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"Synthetic workspace API\",\"version\":\"1.0.0\"},\"paths\":{}}","headers":{"Cache-Control":"max-age=60, must-revalidate","X-Spec-Version":"1.0.0","ETag":"\"sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32\"","Content-Type":"application/json"},"statusCode":200}"#,
+        ),
+        (
+            "200-yaml",
+            r#"{"body":"openapi: 3.0.3\ninfo:\n  title: Synthetic workspace API\n  version: 1.0.0\npaths: {}\n","headers":{"Cache-Control":"max-age=60, must-revalidate","X-Spec-Version":"1.0.0","ETag":"\"sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32\"","Content-Type":"application/x-yaml"},"statusCode":200}"#,
+        ),
+        (
+            "304",
+            r#"{"body":null,"headers":{"ETag":"\"sha256:002ce259e8f4f989d9fb469c3023a00f2544a739fe6971a1ea1bb7b7009d9a32\""},"statusCode":304}"#,
+        ),
+        (
+            "400",
+            r#"{"headers":null,"body":{"message":"workspaceId missing from path","code":"INVALID_PATH"},"statusCode":400}"#,
+        ),
+        (
+            "401",
+            r#"{"headers":null,"body":{"message":"Authentication required","code":"UNAUTHORIZED"},"statusCode":401}"#,
+        ),
+        (
+            "403",
+            r#"{"headers":null,"body":{"message":"Workspace tenant mismatch","code":"FORBIDDEN"},"statusCode":403}"#,
+        ),
+        (
+            "404",
+            r#"{"headers":null,"body":{"message":"No OpenAPI spec available for workspace","code":"SPEC_NOT_FOUND"},"statusCode":404}"#,
+        ),
+        (
+            "429",
+            r#"{"headers":{"Retry-After":"60"},"body":{"message":"Too many requests","code":"RATE_LIMITED"},"statusCode":429}"#,
+        ),
     ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
             "../docs/contracts/fixtures/legacy-envelope/valid/{name}.json"
@@ -343,7 +407,7 @@ fn adapter_preserves_inventoried_legacy_shaped_results_and_ordered_logs() {
             include_str!("fixtures/legacy/success.js"),
             "{}",
             |_| javascript::Outcome {
-                result: Ok(expected.clone()),
+                result: Ok(raw.as_bytes().to_vec()),
                 logs: vec!["first".into(), "second".into()],
             },
         )
@@ -619,6 +683,115 @@ fn diagnostics_cover_the_operator_taxonomy_without_selecting_another_mode() {
         );
         assert!(!format!("{verdict:?}").to_lowercase().contains("oci"));
         assert!(!format!("{verdict:?}").contains("hidden"));
+    }
+}
+
+#[test]
+fn feature_diagnostics_survive_ordinary_operators() {
+    for (expression, code, construct, column) in [
+        ("require('addon.node')", "WASM-NATIVE-LIBRARY", ".node", 9),
+        (
+            "process.dlopen(x)",
+            "WASM-NATIVE-LIBRARY",
+            "process.dlopen",
+            1,
+        ),
+        (
+            "require('child_process')",
+            "WASM-PROCESS-SPAWN",
+            "child_process",
+            9,
+        ),
+        (
+            "require('worker_threads')",
+            "WASM-PROCESS-SPAWN",
+            "worker_threads",
+            9,
+        ),
+        ("require('cluster')", "WASM-PROCESS-SPAWN", "cluster", 9),
+        ("navigator.gpu", "WASM-GPU", "navigator.gpu", 1),
+        (
+            "require('unknown-package')",
+            "WASM-PACKAGE-NOT-IN-CATALOGUE",
+            "package import",
+            9,
+        ),
+        (
+            "require('node:fs')",
+            "WASM-UNSUPPORTED-API",
+            "node module",
+            9,
+        ),
+        (
+            "require('node:crypto').randomBytes(4)",
+            "WASM-UNSUPPORTED-API",
+            "node:crypto API",
+            9,
+        ),
+        ("eval(params.code)", "WASM-UNSUPPORTED-API", "eval", 1),
+        (
+            "new Function(params.code)",
+            "WASM-UNSUPPORTED-API",
+            "new Function",
+            1,
+        ),
+        (
+            "require(params.module)",
+            "WASM-UNSUPPORTED-API",
+            "dynamic require",
+            1,
+        ),
+        (
+            "import(params.module)",
+            "WASM-UNSUPPORTED-API",
+            "dynamic import",
+            1,
+        ),
+    ] {
+        for ordinary in [
+            "const value = 'ls ' + params.x;",
+            "const f = (x) => x;",
+            "if (!params.addon) {}",
+            "const value = params.a > params.b;",
+            "const value = params.a || 1;",
+            "const value = 1+2;",
+            "const value = 1-2;",
+            "const value = params.a * 2 / 3 % 4;",
+        ] {
+            // Exercise operators both before and after the feature, with literal locations.
+            for (source, line) in [
+                (format!("{expression};\n{ordinary}"), 1),
+                (format!("{ordinary}\n{expression};"), 2),
+            ] {
+                let verdict = check(&[Source { text: &source }], "{}");
+                assert!(!verdict.supported());
+                assert!(
+                    verdict.diagnostics().iter().any(|diagnostic| {
+                        (
+                            diagnostic.code,
+                            diagnostic.construct,
+                            diagnostic.source,
+                            diagnostic.line,
+                            diagnostic.column,
+                        ) == (code, construct, 0, line, column)
+                    }),
+                    "{source}: {verdict:?}"
+                );
+                assert!(!format!("{verdict:?}").to_lowercase().contains("oci"));
+            }
+        }
+    }
+    // Tokenizing operators for diagnostics must not qualify any additional expressions.
+    for expression in [
+        "params.a + 1",
+        "!params.a",
+        "params.a > 1",
+        "params.a || 1",
+        "1+2",
+        "1-2",
+    ] {
+        let source = format!("function main(params) {{ return {expression}; }}");
+        assert!(!check(&[Source { text: &source }], "{}").supported());
     }
 }
 

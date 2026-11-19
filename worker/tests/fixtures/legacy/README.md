@@ -2,10 +2,10 @@
 
 The fixtures contain no captured tenant data. `expected.json` uses the frozen legacy
 handler and execution-failure shapes in the contract inventory and worker execution API.
-No field or log prefix is implicitly variable. `compat_static` also compares all eight
-inventoried legacy result fixtures directly against the adapter output, and checks raw
-executor outputs against independently specified legacy envelope mappings. Those offline
-tests stub the executor boundary; only the gated component suite executes the JS wrapper.
+No field or log prefix is implicitly variable. `compat_static` supplies independently
+specified raw executor outputs and compares the normalized adapter results with all eight
+inventoried legacy result fixtures. These tests stub the executor boundary; only the gated
+component suite executes the JS wrapper.
 
 The checker intentionally accepts a closed subset: a single main definition, JSON values,
 read-only params/context fields, single-literal console.log, throw/rejection, the two allowed Web Crypto
@@ -42,6 +42,13 @@ WIT requires a borrowed object resource, so it may fail during guest resource lo
 Its error envelope and absence of platform calls demonstrate boundary rejection, not
 evidence that a guessed handle reached and was denied by the host. Host-side handle
 enforcement remains SEC-03's separate qualification responsibility.
+
+The offline `legacy_runtime::host_storage_scope_denials_reach_the_adapter_as_inventory_failures`
+test also runs a WAT probe (`host-storage.wat`) through the real WIT storage host and the
+adapter. An authorized read succeeds and reaches the platform binding; forged tenant and
+workspace paths receive `host-error.denied`, reach no platform binding, and become the
+inventoried failure envelope. It verifies host denial and adapter error mapping without a
+JS toolchain; it does not qualify the JS wrapper or guessed-resource lowering.
 
 For the cluster qualification image, copy bin/legacy-runtime and bin/artifact-compile-child
 to /usr/local/bin, and the raw components to /opt/falcone-toolchain-cache/legacy. Supply this

@@ -44,14 +44,16 @@ impl Registry {
         let matrix: serde_json::Value = serde_json::from_str(MATRIX)
             .map_err(|_| AdapterError::blocked("javascript profile disabled"))?;
         let profile = &matrix["profiles"]["javascript"];
-        if profile["status"] != "enabled" {
-            return Err(AdapterError::blocked("javascript profile disabled"));
-        }
+        // The frozen execution API exposes the profile through its serialized contract.
+        // Check the pin even while disabled, so both refusal gates remain exercised.
         let wire = serde_json::to_value(request)
             .map_err(|_| AdapterError::blocked("javascript qualification missing"))?;
         let pinned = &wire["projection"]["language_profile"];
         if pinned["name"] != profile["id"] || pinned["version"] != profile["toolchainVersion"] {
             return Err(AdapterError::blocked("javascript qualification missing"));
+        }
+        if profile["status"] != "enabled" {
+            return Err(AdapterError::blocked("javascript profile disabled"));
         }
         Ok(javascript::finish(request, guest(input)))
     }

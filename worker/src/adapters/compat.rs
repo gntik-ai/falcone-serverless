@@ -122,6 +122,7 @@ enum Kind {
     String,
     Number,
     Punctuation,
+    Opaque,
 }
 
 #[derive(Clone, Copy)]
@@ -200,13 +201,16 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
                     at += 1;
                 }
                 let token = &text[start..at];
-                if !serde_json::from_str::<Value>(token).is_ok_and(|value| value.is_number()) {
-                    return Err(start);
-                }
                 out.push(Token {
                     text: token,
                     at: start,
-                    kind: Kind::Number,
+                    kind: if serde_json::from_str::<Value>(token)
+                        .is_ok_and(|value| value.is_number())
+                    {
+                        Kind::Number
+                    } else {
+                        Kind::Opaque
+                    },
                 });
             }
             // Tokenize bindings so unsupported imports still receive their specific
@@ -223,7 +227,17 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
                 at += 3;
                 continue;
             }
-            _ => return Err(at),
+            // Preserve feature diagnostics across operators and other unknown characters.
+            // Opaque tokens remain ineligible in the closed grammar below. Advance by a
+            // whole character so subsequent tokens retain valid UTF-8 source locations.
+            _ => {
+                at += text[at..].chars().next().unwrap().len_utf8();
+                out.push(Token {
+                    text: &text[start..at],
+                    at: start,
+                    kind: Kind::Opaque,
+                });
+            }
         }
         if out.len() > 100_000 {
             return Err(at);
