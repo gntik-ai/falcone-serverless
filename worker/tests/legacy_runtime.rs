@@ -1,0 +1,258 @@
+//! Operator-only execution of trusted-image-built components. Never builds a guest toolchain.
+#[path = "support/legacy_oracle.rs"]
+mod oracle;
+
+use falcone_serverless_worker::{
+    adapters::javascript,
+    api,
+    artifact::{self, supervisor::CompileLimits},
+    cache,
+    host::{self, Bindings, Context, HostError, Operation, Reply},
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+struct Scratch(PathBuf);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap();
+    }
+}
+
+#[derive(Default)]
+struct Platform {
+    logs: Mutex<Vec<String>>,
+    calls: AtomicUsize,
+}
+impl Bindings for Platform {
+    fn call(&self, context: &Context, operation: Operation) -> Result<Reply, HostError> {
+        assert_eq!(context.tenant, "tenant-synthetic-0001");
+        assert_eq!(context.workspace, "ws-synthetic-0001");
+        match operation {
+            Operation::Log { message, .. } => {
+                self.logs.lock().unwrap().push(message);
+                Ok(Reply::Empty)
+            }
+            _ => {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                Err(HostError::Denied)
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "UNVERIFIED: requires FS_TOOLCHAIN_CACHE and trusted-image-built JS components"]
+fn built_legacy_components() {
+    let Some(cache_root) = std::env::var_os("FS_TOOLCHAIN_CACHE") else {
+        println!("UNVERIFIED: FS_TOOLCHAIN_CACHE unset; no guest toolchain or component executed");
+        return;
+    };
+    let components = std::env::var_os("FS_LEGACY_COMPONENTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(cache_root).join("legacy"));
+    let exe = std::env::current_exe().unwrap();
+    let parent = exe.parent().unwrap();
+    let binaries = if parent.file_name().is_some_and(|name| name == "deps") {
+        parent.parent().unwrap()
+    } else {
+        parent
+    };
+    let directory = std::env::temp_dir().join(format!("legacy-components-{}", std::process::id()));
+    std::fs::create_dir(&directory).unwrap();
+    let scratch = Scratch(directory.clone());
+    let mut compiler =
+        cache::Cache::new(&directory, binaries.join("artifact-compile-child")).unwrap();
+    let expected: Value =
+        serde_json::from_str(include_str!("fixtures/legacy/expected.json")).unwrap();
+    let variables: Vec<_> = expected["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| oracle::Variable {
+            pointer: field["pointer"].as_str().unwrap(),
+            schema: field["schema"].clone(),
+        })
+        .collect();
+    let prefixes: Vec<_> = expected["logPrefixes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|prefix| match prefix["kind"].as_str().unwrap() {
+            "timestamp" => oracle::Prefix::Timestamp,
+            "stream" => oracle::Prefix::Stream(prefix["value"].as_str().unwrap()),
+            _ => panic!("unrecognized inventory log prefix"),
+        })
+        .collect();
+    for (name, source) in [
+        ("success", include_str!("fixtures/legacy/success.js")),
+        ("throw", include_str!("fixtures/legacy/throw.js")),
+        ("reject", include_str!("fixtures/legacy/reject.js")),
+        ("logs", include_str!("fixtures/legacy/logs.js")),
+        ("identity", include_str!("fixtures/legacy/identity.js")),
+        ("denied", include_str!("fixtures/legacy/denied.js")),
+        ("guessed", include_str!("fixtures/legacy/guessed.js")),
+    ] {
+        let bytes = std::fs::read(components.join(format!("{name}.wasm")))
+            .expect("missing trusted fixture component");
+        // Validate before trusted compilation: even a WASI import left by the toolchain fails.
+        let validated = artifact::validate::validate(&bytes, 64 * 1024 * 1024).unwrap();
+        let mut wire: Value = serde_json::from_str(include_str!(
+            "fixtures/contract/request/valid/wasm-no-base.json"
+        ))
+        .unwrap();
+        wire["projection"]["artifact_digest"] =
+            json!(format!("sha256:{:x}", Sha256::digest(&bytes)));
+        wire["projection"]["imports"] = json!(validated.imports);
+        wire["params"]["result"] = expected["success"].clone();
+        wire["params"]["tenant"] = json!("forged-tenant");
+        wire["params"]["workspace"] = json!("forged-workspace");
+        wire["params"]["invocation_key"] = json!("forged-invocation");
+        wire["params"]["__ow_headers"] =
+            json!({"x-auth-tenant-id":"forged-tenant","x-workspace-id":"forged-workspace"});
+        wire["params"]["key"] = json!("forged-tenant/forged-workspace/object");
+        wire["params"]["handle"] = json!(42);
+        let request = api::parse_request(&serde_json::to_vec(&wire).unwrap()).unwrap();
+        let context = request.plan().context;
+        let platform = Arc::new(Platform::default());
+        let loaded = compiler
+            .compile_declared(
+                cache::CONTRACT_VERSION,
+                &bytes,
+                CompileLimits {
+                    input_bytes: 64 * 1024 * 1024,
+                    cpu_seconds: 120,
+                    memory_bytes: 4 * 1024 * 1024 * 1024,
+                    wall_clock_deadline: Instant::now() + Duration::from_secs(300),
+                },
+                &AtomicBool::new(false),
+                Some(&request.plan().imports),
+            )
+            .unwrap();
+        if name == "identity" {
+            // Run the same pre-instantiation security cases inside the restricted pod as
+            // offline. Reaching the executor boundary is a failure even if no handler runs.
+            for case in ["missing", "tenant", "workspace", "revision"] {
+                let mut pinned = request.clone();
+                let mut legacy = context.clone();
+                match case {
+                    "tenant" => legacy.tenant = "forged-context-tenant".into(),
+                    "workspace" => legacy.workspace = "forged-context-workspace".into(),
+                    "revision" => {
+                        let mut changed = serde_json::to_value(&pinned).unwrap();
+                        changed["credential"]["revision"] = json!("forged-context-revision");
+                        pinned = serde_json::from_value(changed).unwrap();
+                    }
+                    _ => {}
+                }
+                let error = javascript::qualify(
+                    &pinned,
+                    (case != "missing").then_some(&legacy),
+                    source,
+                    "{}",
+                    |_| panic!("invalid context reached instantiation"),
+                )
+                .unwrap_err();
+                assert_eq!(error.refusal.code(), api::Code::InvalidRequest);
+                assert_eq!(error.refusal.class(), api::Class::NonRetryable);
+                assert_eq!(
+                    error.message,
+                    if case == "missing" {
+                        "execution context missing"
+                    } else {
+                        "execution context does not match the pinned revision"
+                    }
+                );
+                let (status, body) = error.response();
+                assert_eq!(status, 400);
+                let body = String::from_utf8(body).unwrap();
+                for private in [
+                    "forged-context",
+                    "tenant-synthetic-0001",
+                    "ws-synthetic-0001",
+                    "rev-synthetic-0003",
+                ] {
+                    assert!(!body.contains(private));
+                }
+            }
+        }
+        let (status, response) =
+            javascript::qualify(&request, Some(&context), source, "{}", |input| {
+                let limits = request
+                    .execution_limits(api::Ceilings {
+                        max_memory_bytes: 64 * 1024 * 1024,
+                        max_wall_clock_ms: 30_000,
+                    })
+                    .unwrap();
+                let mut host =
+                    host::Host::with_limits(input.context.clone(), platform.clone(), limits.limits);
+                host.set_fuel(limits.fuel);
+                host.set_max_host_calls(limits.max_host_calls);
+                host.set_until(Instant::now() + limits.timeout);
+                let execution = host::execute(&loaded, host, &input.wire().unwrap());
+                javascript::Outcome::from_execution(
+                    execution,
+                    std::mem::take(&mut *platform.logs.lock().unwrap()),
+                )
+            })
+            .unwrap();
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        if matches!(name, "throw" | "reject" | "denied" | "guessed") {
+            assert_eq!(status, 500, "{name}");
+            assert_eq!(response["status"], "failure", "{name}");
+            oracle::compare(
+                &serde_json::to_vec(&response["result"]).unwrap(),
+                &serde_json::to_vec(&expected["error"]).unwrap(),
+                &[],
+                &[],
+            )
+            .unwrap();
+            if matches!(name, "denied" | "guessed") {
+                assert_eq!(
+                    platform.calls.load(Ordering::Relaxed),
+                    0,
+                    "host must reject before bindings"
+                );
+            }
+        } else {
+            assert_eq!(status, 200, "{name}");
+            assert_eq!(response["status"], "success", "{name}");
+            let result = if name == "identity" {
+                &expected["identity"]
+            } else {
+                &expected["success"]
+            };
+            oracle::compare(
+                &serde_json::to_vec(&response["result"]).unwrap(),
+                &serde_json::to_vec(result).unwrap(),
+                &variables,
+                &[],
+            )
+            .unwrap();
+        }
+        let logs = if name == "logs" {
+            expected["logs"].clone()
+        } else {
+            json!([])
+        };
+        oracle::compare(
+            &serde_json::to_vec(&json!({"logs":response["logs"]})).unwrap(),
+            &serde_json::to_vec(&json!({"logs":logs})).unwrap(),
+            &[],
+            &prefixes,
+        )
+        .unwrap();
+    }
+    drop(compiler);
+    drop(scratch);
+    assert!(!directory.exists());
+    println!("{}", json!({"check":"legacy_javascript","status":"passed"}));
+}

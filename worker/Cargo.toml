@@ -45,6 +45,8 @@ name = "compile-cache-qualification"
 path = "src/qualification/compile_cache_runner.rs"
 
 [dev-dependencies]
+# Preserve decimal JSON values exactly in the legacy envelope qualification oracle; already locked.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 falcone-serverless-worker = { path = ".", features = ["qualification-hooks"] }
 wat = "=1.258.3"
 wit-parser = "=0.262.0"
