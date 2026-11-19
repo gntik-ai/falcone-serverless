@@ -43,9 +43,50 @@ fn message<'a>(mut line: &'a str, prefixes: &[Prefix<'_>]) -> Result<&'a str, St
     Ok(line)
 }
 
+/// Preserve number lexemes in a parallel JSON tree, after serde_json validates the input.
+/// Quoting only numbers outside strings avoids changing production dependency features or
+/// rounding through serde_json's default f64 representation before comparison.
+fn number_text(input: &[u8]) -> Result<Value, String> {
+    let mut quoted = Vec::with_capacity(input.len());
+    let mut at = 0;
+    while at < input.len() {
+        let start = at;
+        match input[at] {
+            b'"' => {
+                at += 1;
+                while at < input.len() {
+                    let byte = input[at];
+                    at += 1;
+                    if byte == b'\\' {
+                        at += 1;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                }
+                quoted.extend_from_slice(&input[start..at]);
+            }
+            b'-' | b'0'..=b'9' => {
+                while input
+                    .get(at)
+                    .is_some_and(|byte| byte.is_ascii_digit() || b"-.eE+".contains(byte))
+                {
+                    at += 1;
+                }
+                quoted.push(b'"');
+                quoted.extend_from_slice(&input[start..at]);
+                quoted.push(b'"');
+            }
+            byte => {
+                quoted.push(byte);
+                at += 1;
+            }
+        }
+    }
+    serde_json::from_slice(&quoted).map_err(|_| "cannot preserve JSON number text".into())
+}
+
 /// Compare decimal values exactly, including integers outside the f64 exact-integer range.
-fn decimal(number: &serde_json::Number) -> Option<(bool, String, i64)> {
-    let text = number.to_string();
+fn decimal(text: &str) -> Option<(bool, String, i64)> {
     let negative = text.starts_with('-');
     let unsigned = text.trim_start_matches('-');
     let (mantissa, exponent) = unsigned.split_once(['e', 'E']).unwrap_or((unsigned, "0"));
@@ -73,9 +114,12 @@ pub fn compare(
     variables: &[Variable<'_>],
     prefixes: &[Prefix<'_>],
 ) -> Result<(), String> {
-    let actual: Value = serde_json::from_slice(actual).map_err(|_| "adapter output is not JSON")?;
-    let expected: Value =
+    let actual_value: Value =
+        serde_json::from_slice(actual).map_err(|_| "adapter output is not JSON")?;
+    let expected_value: Value =
         serde_json::from_slice(expected).map_err(|_| "inventory expectation is not JSON")?;
+    let numbers = (number_text(actual)?, number_text(expected)?);
+    let (actual, expected) = (&actual_value, &expected_value);
     for (index, field) in variables.iter().enumerate() {
         if variables[..index]
             .iter()
@@ -87,7 +131,14 @@ pub fn compare(
             return Err("invalid inventory variable declaration or missing field".into());
         }
     }
-    equal(&actual, &expected, "", variables, prefixes)
+    equal(
+        actual,
+        expected,
+        "",
+        variables,
+        prefixes,
+        (&numbers.0, &numbers.1),
+    )
 }
 
 fn equal(
@@ -96,6 +147,7 @@ fn equal(
     pointer: &str,
     variables: &[Variable<'_>],
     prefixes: &[Prefix<'_>],
+    numbers: (&Value, &Value),
 ) -> Result<(), String> {
     if let Some(field) = variables.iter().find(|field| field.pointer == pointer) {
         if valid(&field.schema, actual) {
@@ -114,6 +166,7 @@ fn equal(
                     &format!("{pointer}/{key}"),
                     variables,
                     prefixes,
+                    numbers,
                 )?;
             }
             Ok(())
@@ -133,15 +186,24 @@ fn equal(
                         &format!("{pointer}/{index}"),
                         variables,
                         prefixes,
+                        numbers,
                     )?;
                 }
             }
             Ok(())
         }
-        (Value::Number(actual), Value::Number(expected))
-            if decimal(actual).is_some() && decimal(actual) == decimal(expected) =>
-        {
-            Ok(())
+        (Value::Number(_), Value::Number(_)) => {
+            let number = |tree: &Value| {
+                tree.pointer(pointer)
+                    .and_then(Value::as_str)
+                    .and_then(decimal)
+            };
+            let actual = number(numbers.0);
+            if actual.is_some() && actual == number(numbers.1) {
+                Ok(())
+            } else {
+                Err("number differs from inventory".into())
+            }
         }
         (Value::Null, Value::Null) => Ok(()),
         (Value::String(actual), Value::String(expected)) if actual == expected => Ok(()),

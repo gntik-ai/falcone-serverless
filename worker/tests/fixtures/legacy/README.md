@@ -3,7 +3,9 @@
 The fixtures contain no captured tenant data. `expected.json` uses the frozen legacy
 handler and execution-failure shapes in the contract inventory and worker execution API.
 No field or log prefix is implicitly variable. `compat_static` also compares all eight
-inventoried legacy result fixtures directly against the adapter output.
+inventoried legacy result fixtures directly against the adapter output, and checks raw
+executor outputs against independently specified legacy envelope mappings. Those offline
+tests stub the executor boundary; only the gated component suite executes the JS wrapper.
 
 The checker intentionally accepts a closed subset: a single main definition, JSON values,
 read-only params/context fields, single-literal console.log, throw/rejection, the two allowed Web Crypto
@@ -34,6 +36,12 @@ An unsupported toolchain option, leftover WASI import or fixture mismatch fails 
 The script produces components, a test runner, the trusted compiler child and SHA256SUMS.
 Record their artifact ID and SHA256 on the story before considering enablement. Runtime
 qualification is UNVERIFIED until that operator evidence exists.
+
+`denied.js` exercises the host's storage-prefix check. `guessed.js` supplies a number where
+WIT requires a borrowed object resource, so it may fail during guest resource lowering.
+Its error envelope and absence of platform calls demonstrate boundary rejection, not
+evidence that a guessed handle reached and was denied by the host. Host-side handle
+enforcement remains SEC-03's separate qualification responsibility.
 
 For the cluster qualification image, copy bin/legacy-runtime and bin/artifact-compile-child
 to /usr/local/bin, and the raw components to /opt/falcone-toolchain-cache/legacy. Supply this

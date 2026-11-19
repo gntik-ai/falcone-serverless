@@ -19,11 +19,9 @@ pub struct AdapterError {
 }
 
 impl AdapterError {
-    pub fn response(&self) -> (u16, Vec<u8>) {
-        (
-            self.refusal.status(),
-            serde_json::to_vec(&self.refusal).unwrap_or_default(),
-        )
+    /// Adapter refusals answer a fully parsed request, retaining its activation identity.
+    pub fn response(&self, request: &ExecuteRequest) -> (u16, Vec<u8>) {
+        request.failure(self.refusal.clone(), Vec::new())
     }
     pub(super) fn blocked(message: &'static str) -> Self {
         Self {

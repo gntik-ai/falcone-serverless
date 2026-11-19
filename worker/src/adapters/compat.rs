@@ -32,6 +32,56 @@ impl Verdict {
 
 const UNSUPPORTED: &str = "WASM-UNSUPPORTED-API";
 
+// Node's bare builtin specifiers (including subpaths such as fs/promises) are APIs,
+// not third-party catalogue packages. Prefix-only builtins are caught by node: below.
+fn bare_node_builtin(module: &str) -> bool {
+    matches!(
+        module.split('/').next().unwrap_or_default(),
+        "assert"
+            | "async_hooks"
+            | "buffer"
+            | "child_process"
+            | "cluster"
+            | "console"
+            | "constants"
+            | "crypto"
+            | "dgram"
+            | "diagnostics_channel"
+            | "dns"
+            | "domain"
+            | "events"
+            | "fs"
+            | "http"
+            | "http2"
+            | "https"
+            | "inspector"
+            | "module"
+            | "net"
+            | "os"
+            | "path"
+            | "perf_hooks"
+            | "process"
+            | "punycode"
+            | "querystring"
+            | "readline"
+            | "repl"
+            | "stream"
+            | "string_decoder"
+            | "sys"
+            | "timers"
+            | "tls"
+            | "trace_events"
+            | "tty"
+            | "url"
+            | "util"
+            | "v8"
+            | "vm"
+            | "wasi"
+            | "worker_threads"
+            | "zlib"
+    )
+}
+
 fn diagnostic(
     text: &str,
     source: usize,
@@ -561,14 +611,18 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                         None
                     }
                 }
-                (Kind::String, _)
+                (Kind::String, module)
                     if (index > 0 && matches!(tokens[index - 1].text, "from" | "import"))
                         || (index > 1
                             && tokens[index - 1].text == "("
                             && matches!(tokens[index - 2].text, "require" | "import")) =>
                 {
-                    // No dependency catalogue is qualified, including local modules.
-                    Some(("WASM-PACKAGE-NOT-IN-CATALOGUE", "package import"))
+                    if bare_node_builtin(module) {
+                        Some((UNSUPPORTED, "node module"))
+                    } else {
+                        // No dependency catalogue is qualified, including local modules.
+                        Some(("WASM-PACKAGE-NOT-IN-CATALOGUE", "package import"))
+                    }
                 }
                 _ => None,
             };

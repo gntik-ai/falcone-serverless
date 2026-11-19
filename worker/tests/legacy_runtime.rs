@@ -1,4 +1,6 @@
 //! Operator-only execution of trusted-image-built components. Never builds a guest toolchain.
+#[path = "support/legacy_context.rs"]
+mod legacy_context;
 #[path = "support/legacy_oracle.rs"]
 mod oracle;
 
@@ -140,49 +142,12 @@ fn built_legacy_components() {
         if name == "identity" {
             // Run the same pre-instantiation security cases inside the restricted pod as
             // offline. Reaching the executor boundary is a failure even if no handler runs.
-            for case in ["missing", "tenant", "workspace", "revision"] {
-                let mut pinned = request.clone();
-                let mut legacy = context.clone();
-                match case {
-                    "tenant" => legacy.tenant = "forged-context-tenant".into(),
-                    "workspace" => legacy.workspace = "forged-context-workspace".into(),
-                    "revision" => {
-                        let mut changed = serde_json::to_value(&pinned).unwrap();
-                        changed["credential"]["revision"] = json!("forged-context-revision");
-                        pinned = serde_json::from_value(changed).unwrap();
-                    }
-                    _ => {}
-                }
-                let error = javascript::qualify(
-                    &pinned,
-                    (case != "missing").then_some(&legacy),
-                    source,
-                    "{}",
-                    |_| panic!("invalid context reached instantiation"),
-                )
-                .unwrap_err();
-                assert_eq!(error.refusal.code(), api::Code::InvalidRequest);
-                assert_eq!(error.refusal.class(), api::Class::NonRetryable);
-                assert_eq!(
-                    error.message,
-                    if case == "missing" {
-                        "execution context missing"
-                    } else {
-                        "execution context does not match the pinned revision"
-                    }
-                );
-                let (status, body) = error.response();
-                assert_eq!(status, 400);
-                let body = String::from_utf8(body).unwrap();
-                for private in [
-                    "forged-context",
-                    "tenant-synthetic-0001",
-                    "ws-synthetic-0001",
-                    "rev-synthetic-0003",
-                ] {
-                    assert!(!body.contains(private));
-                }
-            }
+            legacy_context::assert_rejected_contexts(&request, |pinned, legacy| {
+                javascript::qualify(pinned, legacy, source, "{}", |_| {
+                    panic!("invalid context reached instantiation")
+                })
+                .unwrap_err()
+            });
         }
         let (status, response) =
             javascript::qualify(&request, Some(&context), source, "{}", |input| {
@@ -215,11 +180,14 @@ fn built_legacy_components() {
                 &[],
             )
             .unwrap();
+            // denied exercises the host storage-prefix gate. guessed may fail during
+            // component-model resource lowering; it proves failure and no platform call,
+            // not that a forged handle reached the host.
             if matches!(name, "denied" | "guessed") {
                 assert_eq!(
                     platform.calls.load(Ordering::Relaxed),
                     0,
-                    "host must reject before bindings"
+                    "rejected storage input must not reach platform bindings"
                 );
             }
         } else {

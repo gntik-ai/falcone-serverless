@@ -2,9 +2,10 @@ use falcone_serverless_worker::adapters::compat::{Source, check};
 use falcone_serverless_worker::{
     adapters::{Registry, javascript},
     api::{self, ExecuteRequest},
-    host::Context,
 };
 use serde_json::{Value, json};
+#[path = "support/legacy_context.rs"]
+mod legacy_context;
 #[path = "support/legacy_oracle.rs"]
 mod oracle;
 
@@ -86,6 +87,30 @@ fn oracle_preserves_decimal_precision_and_enforces_format_only_declarations() {
         )
         .is_err()
     );
+    for (actual, expected, equal) in [
+        (
+            r#"{"1":"9.0","a/b":[-0.0,1.2300e2]}"#,
+            r#"{"a/b":[0,123],"1":"9.0"}"#,
+            true,
+        ),
+        (
+            r#"{"escaped":"\"1.2\\3","n":1e+3}"#,
+            r#"{"n":1000.0,"escaped":"\"1.2\\3"}"#,
+            true,
+        ),
+        (r#"{"n":"1.0"}"#, r#"{"n":1}"#, false),
+        (r#"{"n":-1.0}"#, r#"{"n":1}"#, false),
+        (
+            r#"{"n":0.123456789012345678901}"#,
+            r#"{"n":0.123456789012345678902}"#,
+            false,
+        ),
+    ] {
+        assert_eq!(
+            oracle::compare(actual.as_bytes(), expected.as_bytes(), &[], &[]).is_ok(),
+            equal
+        );
+    }
     let variable = [oracle::Variable {
         pointer: "/time",
         schema: json!({"format":"date-time"}),
@@ -149,6 +174,12 @@ fn disabled_registry_refuses_supported_sources_before_instantiation() {
     assert_eq!(starts.get(), 0);
     assert_eq!(error.refusal.code(), api::Code::ExecutionFailed);
     assert_eq!(error.message, "javascript profile disabled");
+    let (status, response) = error.response(&request);
+    assert_eq!(status, 500);
+    api::parse_result(&response, &request).unwrap();
+    let response: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(response["status"], "failure");
+    assert_eq!(response["result"]["detail"]["reason"], "artifact_rejected");
 }
 
 #[test]
@@ -177,52 +208,17 @@ fn spoofed_params_and_headers_cannot_supply_the_handler_identity() {
 
 #[test]
 fn context_absence_and_mismatch_refuse_before_any_instance_and_echo_no_values() {
-    for case in ["missing", "tenant", "workspace", "revision"] {
-        let mut request = request();
-        let mut context: Context = request.plan().context;
-        match case {
-            "tenant" => context.tenant = "forged-context-tenant".into(),
-            "workspace" => context.workspace = "forged-context-workspace".into(),
-            "revision" => {
-                // Deserialize without admit(): the adapter must enforce its own binding check.
-                let mut wire = serde_json::to_value(&request).unwrap();
-                wire["credential"]["revision"] = json!("different-pinned-revision");
-                request = serde_json::from_value(wire).unwrap();
-            }
-            _ => {}
-        }
-        let error = Registry
+    legacy_context::assert_rejected_contexts(&request(), |request, context| {
+        Registry
             .invoke(
-                &request,
-                (case != "missing").then_some(&context),
+                request,
+                context,
                 include_str!("fixtures/legacy/success.js"),
                 "{}",
                 |_| panic!("guest must not start"),
             )
-            .unwrap_err();
-        assert_eq!(error.refusal.code(), api::Code::InvalidRequest);
-        assert_eq!(error.refusal.class(), api::Class::NonRetryable);
-        assert_eq!(
-            error.message,
-            if case == "missing" {
-                "execution context missing"
-            } else {
-                "execution context does not match the pinned revision"
-            }
-        );
-        let (status, response) = error.response();
-        assert_eq!(status, 400);
-        let text = String::from_utf8(response).unwrap();
-        for private in [
-            "forged-context",
-            "tenant-synthetic-0001",
-            "ws-synthetic-0001",
-            "different-pinned-revision",
-            "rev-synthetic-0003",
-        ] {
-            assert!(!text.contains(private), "{case}");
-        }
-    }
+            .unwrap_err()
+    });
 }
 
 #[test]
@@ -234,10 +230,16 @@ fn blocked_source_never_instantiates_even_during_qualification() {
     })
     .unwrap_err();
     assert_eq!(error.message, "javascript source blocked");
+    let (status, response) = error.response(&request);
+    assert_eq!(status, 500);
+    api::parse_result(&response, &request).unwrap();
+    let response: Value = serde_json::from_slice(&response).unwrap();
+    assert_eq!(response["status"], "failure");
+    assert_eq!(response["result"]["detail"]["reason"], "artifact_rejected");
 }
 
 #[test]
-fn thrown_rejected_or_denied_guest_results_match_the_inventory_failure() {
+fn failed_executor_outcomes_match_inventory_without_exception_details() {
     use falcone_serverless_worker::host::{ExecuteError, Execution, outcome::InvocationOutcome};
     let request = request();
     let context = request.plan().context;
@@ -282,7 +284,49 @@ fn thrown_rejected_or_denied_guest_results_match_the_inventory_failure() {
 }
 
 #[test]
-fn adapter_preserves_every_inventoried_legacy_result_and_ordered_logs() {
+fn adapter_maps_raw_handler_values_to_legacy_results_and_preserves_log_order() {
+    let request = request();
+    let context = request.plan().context;
+    // Raw executor outputs are independent of the expected legacy envelopes. Actual JS
+    // wrapper execution remains gated by the trusted-image components in legacy_runtime.
+    for (raw, expected) in [
+        ("null", r#"{"statusCode":200}"#),
+        ("true", r#"{"statusCode":200,"body":true}"#),
+        ("[2,1]", r#"{"statusCode":200,"body":[2,1]}"#),
+        (r#"{"ok":true}"#, r#"{"statusCode":200,"body":{"ok":true}}"#),
+        (
+            r#"{"body":null,"headers":null,"statusCode":304}"#,
+            r#"{"statusCode":304}"#,
+        ),
+    ] {
+        let (status, response) = javascript::qualify(
+            &request,
+            Some(&context),
+            include_str!("fixtures/legacy/success.js"),
+            "{}",
+            |_| javascript::Outcome {
+                result: Ok(raw.as_bytes().to_vec()),
+                logs: vec!["first".into(), "second".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        api::parse_result(&response, &request).unwrap();
+        let response: Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(response["status"], "success");
+        assert_eq!(response["logs"], json!(["first", "second"]));
+        oracle::compare(
+            &serde_json::to_vec(&response["result"]).unwrap(),
+            expected.as_bytes(),
+            &[],
+            &[],
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn adapter_preserves_inventoried_legacy_shaped_results_and_ordered_logs() {
     let request = request();
     let context = request.plan().context;
     for name in [
@@ -576,6 +620,56 @@ fn diagnostics_cover_the_operator_taxonomy_without_selecting_another_mode() {
         assert!(!format!("{verdict:?}").to_lowercase().contains("oci"));
         assert!(!format!("{verdict:?}").contains("hidden"));
     }
+}
+
+#[test]
+fn bare_node_builtin_imports_are_unsupported_apis_rather_than_packages() {
+    for module in [
+        "fs",
+        "fs/promises",
+        "net",
+        "http",
+        "http2",
+        "dns",
+        "os",
+        "path",
+        "stream/promises",
+        "tls",
+        "vm",
+        "module",
+        "util",
+    ] {
+        for (source, column) in [
+            (format!("\nrequire('{module}')"), 9),
+            (format!("\nimport item from '{module}'"), 18),
+            (format!("\nimport('{module}')"), 8),
+        ] {
+            let verdict = check(&[Source { text: &source }], "{}");
+            assert!(!verdict.supported());
+            let diagnostic = &verdict.diagnostics()[0];
+            assert_eq!(
+                (
+                    diagnostic.code,
+                    diagnostic.construct,
+                    diagnostic.source,
+                    diagnostic.line,
+                    diagnostic.column
+                ),
+                ("WASM-UNSUPPORTED-API", "node module", 0, 2, column),
+                "{module}"
+            );
+        }
+    }
+    // A literal result containing a builtin name is data, not an import.
+    assert!(
+        check(
+            &[Source {
+                text: "function main(params) { return 'fs'; }"
+            }],
+            "{}"
+        )
+        .supported()
+    );
 }
 
 #[test]
