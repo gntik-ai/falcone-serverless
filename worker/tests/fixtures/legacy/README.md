@@ -13,6 +13,12 @@ operations, and the fixture's WIT storage calls. Unknown syntax and every depend
 blocked while the package catalogue is unqualified. A supported verdict only permits
 qualification. The registry still refuses all JavaScript because the matrix is disabled.
 
+Before enablement, confirm the execution API's language-profile version semantics.
+The registry currently matches `projection.language_profile.name` to the matrix `id`
+and `projection.language_profile.version` to `toolchainVersion`. The frozen execution
+API does not define that version mapping; disabled-profile refusal remains mandatory
+while this interpretation and the runtime qualification evidence are outstanding.
+
 `Input::wire` supplies the original params and a separate verified context to the trusted
 wrapper. Main receives `(params, context)`; tenant/workspace come from the credential, and
 invocation identifiers are read through WIT. Identity-looking input fields remain input

@@ -687,6 +687,43 @@ fn diagnostics_cover_the_operator_taxonomy_without_selecting_another_mode() {
 }
 
 #[test]
+fn non_literal_module_specifiers_are_dynamic_loading_not_package_imports() {
+    for (expression, construct) in [
+        ("require('lodash' + params.x)", "dynamic require"),
+        ("import('lodash' + params.x)", "dynamic import"),
+        ("require('child_' + 'process')", "dynamic require"),
+        ("import('child_' + 'process')", "dynamic import"),
+        ("require('a', params.b)", "dynamic require"),
+        ("import('a', params.b)", "dynamic import"),
+        ("require('node:fs' + params.x)", "dynamic require"),
+        ("import('child_process', params.b)", "dynamic import"),
+    ] {
+        let source = format!("\n  {expression}");
+        let verdict = check(&[Source { text: &source }], "{}");
+        assert!(!verdict.supported(), "{expression}");
+        let diagnostics: Vec<_> = verdict
+            .diagnostics()
+            .iter()
+            .map(|item| {
+                (
+                    item.code,
+                    item.construct,
+                    item.source,
+                    item.line,
+                    item.column,
+                )
+            })
+            .collect();
+        assert_eq!(
+            diagnostics,
+            [("WASM-UNSUPPORTED-API", construct, 0, 2, 3)],
+            "{expression}"
+        );
+        assert!(!format!("{verdict:?}").to_lowercase().contains("oci"));
+    }
+}
+
+#[test]
 fn feature_diagnostics_survive_ordinary_operators() {
     for (expression, code, construct, column) in [
         ("require('addon.node')", "WASM-NATIVE-LIBRARY", ".node", 9),

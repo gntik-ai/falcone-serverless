@@ -587,7 +587,10 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                     && tokens[index - 1].kind == Kind::Punctuation
                     && tokens[index - 1].text == "("
                     && tokens[index - 2].kind == Kind::Word
-                    && matches!(tokens[index - 2].text, "require" | "import"));
+                    && matches!(tokens[index - 2].text, "require" | "import")
+                    && tokens
+                        .get(index + 1)
+                        .is_some_and(|close| close.kind == Kind::Punctuation && close.text == ")"));
             let feature = match (token.kind, token.text) {
                 (Kind::String, "child_process" | "node:child_process") if module_specifier => {
                     Some(("WASM-PROCESS-SPAWN", "child_process"))
@@ -621,7 +624,14 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                 }
                 (Kind::Word, "require" | "import") => {
                     let argument = tokens.get(index + if next(1) == Some("(") { 2 } else { 1 });
-                    if argument.is_none_or(|argument| argument.kind != Kind::String) {
+                    // A leading string in an expression or argument list is not a
+                    // statically resolved specifier. Diagnose the whole dynamic call.
+                    let literal = argument.is_some_and(|argument| argument.kind == Kind::String)
+                        && (next(1) != Some("(")
+                            || tokens.get(index + 3).is_some_and(|close| {
+                                close.kind == Kind::Punctuation && close.text == ")"
+                            }));
+                    if !literal {
                         // Static import declarations are diagnosed at the specifier below.
                         if token.text == "import" && next(1) != Some("(") {
                             None
