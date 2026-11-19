@@ -1,0 +1,33 @@
+# Operator decision 2026-11-19. Recording pins does not qualify or enable the profile.
+engine = "StarlingMonkey"
+qualification_status = "disabled"
+
+[jco]
+name = "@bytecodealliance/jco"
+version = "1.41.0"
+source = "https://registry.npmjs.org/@bytecodealliance/jco/-/jco-1.41.0.tgz"
+archive = "jco-1.41.0.tgz"
+sha256 = "abe7ab13d0fb1b6ecc6f7d3fffd6ff27862d158936a11d6f48bcb0ada00af4c6"
+integrity = "sha512-hsl9PEj5kOQLMsUhMqaho6yYooQ8SqULjPCuUuUSXu0D3huVQKFwmbUH0B9JTBpLPZPuJJNfnpKnZx6rV53VOA=="
+
+[componentize_js]
+name = "@bytecodealliance/componentize-js"
+version = "0.23.0"
+source = "https://registry.npmjs.org/@bytecodealliance/componentize-js/-/componentize-js-0.23.0.tgz"
+archive = "componentize-js-0.23.0.tgz"
+sha256 = "b2e4b6fdee055805370950f127c21d7c549dcc7a1e907f20c5ee769ebba7ad10"
+integrity = "sha512-Qc2+lrwJHU7lq4CBMyVVYE8ASyUFeegMYdRnMVG0wNpNiATzGDF/mWpjDNTeVZeT8L9chhK3vuLaQE9FVANvfw=="
+
+[wasi_virt]
+name = "wasi-virt"
+version = "0.2.0"
+source = "https://github.com/bytecodealliance/WASI-Virt"
+rev = "bca61c27499d2c290b5431cfcff013737b3ba01d"
+# Built from this git revision with --locked in the trusted compiler image, not crates.io.
+
+[node]
+name = "Node.js"
+version = "v26.13.0"
+source = "https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz"
+archive = "node-v26.13.0-linux-x64.tar.xz"
+sha256 = "d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997"

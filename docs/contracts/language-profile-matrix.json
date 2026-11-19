@@ -6,7 +6,7 @@
       "status": "disabled",
       "wasmtimeVersion": "49.0.5",
       "wasiVersion": "unqualified",
-      "toolchainVersion": "unqualified",
+      "toolchainVersion": "1.41.0",
       "packageCatalogueVersion": "unqualified",
       "allowedInterfaces": [],
       "testedExamples": [],

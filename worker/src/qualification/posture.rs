@@ -18,6 +18,9 @@ pub mod api;
 #[path = "../server/mod.rs"]
 pub mod server;
 
+#[path = "../adapters/mod.rs"]
+pub mod adapters;
+
 use serde_json::Value;
 
 const RULE_IDS: [&str; 12] = [

@@ -1,0 +1,15 @@
+{
+  "variables": [],
+  "logPrefixes": [],
+  "success": {"statusCode": 200, "body": {"ok": true}},
+  "identity": {"statusCode": 200, "body": {
+    "tenant": "tenant-synthetic-0001", "workspace": "ws-synthetic-0001",
+    "invocation_key": "inv-0000007", "attempt_id": "att-synthetic-0001",
+    "idempotency_key": "idem-0000007"
+  }},
+  "logs": ["first", "second"],
+  "error": {
+    "status": 500, "code": "execution_failed", "message": "The execution failed.",
+    "detail": {"reason": "handler_failed"}, "retryable": false
+  }
+}

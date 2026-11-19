@@ -114,10 +114,12 @@ human review must assess the policy and prose.
 | Go | `go-wasi-v1` | Disabled; no evidence or tested examples. |
 
 Every committed seed is disabled, with an empty evidence object and empty
-capability ceiling. WASI, language toolchain and package catalogue are
-unqualified. No profile is enabled and no real evidence is produced by this
-contract change. Publication is merge-only; rollback is a revert until a later
-consumer pins a matrix revision.
+capability ceiling. WASI and package catalogues remain unqualified. JavaScript
+records the operator-approved jco toolchain version `1.41.0`; the other language
+toolchains remain unqualified. Recording this pin does not qualify JavaScript.
+No profile is enabled and no real evidence is produced by this contract change.
+Publication is merge-only; rollback is a revert until a later consumer pins a
+matrix revision.
 
 ### WIT 0.2.0 encoding requirement
 
