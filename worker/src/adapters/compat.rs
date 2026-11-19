@@ -209,7 +209,9 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
                     kind: Kind::Number,
                 });
             }
-            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'.' | b',' | b':' | b';' | b'-' => {
+            // Tokenize bindings so unsupported imports still receive their specific
+            // diagnostic. Assignment remains outside the eligible main grammar.
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b'.' | b',' | b':' | b';' | b'-' | b'=' => {
                 at += 1;
                 out.push(Token {
                     text: &text[start..at],
@@ -562,21 +564,33 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                 break;
             }
             let next = |offset: usize| tokens.get(index + offset).map(|token| token.text);
+            // Module names in ordinary return values and log messages are data. Only
+            // import/require specifiers identify a library or an unsupported Node API.
+            let module_specifier = (index > 0
+                && tokens[index - 1].kind == Kind::Word
+                && matches!(tokens[index - 1].text, "from" | "import"))
+                || (index > 1
+                    && tokens[index - 1].kind == Kind::Punctuation
+                    && tokens[index - 1].text == "("
+                    && tokens[index - 2].kind == Kind::Word
+                    && matches!(tokens[index - 2].text, "require" | "import"));
             let feature = match (token.kind, token.text) {
-                (Kind::String, "child_process" | "node:child_process") => {
+                (Kind::String, "child_process" | "node:child_process") if module_specifier => {
                     Some(("WASM-PROCESS-SPAWN", "child_process"))
                 }
-                (Kind::String, "worker_threads" | "node:worker_threads") => {
+                (Kind::String, "worker_threads" | "node:worker_threads") if module_specifier => {
                     Some(("WASM-PROCESS-SPAWN", "worker_threads"))
                 }
-                (Kind::String, "cluster" | "node:cluster") => {
+                (Kind::String, "cluster" | "node:cluster") if module_specifier => {
                     Some(("WASM-PROCESS-SPAWN", "cluster"))
                 }
-                (Kind::String, module) if module.ends_with(".node") => {
+                (Kind::String, module) if module_specifier && module.ends_with(".node") => {
                     Some(("WASM-NATIVE-LIBRARY", ".node"))
                 }
-                (Kind::String, "node:crypto" | "crypto") => Some((UNSUPPORTED, "node:crypto API")),
-                (Kind::String, module) if module.starts_with("node:") => {
+                (Kind::String, "node:crypto" | "crypto") if module_specifier => {
+                    Some((UNSUPPORTED, "node:crypto API"))
+                }
+                (Kind::String, module) if module_specifier && module.starts_with("node:") => {
                     Some((UNSUPPORTED, "node module"))
                 }
                 (Kind::Word, "process") if next(1) == Some(".") && next(2) == Some("dlopen") => {
@@ -611,12 +625,7 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                         None
                     }
                 }
-                (Kind::String, module)
-                    if (index > 0 && matches!(tokens[index - 1].text, "from" | "import"))
-                        || (index > 1
-                            && tokens[index - 1].text == "("
-                            && matches!(tokens[index - 2].text, "require" | "import")) =>
-                {
+                (Kind::String, module) if module_specifier => {
                     if bare_node_builtin(module) {
                         Some((UNSUPPORTED, "node module"))
                     } else {

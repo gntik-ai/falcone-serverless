@@ -623,6 +623,66 @@ fn diagnostics_cover_the_operator_taxonomy_without_selecting_another_mode() {
 }
 
 #[test]
+fn assigned_unsupported_apis_keep_their_construct_diagnostics() {
+    for (expression, code, construct) in [
+        (
+            "require('child_process')",
+            "WASM-PROCESS-SPAWN",
+            "child_process",
+        ),
+        ("require('addon.node')", "WASM-NATIVE-LIBRARY", ".node"),
+        ("navigator.gpu", "WASM-GPU", "navigator.gpu"),
+        (
+            "require('unknown-package')",
+            "WASM-PACKAGE-NOT-IN-CATALOGUE",
+            "package import",
+        ),
+    ] {
+        let source = format!("const value =\n{expression};");
+        let verdict = check(&[Source { text: &source }], "{}");
+        assert!(!verdict.supported());
+        let item = &verdict.diagnostics()[0];
+        assert_eq!((item.code, item.construct, item.line), (code, construct, 2));
+        assert_eq!(
+            item.column,
+            if expression.starts_with("require") {
+                9
+            } else {
+                1
+            }
+        );
+    }
+    // Recognizing an assignment for diagnostics must not make it eligible to execute.
+    assert!(
+        !check(
+            &[Source {
+                text: "function main(params) { return params.value = 1; }"
+            }],
+            "{}"
+        )
+        .supported()
+    );
+}
+
+#[test]
+fn feature_names_in_result_and_log_literals_are_data() {
+    for literal in [
+        "child_process",
+        "node:worker_threads",
+        "cluster",
+        "node:crypto",
+        "node:fs",
+        "addon.node",
+    ] {
+        let source = format!(
+            "function main(params) {{ console.log('{literal}'); return {{body: '{literal}'}}; }}"
+        );
+        let verdict = check(&[Source { text: &source }], "{}");
+        assert!(verdict.supported(), "{literal}: {verdict:?}");
+    }
+}
+
+#[test]
 fn bare_node_builtin_imports_are_unsupported_apis_rather_than_packages() {
     for module in [
         "fs",
