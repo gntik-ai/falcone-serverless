@@ -12,6 +12,8 @@ const DIAGNOSTICS: &[&str] = &[
     "WASM-GPU",
     "WASM-PROCESS-SPAWN",
     "WASM-INSTALL-HOOK",
+    "WASM-PACKAGE-NOT-IN-CATALOGUE",
+    "WASM-UNSUPPORTED-API",
 ];
 const EVIDENCE: &[&str] = &["compatibility", "adversarial", "leakage", "crashRecovery"];
 const VERSIONS: &[&str] = &[
@@ -256,6 +258,7 @@ fn language_profile_matrix_json_contract() {
         "matrixVersion"
     );
     let profiles = matrix["profiles"].as_object().unwrap();
+    assert_eq!(matrix["matrixVersion"], "2", "matrix revision");
     assert_eq!(
         profiles.keys().map(String::as_str).collect::<BTreeSet<_>>(),
         LANGUAGES.iter().copied().collect()
@@ -347,8 +350,25 @@ fn language_profile_matrix_json_contract() {
         rejected(&schema, &format!("enabled-unqualified-{field}"), field);
         rejected(&schema, &format!("enabled-floating-{field}"), field);
     }
+    // Revision 2: `none` is a valid WASI version for a profile that imports no WASI,
+    // including when enabled; it is never a substitute for an exact version elsewhere.
+    validate(&schema, &fixture("valid", "enabled-wasi-none")).unwrap();
+    for field in [
+        "toolchainVersion",
+        "wasmtimeVersion",
+        "packageCatalogueVersion",
+    ] {
+        let mut candidate = fixture("valid", "enabled-wasi-none");
+        candidate["profiles"]["javascript"][field] = serde_json::json!("none");
+        assert!(
+            validate(&schema, &candidate).unwrap_err().contains(field),
+            "{field}: none is only a WASI version"
+        );
+    }
     for name in [
         "wildcard-interface",
+        "wildcard-javascript-allowed-interfaces",
+        "wasi-interface",
         "unknown-interface",
         "wrong-interface-version",
         "unversioned-interface",

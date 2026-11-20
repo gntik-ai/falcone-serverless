@@ -134,9 +134,20 @@ struct Token<'a> {
 
 /// Escapes, templates and regex literals are unresolved rather than interpreted heuristically.
 fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
+    match lex_with(text, false) {
+        (tokens, None) => Ok(tokens),
+        (_, Some(at)) => Err(at),
+    }
+}
+
+/// With `recover`, a construct that cannot be lexed is recorded (first one only) and lexing
+/// resumes after it, so later imports and feature uses are still found. Recovered streams are
+/// only used to report diagnostics; they never make a source eligible.
+fn lex_with(text: &str, recover: bool) -> (Vec<Token<'_>>, Option<usize>) {
     let bytes = text.as_bytes();
     let mut at = 0;
     let mut out = Vec::new();
+    let mut failed: Option<usize> = None;
     while at < bytes.len() {
         let start = at;
         match bytes[at] {
@@ -155,7 +166,12 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
             }
             b'/' if bytes.get(at + 1) == Some(&b'*') => {
                 let Some(end) = text[at + 2..].find("*/") else {
-                    return Err(at);
+                    if recover {
+                        failed.get_or_insert(at);
+                        at += 2;
+                        continue;
+                    }
+                    return (out, Some(at));
                 };
                 at += end + 4;
                 continue;
@@ -165,12 +181,22 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
                 at += 1;
                 while at < bytes.len() && bytes[at] != quote {
                     if matches!(bytes[at], b'\\' | b'\n' | b'\r') {
-                        return Err(start);
+                        break;
                     }
                     at += 1;
                 }
-                if at == bytes.len() {
-                    return Err(start);
+                if at == bytes.len() || bytes[at] != quote {
+                    if recover {
+                        failed.get_or_insert(start);
+                        at = start + 1;
+                        out.push(Token {
+                            text: &text[start..at],
+                            at: start,
+                            kind: Kind::Opaque,
+                        });
+                        continue;
+                    }
+                    return (out, Some(start));
                 }
                 out.push(Token {
                     text: &text[start + 1..at],
@@ -240,10 +266,10 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
             }
         }
         if out.len() > 100_000 {
-            return Err(at);
+            return (out, Some(failed.unwrap_or(at)));
         }
     }
-    Ok(out)
+    (out, failed)
 }
 
 struct Grammar<'a> {
@@ -487,20 +513,15 @@ fn manifest_locations(text: &str) -> std::collections::BTreeMap<String, usize> {
     locations
 }
 
-/// The seeded catalogue is unqualified: no third-party package or version is eligible.
-/// `manifest` is package.json, not a lockfile or an instruction to execute package scripts.
-pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
-    let mut diagnostics = Vec::new();
-    if sources.len() != 1 || sources[0].text.len() > 1_048_576 || manifest.len() > 1_048_576 {
-        return Verdict(vec![diagnostic("", 0, 0, UNSUPPORTED, "source bundle")]);
-    }
+/// Package manifest checks shared by `check` and `check_tree`. `source` is the diagnostic index.
+fn check_manifest(manifest: &str, source: usize, diagnostics: &mut Vec<Diagnostic>) {
     match serde_json::from_str::<Value>(manifest)
         .ok()
         .and_then(|value| value.as_object().cloned())
     {
         None => diagnostics.push(diagnostic(
             manifest,
-            sources.len(),
+            source,
             0,
             UNSUPPORTED,
             "package manifest",
@@ -516,7 +537,7 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                     "scripts" if value.as_object().is_some_and(|scripts| !scripts.is_empty()) => {
                         diagnostics.push(diagnostic(
                             manifest,
-                            sources.len(),
+                            source,
                             at,
                             "WASM-INSTALL-HOOK",
                             "lifecycle script",
@@ -534,7 +555,7 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                     {
                         diagnostics.push(diagnostic(
                             manifest,
-                            sources.len(),
+                            source,
                             at,
                             "WASM-PACKAGE-NOT-IN-CATALOGUE",
                             "package dependency",
@@ -550,7 +571,7 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                         if value.as_object().is_some_and(|fields| fields.is_empty()) => {}
                     _ => diagnostics.push(diagnostic(
                         manifest,
-                        sources.len(),
+                        source,
                         at,
                         UNSUPPORTED,
                         "package manifest",
@@ -559,6 +580,166 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
             }
         }
     }
+}
+
+/// A specifier that names a file by path rather than by package or builtin name.
+fn tree_specifier(module: &str) -> bool {
+    module.starts_with("./")
+        || module.starts_with("../")
+        || module.starts_with('/')
+        || matches!(module, "." | "..")
+}
+
+/// An ambient `process.env` read, including optional chaining, computed access and
+/// `globalThis.process`. A member called `process` on another object is not the ambient one.
+fn process_env(tokens: &[Token<'_>], index: usize) -> bool {
+    let text = |at: usize| tokens.get(at).map(|token| token.text);
+    let punctuation = |at: usize, value: &str| {
+        tokens
+            .get(at)
+            .is_some_and(|token| token.kind == Kind::Punctuation && token.text == value)
+    };
+    if index > 0
+        && punctuation(index - 1, ".")
+        && !(index > 1 && text(index - 2) == Some("globalThis"))
+    {
+        return false;
+    }
+    let dot = if text(index + 1) == Some("?") {
+        index + 2
+    } else {
+        index + 1
+    };
+    (punctuation(dot, ".") && text(dot + 1) == Some("env") && tokens[dot + 1].kind == Kind::Word)
+        || (punctuation(index + 1, "[")
+            && tokens
+                .get(index + 2)
+                .is_some_and(|key| key.kind == Kind::String && key.text == "env"))
+}
+
+/// Feature and import diagnostics for one token stream. In tree mode (`relatives` is `Some`)
+/// relative specifiers are collected for resolution instead of being reported as packages, and
+/// `process.env` reads are diagnosed. Single-source `check` passes `None` and is unchanged.
+fn scan_tokens(
+    text: &str,
+    source: usize,
+    tokens: &[Token<'_>],
+    diagnostics: &mut Vec<Diagnostic>,
+    mut relatives: Option<&mut Vec<(String, usize)>>,
+) {
+    for (index, token) in tokens.iter().enumerate() {
+        if diagnostics.len() >= 256 {
+            break;
+        }
+        let next = |offset: usize| tokens.get(index + offset).map(|token| token.text);
+        // Module names in ordinary return values and log messages are data. Only
+        // import/require specifiers identify a library or an unsupported Node API.
+        let module_specifier = (index > 0
+            && tokens[index - 1].kind == Kind::Word
+            && matches!(tokens[index - 1].text, "from" | "import"))
+            || (index > 1
+                && tokens[index - 1].kind == Kind::Punctuation
+                && tokens[index - 1].text == "("
+                && tokens[index - 2].kind == Kind::Word
+                && matches!(tokens[index - 2].text, "require" | "import")
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|close| close.kind == Kind::Punctuation && close.text == ")"));
+        let feature = match (token.kind, token.text) {
+            (Kind::String, "child_process" | "node:child_process") if module_specifier => {
+                Some(("WASM-PROCESS-SPAWN", "child_process"))
+            }
+            (Kind::String, "worker_threads" | "node:worker_threads") if module_specifier => {
+                Some(("WASM-PROCESS-SPAWN", "worker_threads"))
+            }
+            (Kind::String, "cluster" | "node:cluster") if module_specifier => {
+                Some(("WASM-PROCESS-SPAWN", "cluster"))
+            }
+            (Kind::String, module) if module_specifier && module.ends_with(".node") => {
+                Some(("WASM-NATIVE-LIBRARY", ".node"))
+            }
+            // Tree mode follows relative specifiers inside the supplied tree; they are never
+            // third-party catalogue packages. The tree resolver diagnoses unresolved ones.
+            (Kind::String, module)
+                if module_specifier && relatives.is_some() && tree_specifier(module) =>
+            {
+                if let Some(found) = relatives.as_deref_mut() {
+                    found.push((module.to_owned(), token.at));
+                }
+                None
+            }
+            (Kind::String, "node:crypto" | "crypto") if module_specifier => {
+                Some((UNSUPPORTED, "node:crypto API"))
+            }
+            (Kind::String, module) if module_specifier && module.starts_with("node:") => {
+                Some((UNSUPPORTED, "node module"))
+            }
+            (Kind::Word, "process") if next(1) == Some(".") && next(2) == Some("dlopen") => {
+                Some(("WASM-NATIVE-LIBRARY", "process.dlopen"))
+            }
+            (Kind::Word, "process") if relatives.is_some() && process_env(tokens, index) => {
+                Some((UNSUPPORTED, "process.env"))
+            }
+            (Kind::Word, "navigator") if next(1) == Some(".") && next(2) == Some("gpu") => {
+                Some(("WASM-GPU", "navigator.gpu"))
+            }
+            (Kind::Word, "GPU" | "WebGPU") => Some(("WASM-GPU", "GPU")),
+            (Kind::Word, "eval") => Some((UNSUPPORTED, "eval")),
+            (Kind::Word, "Function") => Some((UNSUPPORTED, "Function")),
+            (Kind::Word, "new") if next(1) == Some("Function") => {
+                Some((UNSUPPORTED, "new Function"))
+            }
+            (Kind::Word, "require" | "import") => {
+                let argument = tokens.get(index + if next(1) == Some("(") { 2 } else { 1 });
+                // A leading string in an expression or argument list is not a
+                // statically resolved specifier. Diagnose the whole dynamic call.
+                let literal = argument.is_some_and(|argument| argument.kind == Kind::String)
+                    && (next(1) != Some("(")
+                        || tokens.get(index + 3).is_some_and(|close| {
+                            close.kind == Kind::Punctuation && close.text == ")"
+                        }));
+                if !literal {
+                    // Static import declarations are diagnosed at the specifier below.
+                    if token.text == "import" && next(1) != Some("(") {
+                        None
+                    } else {
+                        Some((
+                            UNSUPPORTED,
+                            if token.text == "require" {
+                                "dynamic require"
+                            } else {
+                                "dynamic import"
+                            },
+                        ))
+                    }
+                } else {
+                    None
+                }
+            }
+            (Kind::String, module) if module_specifier => {
+                if bare_node_builtin(module) {
+                    Some((UNSUPPORTED, "node module"))
+                } else {
+                    // No dependency catalogue is qualified, including local modules.
+                    Some(("WASM-PACKAGE-NOT-IN-CATALOGUE", "package import"))
+                }
+            }
+            _ => None,
+        };
+        if let Some((code, construct)) = feature {
+            diagnostics.push(diagnostic(text, source, token.at, code, construct));
+        }
+    }
+}
+
+/// The seeded catalogue is unqualified: no third-party package or version is eligible.
+/// `manifest` is package.json, not a lockfile or an instruction to execute package scripts.
+pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
+    let mut diagnostics = Vec::new();
+    if sources.len() != 1 || sources[0].text.len() > 1_048_576 || manifest.len() > 1_048_576 {
+        return Verdict(vec![diagnostic("", 0, 0, UNSUPPORTED, "source bundle")]);
+    }
+    check_manifest(manifest, sources.len(), &mut diagnostics);
     for (source, input) in sources.iter().enumerate() {
         let tokens = match lex(input.text) {
             Ok(tokens) => tokens,
@@ -573,96 +754,7 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
                 continue;
             }
         };
-        for (index, token) in tokens.iter().enumerate() {
-            if diagnostics.len() >= 256 {
-                break;
-            }
-            let next = |offset: usize| tokens.get(index + offset).map(|token| token.text);
-            // Module names in ordinary return values and log messages are data. Only
-            // import/require specifiers identify a library or an unsupported Node API.
-            let module_specifier = (index > 0
-                && tokens[index - 1].kind == Kind::Word
-                && matches!(tokens[index - 1].text, "from" | "import"))
-                || (index > 1
-                    && tokens[index - 1].kind == Kind::Punctuation
-                    && tokens[index - 1].text == "("
-                    && tokens[index - 2].kind == Kind::Word
-                    && matches!(tokens[index - 2].text, "require" | "import")
-                    && tokens
-                        .get(index + 1)
-                        .is_some_and(|close| close.kind == Kind::Punctuation && close.text == ")"));
-            let feature = match (token.kind, token.text) {
-                (Kind::String, "child_process" | "node:child_process") if module_specifier => {
-                    Some(("WASM-PROCESS-SPAWN", "child_process"))
-                }
-                (Kind::String, "worker_threads" | "node:worker_threads") if module_specifier => {
-                    Some(("WASM-PROCESS-SPAWN", "worker_threads"))
-                }
-                (Kind::String, "cluster" | "node:cluster") if module_specifier => {
-                    Some(("WASM-PROCESS-SPAWN", "cluster"))
-                }
-                (Kind::String, module) if module_specifier && module.ends_with(".node") => {
-                    Some(("WASM-NATIVE-LIBRARY", ".node"))
-                }
-                (Kind::String, "node:crypto" | "crypto") if module_specifier => {
-                    Some((UNSUPPORTED, "node:crypto API"))
-                }
-                (Kind::String, module) if module_specifier && module.starts_with("node:") => {
-                    Some((UNSUPPORTED, "node module"))
-                }
-                (Kind::Word, "process") if next(1) == Some(".") && next(2) == Some("dlopen") => {
-                    Some(("WASM-NATIVE-LIBRARY", "process.dlopen"))
-                }
-                (Kind::Word, "navigator") if next(1) == Some(".") && next(2) == Some("gpu") => {
-                    Some(("WASM-GPU", "navigator.gpu"))
-                }
-                (Kind::Word, "GPU" | "WebGPU") => Some(("WASM-GPU", "GPU")),
-                (Kind::Word, "eval") => Some((UNSUPPORTED, "eval")),
-                (Kind::Word, "Function") => Some((UNSUPPORTED, "Function")),
-                (Kind::Word, "new") if next(1) == Some("Function") => {
-                    Some((UNSUPPORTED, "new Function"))
-                }
-                (Kind::Word, "require" | "import") => {
-                    let argument = tokens.get(index + if next(1) == Some("(") { 2 } else { 1 });
-                    // A leading string in an expression or argument list is not a
-                    // statically resolved specifier. Diagnose the whole dynamic call.
-                    let literal = argument.is_some_and(|argument| argument.kind == Kind::String)
-                        && (next(1) != Some("(")
-                            || tokens.get(index + 3).is_some_and(|close| {
-                                close.kind == Kind::Punctuation && close.text == ")"
-                            }));
-                    if !literal {
-                        // Static import declarations are diagnosed at the specifier below.
-                        if token.text == "import" && next(1) != Some("(") {
-                            None
-                        } else {
-                            Some((
-                                UNSUPPORTED,
-                                if token.text == "require" {
-                                    "dynamic require"
-                                } else {
-                                    "dynamic import"
-                                },
-                            ))
-                        }
-                    } else {
-                        None
-                    }
-                }
-                (Kind::String, module) if module_specifier => {
-                    if bare_node_builtin(module) {
-                        Some((UNSUPPORTED, "node module"))
-                    } else {
-                        // No dependency catalogue is qualified, including local modules.
-                        Some(("WASM-PACKAGE-NOT-IN-CATALOGUE", "package import"))
-                    }
-                }
-                _ => None,
-            };
-            if let Some((code, construct)) = feature {
-                diagnostics.push(diagnostic(input.text, source, token.at, code, construct));
-            }
-        }
+        scan_tokens(input.text, source, &tokens, &mut diagnostics, None);
         if diagnostics.is_empty() {
             let mut grammar = Grammar {
                 source: input.text,
@@ -686,4 +778,186 @@ pub fn check(sources: &[Source<'_>], manifest: &str) -> Verdict {
         }
     }
     Verdict(diagnostics)
+}
+
+/// One file of a multi-file source tree. `path` is relative to the tree root, `/`-separated.
+pub struct TreeFile<'a> {
+    pub path: &'a str,
+    pub text: &'a str,
+}
+
+/// A tree diagnostic names the construct and its location (file, line, column), never source text.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TreeDiagnostic {
+    pub code: &'static str,
+    pub construct: &'static str,
+    pub path: String,
+    pub line: usize,
+    pub column: usize,
+}
+
+#[derive(Debug)]
+pub struct TreeVerdict(Vec<TreeDiagnostic>);
+
+impl TreeVerdict {
+    pub fn supported(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn diagnostics(&self) -> &[TreeDiagnostic] {
+        &self.0
+    }
+}
+
+const MAX_TREE_FILES: usize = 256;
+
+fn tree_path(path: &str) -> Option<String> {
+    (!path.is_empty()
+        && !path.contains(['\\', '\0'])
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != ".."))
+    .then(|| path.to_owned())
+}
+
+/// Resolve a relative specifier against the importing file. `Err` means it leaves the tree.
+fn resolve(from: &str, specifier: &str) -> Result<String, ()> {
+    if specifier.starts_with('/') || specifier.contains(['\\', '\0']) {
+        return Err(());
+    }
+    let mut parts: Vec<&str> = from.split('/').collect();
+    parts.pop();
+    for part in specifier.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop().ok_or(())?;
+            }
+            name => parts.push(name),
+        }
+    }
+    if parts.is_empty() {
+        Err(())
+    } else {
+        Ok(parts.join("/"))
+    }
+}
+
+/// Static check of a multi-file source tree, separate from the single-source `check` so the
+/// legacy adapter's build path never newly accepts several files. Starting at `entry`, relative
+/// specifiers are resolved inside the tree and the files they reach are checked in turn; a
+/// specifier that does not resolve or leaves the tree is a diagnostic, never a package. A lex
+/// failure in a file is reported but still lets that file's imports and feature uses surface.
+/// A reachable file with no feature hit still goes through the closed grammar, so ineligible
+/// helpers are recorded rather than filtered. Diagnostics are sorted by file, line and column.
+pub fn check_tree(files: &[TreeFile<'_>], entry: &str, manifest: Option<&str>) -> TreeVerdict {
+    let at_origin = |path: &str, construct| TreeDiagnostic {
+        code: UNSUPPORTED,
+        construct,
+        path: path.to_owned(),
+        line: 1,
+        column: 1,
+    };
+    if files.len() > MAX_TREE_FILES
+        || files.iter().any(|file| file.text.len() > 1_048_576)
+        || manifest.is_some_and(|text| text.len() > 1_048_576)
+    {
+        return TreeVerdict(vec![at_origin("", "source bundle")]);
+    }
+    let mut out = Vec::new();
+    let mut index = std::collections::BTreeMap::new();
+    for file in files {
+        match tree_path(file.path) {
+            Some(path) if index.contains_key(&path) => {
+                out.push(at_origin(file.path, "duplicate tree path"));
+            }
+            Some(path) => {
+                index.insert(path, file.text);
+            }
+            None => out.push(at_origin(file.path, "tree path")),
+        }
+    }
+    if let Some(text) = manifest {
+        let mut found = Vec::new();
+        check_manifest(text, 0, &mut found);
+        out.extend(found.into_iter().map(|d| TreeDiagnostic {
+            code: d.code,
+            construct: d.construct,
+            path: "package.json".to_owned(),
+            line: d.line,
+            column: d.column,
+        }));
+    }
+    let mut queue = std::collections::VecDeque::new();
+    let mut seen = std::collections::BTreeSet::new();
+    match tree_path(entry).filter(|path| index.contains_key(path)) {
+        Some(path) => {
+            seen.insert(path.clone());
+            queue.push_back(path);
+        }
+        None => out.push(at_origin(entry, "entry module")),
+    }
+    while let Some(path) = queue.pop_front() {
+        let text = index[&path];
+        let (tokens, failed) = lex_with(text, true);
+        let mut found = Vec::new();
+        let mut relatives = Vec::new();
+        if let Some(at) = failed {
+            found.push(diagnostic(text, 0, at, UNSUPPORTED, "unresolved syntax"));
+        }
+        scan_tokens(text, 0, &tokens, &mut found, Some(&mut relatives));
+        for (specifier, at) in relatives {
+            match resolve(&path, &specifier) {
+                Ok(target) if index.contains_key(&target) => {
+                    if seen.insert(target.clone()) {
+                        queue.push_back(target);
+                    }
+                }
+                Ok(_) => found.push(diagnostic(
+                    text,
+                    0,
+                    at,
+                    UNSUPPORTED,
+                    "unresolved relative import",
+                )),
+                Err(()) => found.push(diagnostic(
+                    text,
+                    0,
+                    at,
+                    UNSUPPORTED,
+                    "relative import outside tree",
+                )),
+            }
+        }
+        if found.is_empty() {
+            let mut grammar = Grammar {
+                source: text,
+                tokens: &tokens,
+                at: 0,
+                asynchronous: false,
+                context: false,
+            };
+            if grammar.program().is_err() {
+                let at = tokens.get(grammar.at).map_or(text.len(), |token| token.at);
+                found.push(diagnostic(text, 0, at, UNSUPPORTED, "unresolved syntax"));
+            }
+        }
+        out.extend(found.into_iter().map(|d| TreeDiagnostic {
+            code: d.code,
+            construct: d.construct,
+            path: path.clone(),
+            line: d.line,
+            column: d.column,
+        }));
+    }
+    out.sort_by(|a, b| {
+        (&a.path, a.line, a.column, a.code, a.construct).cmp(&(
+            &b.path,
+            b.line,
+            b.column,
+            b.code,
+            b.construct,
+        ))
+    });
+    out.truncate(256);
+    TreeVerdict(out)
 }

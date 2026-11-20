@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:falcone:contracts:language-profile-matrix:1",
-  "title": "ctr-language-profile-matrix v1",
+  "$id": "urn:falcone:contracts:language-profile-matrix:2",
+  "title": "ctr-language-profile-matrix v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -80,6 +80,9 @@
               "const": "unqualified"
             },
             {
+              "const": "none"
+            },
+            {
               "$ref": "#/$defs/exactVersion"
             }
           ]
@@ -129,7 +132,9 @@
               "WASM-NATIVE-LIBRARY",
               "WASM-GPU",
               "WASM-PROCESS-SPAWN",
-              "WASM-INSTALL-HOOK"
+              "WASM-INSTALL-HOOK",
+              "WASM-PACKAGE-NOT-IN-CATALOGUE",
+              "WASM-UNSUPPORTED-API"
             ]
           },
           "allOf": [
@@ -151,6 +156,16 @@
             {
               "contains": {
                 "const": "WASM-INSTALL-HOOK"
+              }
+            },
+            {
+              "contains": {
+                "const": "WASM-PACKAGE-NOT-IN-CATALOGUE"
+              }
+            },
+            {
+              "contains": {
+                "const": "WASM-UNSUPPORTED-API"
               }
             }
           ]
@@ -237,7 +252,14 @@
                 "$ref": "#/$defs/exactVersion"
               },
               "wasiVersion": {
-                "$ref": "#/$defs/exactVersion"
+                "oneOf": [
+                  {
+                    "const": "none"
+                  },
+                  {
+                    "$ref": "#/$defs/exactVersion"
+                  }
+                ]
               },
               "toolchainVersion": {
                 "$ref": "#/$defs/exactVersion"
