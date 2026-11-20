@@ -1,0 +1,118 @@
+{
+  "example": "events-handle",
+  "cases": [
+    {
+      "name": "first-access",
+      "state": {
+        "tenants/synthetic/rate/ws-synthetic-0001": ""
+      },
+      "params": {
+        "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+        "workspaceId": "ws-synthetic-0001",
+        "tenantId": "tenant-synthetic-0001",
+        "requesterId": "user-synthetic-0001",
+        "specVersion": "1.4.0",
+        "format": "json",
+        "now": 1794398400000,
+        "limit": 2
+      },
+      "calls": [
+        {
+          "op": "read",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001",
+          "checkpoint": false
+        },
+        {
+          "op": "write",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001",
+          "checkpoint": false,
+          "data": "{\"minute\":29906640,\"count\":1}"
+        },
+        {
+          "op": "publish",
+          "destination": "console.openapi.spec.accessed",
+          "payload": "{\"eventType\":\"openapi.spec.accessed\",\"timestamp\":\"2026-11-11T12:00:00.000Z\",\"workspaceId\":\"ws-synthetic-0001\",\"tenantId\":\"tenant-synthetic-0001\",\"specVersion\":\"1.4.0\",\"requesterId\":\"user-synthetic-0001\",\"format\":\"json\"}"
+        }
+      ],
+      "response": {
+        "statusCode": 200,
+        "body": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "second-access-in-the-same-minute",
+      "state": {
+        "tenants/synthetic/rate/ws-synthetic-0001": "{\"minute\":29906640,\"count\":1}"
+      },
+      "params": {
+        "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+        "workspaceId": "ws-synthetic-0001",
+        "tenantId": "tenant-synthetic-0001",
+        "requesterId": "user-synthetic-0001",
+        "specVersion": "1.4.0",
+        "format": "json",
+        "now": 1794398400000,
+        "limit": 2
+      },
+      "calls": [
+        {
+          "op": "read",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001",
+          "checkpoint": false
+        },
+        {
+          "op": "write",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001",
+          "checkpoint": false,
+          "data": "{\"minute\":29906640,\"count\":2}"
+        },
+        {
+          "op": "publish",
+          "destination": "console.openapi.spec.accessed",
+          "payload": "{\"eventType\":\"openapi.spec.accessed\",\"timestamp\":\"2026-11-11T12:00:00.000Z\",\"workspaceId\":\"ws-synthetic-0001\",\"tenantId\":\"tenant-synthetic-0001\",\"specVersion\":\"1.4.0\",\"requesterId\":\"user-synthetic-0001\",\"format\":\"json\"}"
+        }
+      ],
+      "response": {
+        "statusCode": 200,
+        "body": {
+          "ok": true
+        }
+      }
+    },
+    {
+      "name": "bucket-already-full",
+      "state": {
+        "tenants/synthetic/rate/ws-synthetic-0001": "{\"minute\":29906640,\"count\":2}"
+      },
+      "params": {
+        "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi",
+        "workspaceId": "ws-synthetic-0001",
+        "tenantId": "tenant-synthetic-0001",
+        "requesterId": "user-synthetic-0001",
+        "specVersion": "1.4.0",
+        "format": "json",
+        "now": 1794398400000,
+        "limit": 2
+      },
+      "calls": [
+        {
+          "op": "read",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001",
+          "checkpoint": false
+        }
+      ],
+      "response": {
+        "statusCode": 429,
+        "headers": {
+          "Retry-After": "60"
+        },
+        "body": {
+          "code": "RATE_LIMITED",
+          "message": "Too many requests"
+        }
+      }
+    }
+  ]
+}

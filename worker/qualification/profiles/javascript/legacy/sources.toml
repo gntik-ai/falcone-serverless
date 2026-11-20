@@ -1,0 +1,33 @@
+# Verbatim copies of the reference function and its imports, committed as test fixtures only.
+# Operator decision 2026-11-20. They contain no secrets and are never built or executed.
+# Paths are relative to this directory and mirror packages/openapi-sdk-service/ upstream.
+repository = "gntik-ai/falcone"
+commit = "10a3c6e7a23c9a29b934c35f0682bbdef232099f"
+root = "packages/openapi-sdk-service"
+entry = "actions/openapi-spec-serve.mjs"
+
+[[file]]
+path = "actions/openapi-spec-serve.mjs"
+sha256 = "3827f5e2c7c14cc3cf5abb4eb8272d8cb67938dc4d195723efcf695bf8924ce1"
+
+[[file]]
+path = "src/config.mjs"
+sha256 = "749d3fefde37945e57607ae462a6a55ee193181c898ae4bbbd641f1dae0a30e5"
+
+[[file]]
+path = "src/spec-version-repo.mjs"
+sha256 = "5b13e9bd885954900ddf1d4e2d7b780d5e46d73e09074b31bdf5aa013f5de437"
+
+[[file]]
+path = "src/spec-cache.mjs"
+sha256 = "74883a947b993384a4fe3fd697e7cf4f73bdb2f36ac688ec4303bea43d17e2dc"
+
+# Not present in the maker snapshot (no network). The operator-run step fetches them by commit
+# and checks the hash; until then the tests report UNVERIFIED and never pass as qualified.
+[[file]]
+path = "src/spec-audit.mjs"
+sha256 = "28dcd89088ee98857dff89cca7aab62bc4d37fea2996fb31252cf4fc83089fd6"
+
+[[file]]
+path = "src/network.mjs"
+sha256 = "7b8f7a0b7d788b1b5b4b7c16a62a74d8900f521facaa8e94c9c30ea9a85eb270"

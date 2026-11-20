@@ -1,0 +1,9 @@
+{
+  "topic": "console.openapi.spec.accessed",
+  "delivery": "fire-and-forget",
+  "payload": {
+    "eventType": "openapi.spec.accessed",
+    "fields": ["timestamp", "workspaceId", "tenantId", "specVersion", "requesterId", "format"]
+  },
+  "note": "Recorded for a future rewrite from the operator decision of 2026-11-20 (src/spec-audit.mjs emits it as void emitSpecAccessed(...).catch(() => undefined)). The wrapper does not run and #278 is unchanged."
+}

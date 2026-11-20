@@ -1,0 +1,146 @@
+# JavaScript Wasm profile qualification manifest (matrix revision 2).
+# Operator decisions 2026-11-07, 2026-11-19 and 2026-11-20. The toolchain pins are copied from
+# ../../javascript/versions.toml and a static test keeps them equal. Recording this manifest does not
+# qualify or enable the profile: the matrix entry stays disabled until built components and
+# their evidence are recorded.
+
+[profile]
+id = "javascript-wasi-v1"
+matrix_revision = "2"
+# Never selected or changed by a diagnostic; OCI is only ever named as an alternative in text.
+mode = "wasm"
+status = "disabled"
+# qualified only when every static and cluster check passes; a failure is blocked.
+qualification = "not-qualified"
+engine = "StarlingMonkey"
+
+[toolchain]
+wasmtime = "49.0.5"
+wasi = "none"
+jco = "1.41.0"
+jco_sha256 = "abe7ab13d0fb1b6ecc6f7d3fffd6ff27862d158936a11d6f48bcb0ada00af4c6"
+componentize_js = "0.23.0"
+componentize_js_sha256 = "b2e4b6fdee055805370950f127c21d7c549dcc7a1e907f20c5ee769ebba7ad10"
+wasi_virt_rev = "bca61c27499d2c290b5431cfcff013737b3ba01d"
+node = "v26.13.0"
+node_sha256 = "d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = [
+  "falcone:host/storage@0.2.0",
+  "falcone:host/http@0.2.0",
+  "falcone:host/events@0.2.0",
+  "falcone:host/workflows@0.2.0",
+  "falcone:host/logging@0.2.0",
+  "falcone:host/cancellation@0.2.0",
+  "falcone:host/progress@0.2.0",
+  "falcone:host/invocation-context@0.2.0",
+]
+
+# No third-party package is accepted: the catalogue is unqualified and empty.
+[catalogue]
+revision = "unqualified"
+packages = []
+
+[[workloads]]
+name = "json-transform"
+handler = "workloads/json-transform/handler.mjs"
+input = "workloads/json-transform/input.json"
+expected = "workloads/json-transform/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
+imports = []
+
+[[workloads]]
+name = "text-regex"
+handler = "workloads/text-regex/handler.mjs"
+input = "workloads/text-regex/input.json"
+expected = "workloads/text-regex/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
+imports = []
+
+[[workloads]]
+name = "hash-sha256"
+handler = "workloads/hash-sha256/handler.mjs"
+input = "workloads/hash-sha256/input.json"
+expected = "workloads/hash-sha256/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
+imports = []
+
+[[workloads]]
+name = "events-handle"
+handler = "examples/events-handle/handler.mjs"
+request = "examples/events-handle/request.json"
+cases = "examples/events-handle/cases.json"
+imports = ["falcone:host/storage@0.2.0", "falcone:host/events@0.2.0"]
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "A native library or addon cannot run in Wasm mode. Port it to a supported Wasm package; OCI mode is a separate, explicitly authorized choice."
+[diagnostics."WASM-GPU"]
+message = "GPU access is outside the falcone:host capability host and is rejected."
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "Spawning a process or thread is not available in Wasm mode."
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "Install and lifecycle scripts are never run; nothing is installed."
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "The dependency, or its version, is not in the pinned package catalogue. Qualification and the build are rejected and nothing is installed. OCI mode is a separate, explicitly authorized alternative."
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "The module or API is outside this profile's supported subset."
+
+# One negative fixture per code: `path` is a source tree, `file` and `line` locate the one
+# diagnostic it must yield, and nothing is built or instantiated for any of them.
+[[negative]]
+code = "WASM-NATIVE-LIBRARY"
+path = "negative/native-library"
+entry = "main.mjs"
+file = "main.mjs"
+line = 2
+
+[[negative]]
+code = "WASM-GPU"
+path = "negative/gpu"
+entry = "main.mjs"
+file = "main.mjs"
+line = 2
+
+[[negative]]
+code = "WASM-PROCESS-SPAWN"
+path = "negative/process-spawn"
+entry = "main.mjs"
+file = "main.mjs"
+line = 1
+
+[[negative]]
+code = "WASM-INSTALL-HOOK"
+path = "negative/install-hook"
+entry = "main.mjs"
+file = "package.json"
+line = 3
+
+[[negative]]
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+path = "negative/package-not-in-catalogue"
+entry = "main.mjs"
+file = "main.mjs"
+line = 1
+
+[[negative]]
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-api"
+entry = "main.mjs"
+file = "main.mjs"
+line = 2
+
+# The reference function is a recorded BLOCKED migration result: nothing is built or run.
+[legacy]
+sources = "legacy/sources.toml"
+entry = "actions/openapi-spec-serve.mjs"
+result = "blocked"
+migration = "Move to OCI mode (separately authorized) or rewrite for this profile."
+golden = "legacy/expected-diagnostics.json"
+partial_golden = "legacy/expected-diagnostics-partial.json"
+access_event = "legacy/access-event.json"
