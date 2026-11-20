@@ -456,9 +456,13 @@ fn run_with_script_options(
     let last = words.len() - 1;
     for (at, word) in words.iter().enumerate() {
         let word = word.trim_matches('"');
-        args.push(if at == last {
-            "./does-not-exist".to_owned()
-        } else if word.contains('$') {
+        if at == last {
+            // Flag parsing stops at the package operand: extra flags go before it.
+            args.extend(extra.split_whitespace().map(str::to_owned));
+            args.push("./does-not-exist".to_owned());
+            continue;
+        }
+        args.push(if word.contains('$') {
             // A path value (the WIT directory or the output file) in the script.
             scratch
                 .join(if word.ends_with(".wasm") {
@@ -472,7 +476,6 @@ fn run_with_script_options(
             word.to_owned()
         });
     }
-    args.extend(extra.split_whitespace().map(str::to_owned));
     let output = std::process::Command::new(tinygo)
         .args(&args)
         .current_dir(scratch)
@@ -511,6 +514,11 @@ fn the_build_script_options_are_accepted_by_the_pinned_tools() {
     assert!(
         !stderr.contains(rejected),
         "the script's tinygo options are rejected: {stderr}"
+    );
+    // Every flag parsed, so the tool got as far as the package operand and failed on that.
+    assert!(
+        stderr.contains("does-not-exist"),
+        "the valid options did not reach the missing-package error: {stderr}"
     );
 
     // The only wasm-tools invocation of the script asks for the version.
