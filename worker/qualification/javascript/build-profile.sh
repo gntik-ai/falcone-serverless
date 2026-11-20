@@ -40,7 +40,13 @@ virt="$FS_TOOLCHAIN_CACHE/bin/wasi-virt"
 [[ ! -e "$FS_PROFILE_COMPONENTS" ]] || { echo 'output directory already exists' >&2; exit 1; }
 stage=$(mktemp -d "$TMPDIR/profile-js.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
-mkdir "$stage/components"
+mkdir "$stage/components" "$stage/components/evidence"
+
+# The pod has no checkout: the static evidence (EVIDENCE_PATHS in tests/support/profile_javascript.rs)
+# is packaged with the components and read from there at run time.
+for path in manifest.toml legacy negative; do
+    cp -r "$profile/$path" "$stage/components/evidence/$path"
+done
 
 # Static checks precede componentization: the matrix, the manifest, the negative fixtures and
 # the reference tree's BLOCKED result. A failure stops the build before any component exists.
@@ -59,6 +65,7 @@ done
 FS_PROFILE_COMPONENTS="$stage/components" cargo test --offline --locked -p falcone-serverless-worker --test profile_javascript_runtime -- --ignored --exact built_profile_components --nocapture
 mkdir -p "$FS_PROFILE_COMPONENTS/bin"
 cp "$stage/components/"*.wasm "$FS_PROFILE_COMPONENTS/"
+cp -r "$stage/components/evidence" "$FS_PROFILE_COMPONENTS/evidence"
 cargo test --offline --locked -p falcone-serverless-worker --test profile_javascript_runtime --no-run --message-format=json > "$stage/build.jsonl"
 python3 - "$stage/build.jsonl" "$FS_PROFILE_COMPONENTS/bin/profile-javascript-runtime" <<'PY'
 import json, pathlib, shutil, sys
@@ -69,4 +76,4 @@ if len(tests) != 1:
 shutil.copy2(tests[0], sys.argv[2])
 PY
 cp "$CARGO_TARGET_DIR/debug/artifact-compile-child" "$FS_PROFILE_COMPONENTS/bin/"
-(cd "$FS_PROFILE_COMPONENTS" && sha256sum ./*.wasm bin/* > SHA256SUMS)
+(cd "$FS_PROFILE_COMPONENTS" && sha256sum ./*.wasm bin/* $(find evidence -type f | sort) > SHA256SUMS)

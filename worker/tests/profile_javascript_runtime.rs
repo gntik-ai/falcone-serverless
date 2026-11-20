@@ -11,7 +11,8 @@ use falcone_serverless_worker::{
     host::{self, Context},
 };
 use profile::{
-    Call, Case, Check, Replay, Status, compare, load_cases, request_for, static_evidence, status,
+    Call, Case, Check, Replay, Status, compare, evidence_root, load_cases, request_for, root,
+    static_evidence_in, status,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -86,7 +87,14 @@ fn invoke(
 fn built_profile_components() {
     let Some(cache_root) = std::env::var_os("FS_TOOLCHAIN_CACHE") else {
         // Nothing ran, so nothing is qualified: the computed status says so explicitly.
-        let mut checks: Vec<Check> = static_evidence().into_iter().map(|(_, c)| c).collect();
+        // Not running from a bundle: the build checkout is the evidence.
+        let directory = std::env::var_os("FS_PROFILE_EVIDENCE")
+            .map(PathBuf::from)
+            .unwrap_or_else(root);
+        let mut checks: Vec<Check> = static_evidence_in(&directory)
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect();
         checks.push(Check::Unverified("FS_TOOLCHAIN_CACHE unset".into()));
         assert_ne!(status(&checks), Status::Qualified);
         println!("UNVERIFIED: FS_TOOLCHAIN_CACHE unset; no guest toolchain or component executed");
@@ -95,6 +103,12 @@ fn built_profile_components() {
     let components = std::env::var_os("FS_PROFILE_COMPONENTS")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(cache_root).join("profile"));
+    // The evidence travels with the components (or FS_PROFILE_EVIDENCE); the build checkout is
+    // not available in the pod and is never read here.
+    let evidence_directory = evidence_root(
+        &components,
+        std::env::var_os("FS_PROFILE_EVIDENCE").map(PathBuf::from),
+    );
     let exe = std::env::current_exe().unwrap();
     let parent = exe.parent().unwrap();
     let binaries = if parent.file_name().is_some_and(|name| name == "deps") {
@@ -118,7 +132,7 @@ fn built_profile_components() {
     // The status is computed over the static evidence (reference files, tree diagnostics,
     // golden, negative fixtures, expectation provenance) together with the runtime outcomes,
     // so runtime results alone can never qualify and a static failure always blocks.
-    let evidence = static_evidence();
+    let evidence = static_evidence_in(&evidence_directory);
     for (name, check) in &evidence {
         println!("{name}: {check:?}");
     }

@@ -7,7 +7,12 @@ use falcone_serverless_worker::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 /// One platform call as the host delivered it. Every argument the guest controls is kept:
 /// storage keys, checkpoint flags, event destinations and payload bytes.
@@ -225,8 +230,20 @@ pub fn request_for(base: &Value, digest: &str, imports: &[String], params: &Valu
 
 // ---------------------------------------------------------------- static evidence
 
+/// The evidence the static checks and the pod runner read, relative to the profile directory.
+/// A relocated bundle carries exactly these paths; `build-profile.sh` copies the same list.
+pub const EVIDENCE_PATHS: &[&str] = &["manifest.toml", "legacy", "negative"];
+
+/// The profile directory in the build checkout.
 pub fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("qualification/profiles/javascript")
+}
+
+/// Where the pod runner reads its evidence: an explicit override, else the `evidence`
+/// directory shipped beside the built components. Never the build checkout, which a relocated
+/// bundle does not have.
+pub fn evidence_root(components: &Path, explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| components.join("evidence"))
 }
 
 pub fn hex(bytes: &[u8]) -> String {
@@ -238,11 +255,10 @@ pub struct Reference {
     pub files: Vec<(String, String)>,
 }
 
-pub fn reference() -> Reference {
-    let table: toml::Value = toml::from_str(
-        &fs::read_to_string(root().join("legacy/sources.toml")).expect("sources.toml"),
-    )
-    .expect("sources.toml is TOML");
+pub fn reference_in(dir: &Path) -> Reference {
+    let table: toml::Value =
+        toml::from_str(&fs::read_to_string(dir.join("legacy/sources.toml")).expect("sources.toml"))
+            .expect("sources.toml is TOML");
     Reference {
         entry: table["entry"].as_str().unwrap().to_owned(),
         files: table["file"]
@@ -268,12 +284,12 @@ pub fn verify(bytes: Option<&[u8]>, pinned: &str) -> Check {
     }
 }
 
-pub fn reference_checks() -> Vec<(String, Check)> {
-    reference()
+pub fn reference_checks_in(dir: &Path) -> Vec<(String, Check)> {
+    reference_in(dir)
         .files
         .iter()
         .map(|(path, pinned)| {
-            let bytes = fs::read(root().join("legacy").join(path)).ok();
+            let bytes = fs::read(dir.join("legacy").join(path)).ok();
             (path.clone(), verify(bytes.as_deref(), pinned))
         })
         .collect()
@@ -281,13 +297,12 @@ pub fn reference_checks() -> Vec<(String, Check)> {
 
 /// The reference files that are present and hash to their pin. An absent or altered file is
 /// never used as evidence.
-pub fn verified_files() -> Vec<(String, String)> {
-    let reference = reference();
-    reference
+pub fn verified_files_in(dir: &Path) -> Vec<(String, String)> {
+    reference_in(dir)
         .files
         .iter()
         .filter_map(|(path, pinned)| {
-            let bytes = fs::read(root().join("legacy").join(path)).ok()?;
+            let bytes = fs::read(dir.join("legacy").join(path)).ok()?;
             (hex(&bytes) == *pinned)
                 .then(|| String::from_utf8(bytes).ok())
                 .flatten()
@@ -314,9 +329,9 @@ pub fn has(report: &[Value], code: &str, file: &str, line: u64) -> bool {
         .any(|d| d["code"] == code && d["file"] == file && d["line"] == line)
 }
 
-fn legacy_tree_check(golden: &Value) -> Check {
-    let reference = reference();
-    let files = verified_files();
+fn legacy_tree_check(dir: &Path, golden: &Value) -> Check {
+    let reference = reference_in(dir);
+    let files = verified_files_in(dir);
     if files.len() != reference.files.len() {
         return Check::Unverified(format!(
             "{} of {} reference files absent or altered; the complete tree was not checked",
@@ -341,9 +356,9 @@ fn legacy_tree_check(golden: &Value) -> Check {
     Check::Passed
 }
 
-fn legacy_golden_check(golden: &Value) -> Check {
-    let reference = reference();
-    let files = verified_files();
+fn legacy_golden_check(dir: &Path, golden: &Value) -> Check {
+    let reference = reference_in(dir);
+    let files = verified_files_in(dir);
     if files.len() != reference.files.len() {
         return Check::Unverified("reference tree incomplete; golden not compared".into());
     }
@@ -358,14 +373,14 @@ fn legacy_golden_check(golden: &Value) -> Check {
 }
 
 /// Every negative fixture yields exactly its one documented diagnostic, file and line.
-fn negative_check() -> Check {
+fn negative_check(dir: &Path) -> Check {
     let manifest: toml::Value =
-        toml::from_str(&fs::read_to_string(root().join("manifest.toml")).unwrap()).unwrap();
+        toml::from_str(&fs::read_to_string(dir.join("manifest.toml")).unwrap()).unwrap();
     for fixture in manifest["negative"].as_array().unwrap() {
-        let dir = root().join(fixture["path"].as_str().unwrap());
+        let fixture_dir = dir.join(fixture["path"].as_str().unwrap());
         let mut files = Vec::new();
         let mut package = None;
-        for entry in fs::read_dir(&dir).unwrap() {
+        for entry in fs::read_dir(&fixture_dir).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_str().unwrap().to_owned();
             let text = fs::read_to_string(&path).unwrap();
@@ -405,9 +420,9 @@ fn negative_check() -> Check {
 
 /// Whether the recorded expected outputs of the pure workloads are the operator's recording
 /// (`recorded`) or a locally created example (`pending-138`). Only a recording can qualify.
-fn workload_provenance() -> Vec<(String, Check)> {
+fn workload_provenance(dir: &Path) -> Vec<(String, Check)> {
     let manifest: toml::Value =
-        toml::from_str(&fs::read_to_string(root().join("manifest.toml")).unwrap()).unwrap();
+        toml::from_str(&fs::read_to_string(dir.join("manifest.toml")).unwrap()).unwrap();
     manifest["workloads"]
         .as_array()
         .unwrap()
@@ -430,18 +445,37 @@ fn workload_provenance() -> Vec<(String, Check)> {
 /// the unmodified reference tree, its golden, the negative fixtures and the provenance of the
 /// workload expectations. The cluster runner extends this with its own outcomes, so absent
 /// reference evidence or a failed static check can never be hidden by runtime results alone.
-pub fn static_evidence() -> Vec<(String, Check)> {
-    let golden: Value = serde_json::from_str(
-        &fs::read_to_string(root().join("legacy/expected-diagnostics.json")).unwrap(),
-    )
-    .unwrap();
-    let mut out: Vec<(String, Check)> = reference_checks()
+/// The same evidence read from an explicit directory, so a relocated bundle can be checked
+/// without the build checkout. A directory that lacks the bundle is UNVERIFIED, never a pass.
+pub fn static_evidence_in(dir: &Path) -> Vec<(String, Check)> {
+    let golden_path = dir.join("legacy/expected-diagnostics.json");
+    let missing: Vec<&str> = EVIDENCE_PATHS
+        .iter()
+        .copied()
+        .filter(|path| !dir.join(path).exists())
+        .chain((!golden_path.exists()).then_some("legacy/expected-diagnostics.json"))
+        .chain((!dir.join("legacy/sources.toml").exists()).then_some("legacy/sources.toml"))
+        .collect();
+    if !missing.is_empty() {
+        return vec![(
+            "evidence-bundle".into(),
+            Check::Unverified(format!(
+                "evidence bundle incomplete: {}",
+                missing.join(", ")
+            )),
+        )];
+    }
+    let golden: Value = serde_json::from_str(&fs::read_to_string(golden_path).unwrap()).unwrap();
+    let mut out: Vec<(String, Check)> = reference_checks_in(dir)
         .into_iter()
         .map(|(path, check)| (format!("reference-file:{path}"), check))
         .collect();
-    out.push(("legacy-tree-diagnostics".into(), legacy_tree_check(&golden)));
-    out.push(("legacy-golden".into(), legacy_golden_check(&golden)));
-    out.push(("negative-fixtures".into(), negative_check()));
-    out.extend(workload_provenance());
+    out.push((
+        "legacy-tree-diagnostics".into(),
+        legacy_tree_check(dir, &golden),
+    ));
+    out.push(("legacy-golden".into(), legacy_golden_check(dir, &golden)));
+    out.push(("negative-fixtures".into(), negative_check(dir)));
+    out.extend(workload_provenance(dir));
     out
 }

@@ -10,8 +10,9 @@ use falcone_serverless_worker::{
     host::{Bindings, Context, HostError, Operation, Reply},
 };
 use profile::{
-    Call, Case, Check, Replay, Status, compare, has, hex, load_cases, reference, reference_checks,
-    request_for, root, static_evidence, status, tree_report, verified_files, verify,
+    Call, Case, Check, EVIDENCE_PATHS, Replay, Status, compare, evidence_root, has, hex,
+    load_cases, reference_checks_in, reference_in, request_for, root, static_evidence_in, status,
+    tree_report, verified_files_in, verify,
 };
 use serde_json::{Value, json};
 use std::{
@@ -28,6 +29,20 @@ const CODES: &[&str] = &[
     "WASM-PACKAGE-NOT-IN-CATALOGUE",
     "WASM-UNSUPPORTED-API",
 ];
+
+// The checkout's evidence; `static_evidence_in` reads any directory, such as a relocated bundle.
+fn reference() -> profile::Reference {
+    reference_in(&root())
+}
+fn reference_checks() -> Vec<(String, Check)> {
+    reference_checks_in(&root())
+}
+fn verified_files() -> Vec<(String, String)> {
+    verified_files_in(&root())
+}
+fn static_evidence() -> Vec<(String, Check)> {
+    static_evidence_in(&root())
+}
 
 fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -790,11 +805,6 @@ fn runtime_outcomes_alone_never_qualify_without_the_static_evidence() {
         !static_checks.iter().any(|c| matches!(c, Check::Failed(_))),
         "{evidence:?}"
     );
-    // The pending golden and the local workload expectations are UNVERIFIED, never passed.
-    for name in ["legacy-golden", "workload-expectation:json-transform"] {
-        let (_, check) = evidence.iter().find(|(n, _)| n == name).unwrap();
-        assert!(matches!(check, Check::Unverified(_)), "{name}");
-    }
     // Every runtime check passing does not qualify while the static evidence is pending ...
     let mut combined = static_checks.clone();
     combined.extend(std::iter::repeat_n(Check::Passed, 16));
@@ -808,20 +818,189 @@ fn runtime_outcomes_alone_never_qualify_without_the_static_evidence() {
     assert_eq!(status(&all_passed), Status::Qualified);
 }
 
-#[test]
-fn workload_expectations_stay_pending_until_the_operator_recording_replaces_them() {
-    let manifest = manifest();
-    for workload in manifest["workloads"].as_array().unwrap() {
-        if workload.get("expected").is_none() {
-            continue;
+/// A scratch copy of the evidence bundle, removed on drop. It stands for the bundle the build
+/// script ships beside the components: the build checkout is not part of it.
+struct Bundle(PathBuf);
+impl Bundle {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("profile-js-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        for path in EVIDENCE_PATHS {
+            copy_tree(&root().join(path), &dir.join(path));
         }
-        assert_eq!(
-            workload["expectation"].as_str(),
-            Some("pending-138"),
-            "{}: a locally created output is never recorded as the #138 expectation",
-            workload["name"].as_str().unwrap()
-        );
+        Bundle(dir)
     }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+    fn rewrite(&self, file: &str, change: impl Fn(&str) -> String) {
+        let path = self.0.join(file);
+        fs::write(&path, change(&read(&path))).unwrap();
+    }
+}
+impl Drop for Bundle {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn copy_tree(from: &Path, to: &Path) {
+    if from.is_dir() {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            copy_tree(&entry.path(), &to.join(entry.file_name()));
+        }
+    } else {
+        fs::copy(from, to).unwrap();
+    }
+}
+fn named<'a>(evidence: &'a [(String, Check)], name: &str) -> &'a Check {
+    &evidence.iter().find(|(n, _)| n == name).unwrap().1
+}
+
+#[test]
+fn workload_provenance_is_pending_or_recorded_and_only_a_recording_passes() {
+    // Controlled bundles: both states are forced, so this does not depend on whether the
+    // checked-in expectations have been replaced by the operator's recording yet.
+    for expectation in ["pending-138", "recorded"] {
+        let bundle = Bundle::new("provenance");
+        bundle.rewrite("manifest.toml", |text| {
+            text.replace(
+                "expectation = \"pending-138\"",
+                "expectation = \"recorded\"",
+            )
+            .replace(
+                "expectation = \"recorded\"",
+                &format!("expectation = \"{expectation}\""),
+            )
+        });
+        let evidence = static_evidence_in(bundle.path());
+        for name in ["json-transform", "text-regex", "hash-sha256"] {
+            let check = named(&evidence, &format!("workload-expectation:{name}"));
+            match expectation {
+                "recorded" => assert_eq!(check, &Check::Passed, "{name}"),
+                _ => assert!(matches!(check, Check::Unverified(_)), "{name}"),
+            }
+        }
+    }
+    // The checked-in expectation is always one of the two documented states.
+    for workload in manifest()["workloads"].as_array().unwrap() {
+        if workload.get("expected").is_some() {
+            assert!(
+                ["pending-138", "recorded"].contains(&workload["expectation"].as_str().unwrap()),
+                "{}",
+                workload["name"].as_str().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn the_golden_is_unverified_while_pending_and_checked_once_recorded() {
+    // A synthetic six-file-equivalent tree (one file) keeps this independent of the
+    // reference files the snapshot may lack.
+    let source = "import fs from 'node:fs';\n";
+    let bundle = Bundle::new("golden");
+    bundle.rewrite("legacy/sources.toml", |_| {
+        format!(
+            "entry = \"main.mjs\"\n[[file]]\npath = \"main.mjs\"\nsha256 = \"{}\"\n",
+            hex(source.as_bytes())
+        )
+    });
+    fs::write(bundle.path().join("legacy/main.mjs"), source).unwrap();
+    let golden = |status: &str, diagnostics: &str| {
+        format!(
+            "{{\"status\":\"{status}\",\"required\":[{{\"code\":\"WASM-UNSUPPORTED-API\",\"file\":\"main.mjs\",\"line\":1,\"construct\":\"node:fs\"}}],\"diagnostics\":{diagnostics}}}"
+        )
+    };
+    let write = |text: String| {
+        bundle.rewrite("legacy/expected-diagnostics.json", move |_| text.clone());
+    };
+    write(golden("pending", "null"));
+    let evidence = static_evidence_in(bundle.path());
+    assert_eq!(named(&evidence, "legacy-tree-diagnostics"), &Check::Passed);
+    assert!(matches!(
+        named(&evidence, "legacy-golden"),
+        Check::Unverified(_)
+    ));
+    // Recorded with a different diagnostic list: a mismatch fails and so blocks the profile.
+    write(golden("recorded", "[]"));
+    let evidence = static_evidence_in(bundle.path());
+    assert!(matches!(
+        named(&evidence, "legacy-golden"),
+        Check::Failed(_)
+    ));
+    let checks: Vec<Check> = evidence.into_iter().map(|(_, c)| c).collect();
+    assert_eq!(status(&checks), Status::Blocked);
+    // Recorded with the exact computed diagnostics: it passes.
+    let report = tree_report(&[("main.mjs".to_owned(), source.to_owned())], "main.mjs");
+    assert_eq!(report.len(), 1, "{report:?}");
+    write(golden("recorded", &Value::Array(report).to_string()));
+    let evidence = static_evidence_in(bundle.path());
+    assert_eq!(named(&evidence, "legacy-golden"), &Check::Passed);
+}
+
+// ---------------------------------------------------------------- relocated evidence
+
+#[test]
+fn a_relocated_evidence_bundle_is_judged_without_the_build_checkout() {
+    let bundle = Bundle::new("relocated");
+    // The bundle holds only the evidence paths and yields the same result as the checkout.
+    let mut names: Vec<String> = fs::read_dir(bundle.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    let mut expected: Vec<String> = EVIDENCE_PATHS.iter().map(|p| p.to_string()).collect();
+    expected.sort();
+    assert_eq!(names, expected);
+    assert_eq!(
+        format!("{:?}", static_evidence_in(bundle.path())),
+        format!("{:?}", static_evidence())
+    );
+    // It reads the relocated copy, not the checkout: breaking the copy changes the verdict.
+    let broken = Bundle::new("relocated-broken");
+    broken.rewrite("negative/unsupported-api/main.mjs", |_| {
+        "export {};\n".into()
+    });
+    assert!(matches!(
+        named(&static_evidence_in(broken.path()), "negative-fixtures"),
+        Check::Failed(_)
+    ));
+    assert_eq!(
+        named(&static_evidence(), "negative-fixtures"),
+        &Check::Passed
+    );
+}
+
+#[test]
+fn an_absent_evidence_bundle_is_unverified_and_never_panics_or_qualifies() {
+    let missing = std::env::temp_dir().join(format!("profile-js-absent-{}", std::process::id()));
+    assert!(!missing.exists());
+    let evidence = static_evidence_in(&missing);
+    assert_eq!(evidence.len(), 1);
+    assert!(matches!(evidence[0].1, Check::Unverified(_)));
+    let checks: Vec<Check> = evidence.into_iter().map(|(_, c)| c).collect();
+    assert_eq!(status(&checks), Status::NotQualified);
+}
+
+#[test]
+fn the_pod_runner_reads_evidence_beside_the_components_never_the_checkout() {
+    let components = Path::new("/opt/falcone-toolchain-cache/profile");
+    assert_eq!(evidence_root(components, None), components.join("evidence"));
+    let explicit = PathBuf::from("/mnt/evidence");
+    assert_eq!(evidence_root(components, Some(explicit.clone())), explicit);
+    assert!(!evidence_root(components, None).starts_with(env!("CARGO_MANIFEST_DIR")));
+    // The build script ships exactly the paths the static evidence reads, with the components.
+    let script = read(&worker().join("qualification/javascript/build-profile.sh"));
+    assert!(
+        script.contains(&format!("for path in {}; do", EVIDENCE_PATHS.join(" "))),
+        "build-profile.sh must copy every evidence path"
+    );
+    assert!(
+        script.contains("cp -r \"$stage/components/evidence\" \"$FS_PROFILE_COMPONENTS/evidence\"")
+    );
 }
 
 // ---------------------------------------------------------------- events example
