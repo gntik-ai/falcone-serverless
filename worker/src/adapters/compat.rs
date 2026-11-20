@@ -140,6 +140,36 @@ fn lex(text: &str) -> Result<Vec<Token<'_>>, usize> {
     }
 }
 
+/// Index of the quote closing the string opened at `open`: backslash escapes and line
+/// continuations are skipped, and an unescaped line break means the string never closes.
+fn string_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let quote = bytes[open];
+    let mut at = open + 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => {
+                at += if bytes[at + 1..].starts_with(b"\r\n") {
+                    3
+                } else {
+                    2
+                };
+            }
+            b'\n' | b'\r' => return None,
+            byte if byte == quote => return Some(at),
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Index of the first line break at or after `from`, or the end of the text.
+fn line_end(bytes: &[u8], from: usize) -> usize {
+    bytes[from..]
+        .iter()
+        .position(|byte| matches!(byte, b'\n' | b'\r'))
+        .map_or(bytes.len(), |offset| from + offset)
+}
+
 /// With `recover`, a construct that cannot be lexed is recorded (first one only) and lexing
 /// resumes after it, so later imports and feature uses are still found. Recovered streams are
 /// only used to report diagnostics; they never make a source eligible.
@@ -187,8 +217,13 @@ fn lex_with(text: &str, recover: bool) -> (Vec<Token<'_>>, Option<usize>) {
                 }
                 if at == bytes.len() || bytes[at] != quote {
                     if recover {
+                        // Resume at the string's real end (an escape-aware scan on the same
+                        // line), or at the end of the line when it never closes, so a quote
+                        // inside the string cannot open a phantom string that swallows a
+                        // later import on the same line.
                         failed.get_or_insert(start);
-                        at = start + 1;
+                        at = string_end(bytes, start)
+                            .map_or_else(|| line_end(bytes, start), |closing| closing + 1);
                         out.push(Token {
                             text: &text[start..at],
                             at: start,

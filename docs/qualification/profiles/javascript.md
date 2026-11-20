@@ -57,15 +57,18 @@ no fixture is or contains one (tested).
 | `hash-sha256` | SHA-256 through Web Crypto `crypto.subtle.digest`, with no polyfill. | none |
 | `events-handle` | A real `handler.handle` that reads and updates a rate-limit bucket in storage and publishes an access event. | storage, events |
 
-The recorded inputs and expected outputs are under `workloads/` and `examples/`. The expected
-outputs of the three pure workloads are worked examples verified independently in the static
-suite (the `hash-sha256` output is the FIPS 180-2 test vector for `abc`). They are not the
-outputs recorded for #138, which this snapshot did not contain; reconcile them when that
-record is available.
+The recorded inputs and expected outputs are under `workloads/` and `examples/`. The
+expected outputs of the three pure workloads are locally created worked examples (the
+`hash-sha256` output is the FIPS 180-2 test vector for `abc`), checked independently in the
+static suite. They are **not** the outputs recorded for #138, which this snapshot did not
+contain, so they stay pending: the manifest marks each `expectation = "pending-138"`, a match
+is reported UNVERIFIED and never counts towards qualification, and a mismatch fails. Only
+replacing them with the #138 recording (`expectation = "recorded"`) lets them qualify.
 
 `events-handle` runs with narrowly scoped grants, present in both the credential and the
-projection: the event topic `console.openapi.spec.accessed` and the storage prefix
-`tenants/synthetic/`, with no wildcard and no credential value. Its recorded dependency state
+projection: the event topic `console.openapi.spec.accessed` and the single storage
+key `tenants/synthetic/rate/ws-synthetic-0001` it uses (another workspace's key is denied), with
+no wildcard and no credential value. Its recorded dependency state
 (the stored bucket) is replayed before each invocation. The comparison is exact: storage keys,
 checkpoint flags, event destinations and payload bytes, in order, plus the response. A
 changed key, destination, payload or response, or a dropped replay, fails the comparison and

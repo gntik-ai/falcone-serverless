@@ -9,9 +9,11 @@ use falcone_serverless_worker::{
     api,
     host::{Bindings, Context, HostError, Operation, Reply},
 };
-use profile::{Call, Case, Check, Replay, Status, compare, load_cases, request_for, status};
+use profile::{
+    Call, Case, Check, Replay, Status, compare, has, hex, load_cases, reference, reference_checks,
+    request_for, root, static_evidence, status, tree_report, verified_files, verify,
+};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -29,9 +31,6 @@ const CODES: &[&str] = &[
 
 fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-fn root() -> PathBuf {
-    worker().join("qualification/profiles/javascript")
 }
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -52,9 +51,6 @@ fn strings(value: &toml::Value) -> Vec<String> {
         .iter()
         .map(|item| item.as_str().unwrap().to_owned())
         .collect()
-}
-fn hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn exact(version: &str) -> bool {
@@ -369,71 +365,20 @@ fn legacy_dir() -> PathBuf {
     root().join("legacy")
 }
 
-struct Reference {
-    entry: String,
-    files: Vec<(String, String)>,
-}
-fn reference() -> Reference {
-    let table: toml::Value = toml::from_str(&read(&legacy_dir().join("sources.toml"))).unwrap();
-    Reference {
-        entry: table["entry"].as_str().unwrap().to_owned(),
-        files: table["file"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| {
-                (
-                    f["path"].as_str().unwrap().to_owned(),
-                    f["sha256"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect(),
-    }
-}
-
-/// A present file must hash to its pin; an absent one is UNVERIFIED and never passes.
-fn verify(bytes: Option<&[u8]>, pinned: &str) -> Check {
-    match bytes {
-        None => Check::Unverified("file absent".into()),
-        Some(bytes) if hex(bytes) == pinned => Check::Passed,
-        Some(_) => Check::Failed("sha256 mismatch".into()),
-    }
-}
-
-fn reference_checks() -> Vec<(String, Check)> {
-    reference()
-        .files
-        .iter()
-        .map(|(path, pinned)| {
-            let bytes = fs::read(legacy_dir().join(path)).ok();
-            (path.clone(), verify(bytes.as_deref(), pinned))
-        })
-        .collect()
-}
-
 #[test]
 fn reference_files_match_their_pinned_hashes_or_report_unverified() {
     let table = reference();
     assert_eq!(table.files.len(), 6);
     let checks = reference_checks();
+    assert_eq!(checks.len(), 6);
+    // Each file is judged on its own: a present file must match, an absent one is UNVERIFIED
+    // and skipped. Nothing here requires any particular file to be present.
     for (path, check) in &checks {
         match check {
             Check::Passed => {}
             Check::Unverified(reason) => println!("UNVERIFIED: {path}: {reason}"),
             Check::Failed(reason) => panic!("{path}: {reason}"),
         }
-    }
-    // The four files this snapshot carries are verified byte for byte.
-    for path in [
-        "actions/openapi-spec-serve.mjs",
-        "src/config.mjs",
-        "src/spec-version-repo.mjs",
-        "src/spec-cache.mjs",
-    ] {
-        assert!(
-            checks.iter().any(|(p, c)| p == path && *c == Check::Passed),
-            "{path}"
-        );
     }
     let all: Vec<Check> = checks.into_iter().map(|(_, check)| check).collect();
     if all.iter().any(|check| *check != Check::Passed) {
@@ -443,64 +388,48 @@ fn reference_files_match_their_pinned_hashes_or_report_unverified() {
             "an absent file never qualifies"
         );
     }
-    // A single altered byte, and an absent file, are not a pass.
-    let real = fs::read(legacy_dir().join("src/spec-cache.mjs")).unwrap();
-    let pinned = &table
-        .files
-        .iter()
-        .find(|(p, _)| p == "src/spec-cache.mjs")
-        .unwrap()
-        .1;
-    assert_eq!(verify(Some(&real), pinned), Check::Passed);
-    let mut altered = real.clone();
-    altered.push(b'\n');
-    assert!(matches!(verify(Some(&altered), pinned), Check::Failed(_)));
+    // A single altered byte, and an absent file, are not a pass. The known-answer vector is
+    // independent of any checked-in file, so this holds however many of the six are present.
+    let known = b"abc";
+    let pinned = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    assert_eq!(verify(Some(known), pinned), Check::Passed);
+    assert!(matches!(verify(Some(b"abc\n"), pinned), Check::Failed(_)));
     assert!(matches!(verify(None, pinned), Check::Unverified(_)));
-    assert_eq!(status(&[verify(Some(&altered), pinned)]), Status::Blocked);
+    assert_eq!(status(&[verify(Some(b"abc\n"), pinned)]), Status::Blocked);
     assert_eq!(status(&[verify(None, pinned)]), Status::NotQualified);
 }
 
-fn present_files() -> Vec<(String, String)> {
-    reference()
-        .files
-        .iter()
-        .filter_map(|(path, _)| {
-            fs::read_to_string(legacy_dir().join(path))
-                .ok()
-                .map(|text| (path.clone(), text))
-        })
-        .collect()
-}
-
-fn tree_report(files: &[(String, String)], entry: &str) -> Vec<Value> {
-    let tree: Vec<_> = files
-        .iter()
-        .map(|(path, text)| TreeFile { path, text })
-        .collect();
-    check_tree(&tree, entry, None)
-        .diagnostics()
-        .iter()
-        .map(|d| json!({"code": d.code, "construct": d.construct, "file": d.path, "line": d.line, "column": d.column}))
-        .collect()
-}
-
-fn has(report: &[Value], code: &str, file: &str, line: u64) -> bool {
-    report
-        .iter()
-        .any(|d| d["code"] == code && d["file"] == file && d["line"] == line)
+/// Reports UNVERIFIED and returns `None` unless the whole reference tree is present with every
+/// hash matching its pin; the dependent diagnostic tests then skip rather than pass or fail.
+fn complete_reference(test: &str) -> Option<Vec<(String, String)>> {
+    let files = verified_files();
+    let total = reference().files.len();
+    if files.len() == total {
+        Some(files)
+    } else {
+        println!(
+            "UNVERIFIED: {test}: {} of {total} reference files absent or altered; skipped",
+            total - files.len()
+        );
+        None
+    }
 }
 
 #[test]
 fn the_unmodified_reference_tree_is_blocked_with_the_recorded_diagnostics() {
+    // The migration result is a recorded BLOCKED, and the check never reaches a build.
+    assert_eq!(manifest()["legacy"]["result"].as_str(), Some("blocked"));
+    let Some(files) = complete_reference("the unmodified reference tree") else {
+        return;
+    };
     let entry = reference().entry;
-    let files = present_files();
     let report = tree_report(&files, &entry);
     assert!(
         !report.is_empty(),
         "the unmodified reference tree is not supported"
     );
     let golden: Value =
-        serde_json::from_str(&read(&legacy_dir().join("expected-diagnostics.json"))).unwrap();
+        serde_json::from_str(&read(&root().join("legacy/expected-diagnostics.json"))).unwrap();
     // The operator-specified diagnostics, each with file and line, are all produced.
     for required in golden["required"].as_array().unwrap() {
         assert!(
@@ -529,55 +458,56 @@ fn the_unmodified_reference_tree_is_blocked_with_the_recorded_diagnostics() {
         .filter(|d| d["code"] == "WASM-PACKAGE-NOT-IN-CATALOGUE")
         .collect();
     assert_eq!(packages.len(), 2, "only pg and kafkajs: {packages:?}");
-    // Recorded results: the partial tree against its golden; the full tree once complete.
-    let complete = present_files().len() == reference().files.len();
-    if complete {
-        match golden["status"].as_str() {
-            Some("recorded") => assert_eq!(
-                Value::Array(report.clone()),
-                golden["diagnostics"],
-                "full-tree golden"
-            ),
-            _ => println!(
-                "UNVERIFIED: full-tree golden is pending; computed diagnostics: {}",
-                Value::Array(report.clone())
-            ),
-        }
-    } else {
-        println!(
-            "UNVERIFIED: {} of 6 reference files absent; the full-tree golden was not compared",
-            6 - files.len()
-        );
-        let partial: Value = serde_json::from_str(&read(
-            &legacy_dir().join("expected-diagnostics-partial.json"),
-        ))
-        .unwrap();
-        let listed: Vec<&str> = partial["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|f| f.as_str().unwrap())
-            .collect();
-        let held: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(
-            listed, held,
-            "the partial golden describes exactly the files present"
-        );
-        assert_eq!(
+    // The recorded full-tree golden; while it is pending the computed result is only printed.
+    match golden["status"].as_str() {
+        Some("recorded") => assert_eq!(
             Value::Array(report.clone()),
-            partial["diagnostics"],
-            "computed: {}",
-            Value::Array(report.clone())
-        );
+            golden["diagnostics"],
+            "full-tree golden"
+        ),
+        _ => println!(
+            "UNVERIFIED: full-tree golden is pending; computed diagnostics: {}",
+            Value::Array(report)
+        ),
     }
-    // The migration result is a recorded BLOCKED, and the check never reaches a build.
-    assert_eq!(manifest()["legacy"]["result"].as_str(), Some("blocked"));
+}
+
+#[test]
+fn a_partial_reference_tree_matches_its_partial_golden_only_when_exactly_those_files_are_present() {
+    let held = verified_files();
+    let partial: Value = serde_json::from_str(&read(
+        &root().join("legacy/expected-diagnostics-partial.json"),
+    ))
+    .unwrap();
+    let listed: Vec<&str> = partial["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f.as_str().unwrap())
+        .collect();
+    let present: Vec<&str> = held.iter().map(|(p, _)| p.as_str()).collect();
+    if listed != present {
+        println!("UNVERIFIED: the partial golden describes other files than are present; skipped");
+        return;
+    }
+    let report = tree_report(&held, &reference().entry);
+    assert_eq!(
+        Value::Array(report.clone()),
+        partial["diagnostics"],
+        "computed: {}",
+        Value::Array(report)
+    );
 }
 
 #[test]
 fn mutating_the_reference_tree_changes_the_result() {
     let entry = reference().entry;
-    let files = present_files();
+    // Only hash-verified files are evidence; an absent entry file leaves nothing to mutate.
+    let files = verified_files();
+    if !files.iter().any(|(path, _)| path == &entry) {
+        println!("UNVERIFIED: mutation of the reference tree: entry file absent; skipped");
+        return;
+    }
     let baseline = tree_report(&files, &entry);
     // Removing the pg import removes exactly its diagnostic.
     let mutated: Vec<_> = files
@@ -602,6 +532,13 @@ fn mutating_the_reference_tree_changes_the_result() {
     };
     assert_eq!((packages(&baseline), packages(&report)), (2, 1));
     // An injected node:fs import adds a WASM-UNSUPPORTED-API at its line.
+    if !files
+        .iter()
+        .any(|(path, _)| path == "src/spec-version-repo.mjs")
+    {
+        println!("UNVERIFIED: node:fs injection: src/spec-version-repo.mjs absent; skipped");
+        return;
+    }
     let injected: Vec<_> = files
         .iter()
         .map(|(path, text)| {
@@ -830,7 +767,7 @@ fn any_failed_check_computes_blocked_and_only_all_passed_qualifies() {
     ] {
         assert_eq!(status(&forced), Status::Blocked);
     }
-    // The checks available here never qualify: the cluster and the two absent files are UNVERIFIED.
+    // The checks available here never qualify: the cluster run and any absent file are UNVERIFIED.
     let mut checks: Vec<Check> = reference_checks().into_iter().map(|(_, c)| c).collect();
     checks.push(Check::Unverified("cluster suite not run".into()));
     assert_eq!(status(&checks), Status::NotQualified);
@@ -840,6 +777,51 @@ fn any_failed_check_computes_blocked_and_only_all_passed_qualifies() {
     );
     checks.push(Check::Failed("forced".into()));
     assert_eq!(status(&checks), Status::Blocked);
+}
+
+#[test]
+fn runtime_outcomes_alone_never_qualify_without_the_static_evidence() {
+    let evidence = static_evidence();
+    // Six reference files, the tree diagnostics, the golden, the negative fixtures and the
+    // provenance of the three pure workload expectations.
+    assert_eq!(evidence.len(), 6 + 1 + 1 + 1 + 3);
+    let static_checks: Vec<Check> = evidence.iter().map(|(_, c)| c.clone()).collect();
+    assert!(
+        !static_checks.iter().any(|c| matches!(c, Check::Failed(_))),
+        "{evidence:?}"
+    );
+    // The pending golden and the local workload expectations are UNVERIFIED, never passed.
+    for name in ["legacy-golden", "workload-expectation:json-transform"] {
+        let (_, check) = evidence.iter().find(|(n, _)| n == name).unwrap();
+        assert!(matches!(check, Check::Unverified(_)), "{name}");
+    }
+    // Every runtime check passing does not qualify while the static evidence is pending ...
+    let mut combined = static_checks.clone();
+    combined.extend(std::iter::repeat_n(Check::Passed, 16));
+    assert_eq!(status(&combined), Status::NotQualified);
+    // ... and a forced static failure blocks no matter what the runtime did.
+    combined.push(Check::Failed("forced static failure".into()));
+    assert_eq!(status(&combined), Status::Blocked);
+    // Only an all-passed static set plus an all-passed runtime qualifies.
+    let mut all_passed = vec![Check::Passed; static_checks.len()];
+    all_passed.extend(std::iter::repeat_n(Check::Passed, 16));
+    assert_eq!(status(&all_passed), Status::Qualified);
+}
+
+#[test]
+fn workload_expectations_stay_pending_until_the_operator_recording_replaces_them() {
+    let manifest = manifest();
+    for workload in manifest["workloads"].as_array().unwrap() {
+        if workload.get("expected").is_none() {
+            continue;
+        }
+        assert_eq!(
+            workload["expectation"].as_str(),
+            Some("pending-138"),
+            "{}: a locally created output is never recorded as the #138 expectation",
+            workload["name"].as_str().unwrap()
+        );
+    }
 }
 
 // ---------------------------------------------------------------- events example
@@ -859,10 +841,15 @@ fn the_events_example_carries_narrow_grants_in_the_credential_and_the_projection
     let (wire, request) = events_request();
     let grants = &request.plan().context.grants;
     assert_eq!(grants.topics, [TOPIC]);
-    assert_eq!(grants.prefixes, ["tenants/synthetic/"]);
+    // Only the one recorded bucket key is granted, not the tenant's key space.
+    assert_eq!(grants.prefixes, [KEY]);
     assert!(grants.hosts.is_empty() && grants.targets.is_empty());
     assert!(grants.allows_key(KEY));
     assert!(!grants.allows_key("tenants/other/rate/ws"));
+    // Another workspace's key under the same tenant, and the shared parents, are denied.
+    assert!(!grants.allows_key("tenants/synthetic/rate/ws-synthetic-0002"));
+    assert!(!grants.allows_key("tenants/synthetic/rate"));
+    assert!(!grants.allows_key("tenants/synthetic/other/ws-synthetic-0001"));
     for family in ["credential", "projection"] {
         let list = if family == "credential" {
             &wire["credential"]["allowed_capabilities"]

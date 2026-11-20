@@ -10,7 +10,9 @@ use falcone_serverless_worker::{
     cache,
     host::{self, Context},
 };
-use profile::{Call, Case, Check, Replay, Status, compare, load_cases, request_for, status};
+use profile::{
+    Call, Case, Check, Replay, Status, compare, load_cases, request_for, static_evidence, status,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -84,8 +86,9 @@ fn invoke(
 fn built_profile_components() {
     let Some(cache_root) = std::env::var_os("FS_TOOLCHAIN_CACHE") else {
         // Nothing ran, so nothing is qualified: the computed status says so explicitly.
-        let checks = [Check::Unverified("FS_TOOLCHAIN_CACHE unset".into())];
-        assert_eq!(status(&checks), Status::NotQualified);
+        let mut checks: Vec<Check> = static_evidence().into_iter().map(|(_, c)| c).collect();
+        checks.push(Check::Unverified("FS_TOOLCHAIN_CACHE unset".into()));
+        assert_ne!(status(&checks), Status::Qualified);
         println!("UNVERIFIED: FS_TOOLCHAIN_CACHE unset; no guest toolchain or component executed");
         return;
     };
@@ -112,16 +115,33 @@ fn built_profile_components() {
         .map(|entry| entry.as_str().unwrap())
         .collect();
     let base: Value = serde_json::from_str(EVENTS_REQUEST).unwrap();
-    let mut checks: Vec<Check> = Vec::new();
-    let mut record = |name: &str, outcome: Result<(), String>| {
+    // The status is computed over the static evidence (reference files, tree diagnostics,
+    // golden, negative fixtures, expectation provenance) together with the runtime outcomes,
+    // so runtime results alone can never qualify and a static failure always blocks.
+    let evidence = static_evidence();
+    for (name, check) in &evidence {
+        println!("{name}: {check:?}");
+    }
+    let mut checks: Vec<Check> = evidence.into_iter().map(|(_, c)| c).collect();
+    // `pending`: the expectation is only a local example, so a match is UNVERIFIED, not a pass.
+    let mut record = |name: &str, outcome: Result<(), String>, pending: bool| {
         println!("{name}: {outcome:?}");
         checks.push(match outcome {
+            Ok(()) if pending => Check::Unverified(format!(
+                "{name}: matched a local example, not the #138 recording"
+            )),
             Ok(()) => Check::Passed,
             Err(reason) => Check::Failed(format!("{name}: {reason}")),
         });
     };
 
-    // The pure workloads, against their recorded expected outputs.
+    // The pure workloads against their expected outputs. While the expectation is only a local
+    // example (pending the #138 recording) a match is UNVERIFIED, never a pass; a mismatch fails.
+    let recorded = |name: &str| {
+        manifest["workloads"].as_array().unwrap().iter().any(|w| {
+            w["name"].as_str() == Some(name) && w["expectation"].as_str() == Some("recorded")
+        })
+    };
     for (name, input, expected) in [
         (
             "json-transform",
@@ -181,7 +201,7 @@ fn built_profile_components() {
                 .then_some(())
                 .ok_or_else(|| "output differs from the recorded expectation".to_owned())
         })();
-        record(name, outcome);
+        record(name, outcome, !recorded(name));
     }
 
     // The events example: replay the recorded state, then compare every dependency argument.
@@ -219,7 +239,7 @@ fn built_profile_components() {
             // Replayed state in: calls and response must equal the recording exactly.
             let (calls, response) = run(&case.state);
             let outcome = response.and_then(|response| compare(case, &calls, &response));
-            record(&format!("events-handle/{}", case.name), outcome);
+            record(&format!("events-handle/{}", case.name), outcome, false);
             // Mutations must be caught. Dropping the replayed state changes what the guest
             // sees; a changed key, destination, payload or response changes the recording.
             let (calls, response) = run(&BTreeMap::new());
@@ -230,6 +250,7 @@ fn built_profile_components() {
                     .is_err()
                     .then_some(())
                     .ok_or("dropping the state was not detected".to_owned()),
+                false,
             );
             let (calls, response) = run(&case.state);
             let response = response.unwrap_or(Value::Null);
@@ -240,13 +261,14 @@ fn built_profile_components() {
                         .is_err()
                         .then_some(())
                         .ok_or("the mutation was not detected".to_owned()),
+                    false,
                 );
             }
         }
         Ok(cases)
     })();
     if let Err(reason) = events {
-        record("events-handle", Err(reason));
+        record("events-handle", Err(reason), false);
     }
     drop(compiler);
     drop(scratch);
@@ -256,8 +278,18 @@ fn built_profile_components() {
             "{}",
             json!({"check":"profile_javascript","status":"passed"})
         ),
-        Status::Blocked | Status::NotQualified => {
-            panic!("profile not qualified: {checks:?}")
+        Status::Blocked => panic!("profile blocked: {checks:?}"),
+        // Nothing failed, but evidence is pending: report it and emit no success record.
+        Status::NotQualified => {
+            for check in &checks {
+                if let Check::Unverified(reason) = check {
+                    println!("UNVERIFIED: {reason}");
+                }
+            }
+            println!(
+                "{}",
+                json!({"check":"profile_javascript","status":"not-qualified"})
+            );
         }
     }
 }

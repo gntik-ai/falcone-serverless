@@ -49,6 +49,8 @@ name = "json-transform"
 handler = "workloads/json-transform/handler.mjs"
 input = "workloads/json-transform/input.json"
 expected = "workloads/json-transform/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
 imports = []
 
 [[workloads]]
@@ -56,6 +58,8 @@ name = "text-regex"
 handler = "workloads/text-regex/handler.mjs"
 input = "workloads/text-regex/input.json"
 expected = "workloads/text-regex/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
 imports = []
 
 [[workloads]]
@@ -63,6 +67,8 @@ name = "hash-sha256"
 handler = "workloads/hash-sha256/handler.mjs"
 input = "workloads/hash-sha256/input.json"
 expected = "workloads/hash-sha256/expected.json"
+# Locally created example, not the output recorded for #138 (unavailable): pending, never qualifying.
+expectation = "pending-138"
 imports = []
 
 [[workloads]]

@@ -120,6 +120,20 @@ fn a_lex_failure_does_not_suppress_diagnostics_in_that_file_or_others() {
 }
 
 #[test]
+fn an_escaped_backslash_string_does_not_absorb_a_same_line_import() {
+    // The string `"a\\"` ends at its second quote. Resuming at a wrong boundary would make that
+    // quote open a new string that swallows `import pg from 'pg'` up to the next double quote.
+    let bad = "const s = \"a\\\\\"; import pg from 'pg'; const t = \"x\";\n";
+    let diagnostics = found(&[("main.mjs", bad)], "main.mjs");
+    assert!(
+        diagnostics.contains(&("main.mjs".into(), NOT_IN_CATALOGUE, 1, 33)),
+        "{diagnostics:?}"
+    );
+    // The string that could not be interpreted is still reported where it starts.
+    assert!(diagnostics.contains(&("main.mjs".into(), UNSUPPORTED, 1, 11)));
+}
+
+#[test]
 fn a_missing_entry_and_an_invalid_tree_path_are_diagnosed() {
     let diagnostics = found(&[("main.mjs", "export const a = 1;\n")], "absent.mjs");
     assert!(diagnostics.iter().any(|d| d.1 == UNSUPPORTED));
