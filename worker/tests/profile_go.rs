@@ -1281,6 +1281,16 @@ fn docs_ok(document: &str, manifest: &toml::Value, matrix: &Value) -> Result<(),
             ));
         }
     }
+    // The target is part of the TinyGo row's own first cell, so it is checked there.
+    let target = manifest["toolchain"]["target"].as_str().unwrap();
+    let tinygo = table_row(document, "TinyGo")?;
+    let expected_label = format!("TinyGo, target `{target}`");
+    if tinygo.first().copied() != Some(expected_label.as_str()) {
+        return Err(format!(
+            "`TinyGo` row target is {:?}, manifest {expected_label:?}",
+            tinygo.first()
+        ));
+    }
     let wit = table_row(document, "WIT package")?;
     let expected = format!(
         "`{}`, world `{}`",
@@ -1391,6 +1401,7 @@ fn a_changed_documented_version_digest_or_interface_is_drift() {
         (go_row, "| Go toolchain | `1.26.10` | `9849f4e0"),
         (go_row, "| Go toolchain | `1.26.11` | `0849f4e0"),
         (tinygo_row, "| TinyGo, target `wasip2` | `0.44.1` |"),
+        (tinygo_row, "| TinyGo, target `wasip1` | `0.44.0` |"),
         ("| Wasmtime | `49.0.5` |", "| Wasmtime | `49.0.4` |"),
         ("| WASI | `none` |", "| WASI | `0.2.6` |"),
         (
@@ -1410,6 +1421,11 @@ fn a_changed_documented_version_digest_or_interface_is_drift() {
             "{from} -> {to} is not drift"
         );
     }
+    // `wasip2` still appears elsewhere on the page, which is not enough for a changed target.
+    let only_the_target =
+        document.replacen(tinygo_row, "| TinyGo, target `wasip1` | `0.44.0` |", 1);
+    assert!(only_the_target.contains("wasip2"));
+    assert!(docs_ok(&only_the_target, &manifest, &matrix).is_err());
     // The decided Go version still appears elsewhere on the page, which is not enough.
     let only_the_table = document.replacen(go_row, "| Go toolchain | `1.26.10` | `9849f4e0", 1);
     assert!(only_the_table.contains("1.26.11"));

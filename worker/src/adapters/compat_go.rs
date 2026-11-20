@@ -353,7 +353,8 @@ fn scan_directives(report: &mut Report<'_>, tokens: &[Token<'_>], trusted: Optio
     }
     let mut offset = 0;
     for line in report.text.split_inclusive('\n') {
-        if line.starts_with("//go:generate") {
+        // `go generate` recognises the directive only when a space or tab follows the name.
+        if line.starts_with("//go:generate ") || line.starts_with("//go:generate\t") {
             report.add(offset, HOOK, "go:generate");
         }
         offset += line.len();
@@ -751,6 +752,12 @@ mod tests {
     }
 
     #[test]
+    fn go_generate_followed_by_a_tab_inside_a_raw_string_is_found() {
+        let text = "package main\n\nvar s = `\n//go:generate\tsh -c id\n`\n";
+        assert_eq!(codes(text), [(GENERATE, 4)]);
+    }
+
+    #[test]
     fn go_linkname_inside_a_grouped_import_is_unsupported() {
         let text = "package main\n\nimport (\n\t_ \"@U@\"\n//go:linkname a b\n)\n";
         let found = run(text);
@@ -788,6 +795,9 @@ mod tests {
             "package main\n// see //go:generate in the docs\n",
             "package main\nvar s = \"//go:generate x\"\n",
             "package main\n/* go:linkname */\n",
+            "package main\n\nvar s = `\n//go:generateExample sh\n`\n",
+            "package main\n\n/*\n//go:generateExample sh\n*/\nfunc f() {}\n",
+            "package main\n\nvar s = `\n//go:generate\n`\n",
             "package main\n// export is a word\n",
             "package main\n//exported helper\n",
             "package main\n//go:build tinygo\n",
