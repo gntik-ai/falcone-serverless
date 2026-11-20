@@ -114,6 +114,19 @@ fn manifest_interfaces_examples_and_matrix_agree() {
         mutated["imports"] =
             toml::Value::Array(vec![toml::Value::String("wasi:cli/run@0.2.0".into())]);
         assert!(!example_imports_allowed(&mutated, interfaces));
+        let path = workload["source"].as_str().unwrap();
+        let source = read(root().join(path));
+        // Exercise source eligibility too, rather than only the manifest metadata.
+        let unlisted = format!(
+            "{source}\n//go:wasmimport wasi:cli/environment@0.2.0 get-environment\nfunc environment()\n"
+        );
+        assert!(
+            !check_tree(&[TreeFile {
+                path,
+                text: &unlisted
+            }])
+            .supported()
+        );
     }
     let bytes = fs::read(worker().join("../docs/contracts/language-profile-matrix.json")).unwrap();
     assert_eq!(
@@ -129,8 +142,14 @@ fn manifest_interfaces_examples_and_matrix_agree() {
         Some("not-qualified")
     );
     assert_eq!(go["evidence"], serde_json::json!({}));
-    assert_eq!(go["wasiVersion"], "none");
-    assert_eq!(go["toolchainVersion"], "0.44.0");
+    assert_eq!(
+        go["wasiVersion"],
+        manifest["toolchain"]["wasi"].as_str().unwrap()
+    );
+    assert_eq!(
+        go["toolchainVersion"],
+        manifest["toolchain"]["tinygo"]["version"].as_str().unwrap()
+    );
     assert_eq!(
         go["wasmtimeVersion"],
         manifest["toolchain"]["wasmtime"].as_str().unwrap()
@@ -245,6 +264,31 @@ fn ordinary_comments_and_directive_text_in_strings_are_eligible() {
             text: valid
         }])
         .supported()
+    );
+}
+
+#[test]
+fn prose_containing_go_colon_is_eligible() {
+    assert!(
+        check_tree(&[TreeFile {
+            path: "main.go",
+            text: "package main\n// algo: x\n/* an algorithm: algo: x */\n// Documentation mentions go:generate here.\nfunc main() {}",
+        }])
+        .supported()
+    );
+}
+
+#[test]
+fn block_location_directives_are_rejected_at_the_physical_location() {
+    let verdict = check_tree(&[TreeFile {
+        path: "main.go",
+        text: "package main\n/*line f:500*/\nfunc main() {}",
+    }]);
+    assert_eq!(verdict.diagnostics().len(), 1);
+    let diagnostic = &verdict.diagnostics()[0];
+    assert_eq!(
+        (diagnostic.code, diagnostic.line),
+        ("WASM-UNSUPPORTED-API", 2)
     );
 }
 
@@ -383,6 +427,71 @@ fn trusted_build_script_refuses_to_run_without_its_image_gate() {
 }
 
 #[test]
+fn build_world_includes_runtime_wasi_and_the_unchanged_falcone_world() {
+    // Model the authenticated TinyGo bundle at the filesystem boundary; resolve
+    // the helper's actual output with the real, unchanged Falcone WIT package.
+    let scratch = std::env::temp_dir().join(format!("go-build-wit-{}", std::process::id()));
+    let tinygo = scratch.join("tinygo");
+    let cli = tinygo.join("lib/wasi-cli/wit");
+    fs::create_dir_all(&cli).unwrap();
+    fs::write(cli.join("cli.wit"), "package wasi:cli@0.2.0;\ninterface environment {}\nworld imports { import environment; import wasi:io/streams@0.2.0; import wasi:clocks/monotonic-clock@0.2.0; import wasi:random/random@0.2.0; }").unwrap();
+    for (package, interface) in [
+        ("io", "streams"),
+        ("clocks", "monotonic-clock"),
+        ("random", "random"),
+    ] {
+        let dependency = cli.join("deps").join(package);
+        fs::create_dir_all(&dependency).unwrap();
+        fs::write(
+            dependency.join("package.wit"),
+            format!("package wasi:{package}@0.2.0;\ninterface {interface} {{}}\n"),
+        )
+        .unwrap();
+    }
+    let output = std::process::Command::new("python3")
+        .arg(worker().join("qualification/go/prepare-build-wit.py"))
+        .arg(tinygo)
+        .arg(worker().join("wit/host.wit"))
+        .arg(scratch.join("wit"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut resolve = wit_parser::Resolve::default();
+    let result = resolve.push_path(scratch.join("wit"));
+    fs::remove_dir_all(&scratch).unwrap();
+    let (package, _) = result.unwrap();
+    let world = &resolve.worlds[resolve.packages[package].worlds["function"]];
+    let imports: Vec<_> = world
+        .imports
+        .values()
+        .filter_map(|item| match item {
+            wit_parser::WorldItem::Interface { id, .. } => {
+                let interface = &resolve.interfaces[*id];
+                let package = &resolve.packages[interface.package.unwrap()];
+                Some(
+                    package
+                        .name
+                        .interface_id(interface.name.as_deref().unwrap()),
+                )
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(imports.iter().any(|name| name.starts_with("wasi:cli/")));
+    assert!(imports.iter().any(|name| name.starts_with("wasi:io/")));
+    assert!(imports.iter().any(|name| name.starts_with("wasi:clocks/")));
+    assert!(imports.iter().any(|name| name.starts_with("wasi:random/")));
+    for name in falcone_serverless_worker::artifact::validate::ALLOWED_IMPORTS {
+        assert!(imports.iter().any(|import| import == name));
+    }
+    assert_eq!(world.exports.len(), 1);
+}
+
+#[test]
 fn trusted_build_rejects_bad_archive_sha_before_using_tools_or_creating_output() {
     let scratch = std::env::temp_dir().join(format!("go-bad-cache-{}", std::process::id()));
     fs::create_dir(&scratch).unwrap();
@@ -417,6 +526,47 @@ fn trusted_build_rejects_bad_archive_sha_before_using_tools_or_creating_output()
 mod built;
 
 #[test]
+fn final_component_allows_an_adapter_with_its_own_allocator() {
+    let source = include_str!("../src/qualification/execute_fixtures/handler.wat")
+        .replace("\"realloc\"", "\"cabi_realloc\"")
+        .replacen(
+            "(component",
+            "(component (core module $adapter (func (export \"cabi_realloc\")))",
+            1,
+        );
+    assert_eq!(
+        built::validate_component(&wat::parse_str(source).unwrap()),
+        Ok(vec![])
+    );
+}
+
+#[test]
+fn allocator_belongs_to_the_fixture_module_even_with_nested_adapters() {
+    let fixture = "(core module (func (export \"falcone:host/handler@0.2.0#handle\")) (func (export \"cabi_realloc\")))";
+    let adapter = "(component (core module (func (export \"cabi_realloc\"))))";
+    let valid = format!("(component {adapter} {fixture})");
+    assert_eq!(
+        built::validate_fixture(&wat::parse_str(valid).unwrap()),
+        Ok(())
+    );
+    for invalid in [
+        format!(
+            "(component {adapter} {})",
+            fixture.replace("(func (export \"cabi_realloc\"))", "")
+        ),
+        format!("(component {adapter})"),
+        format!("(component {fixture} {fixture})"),
+        format!(
+            "(component {})",
+            fixture.replace("cabi_realloc", "falcone:host/handler@0.2.0#handle")
+        ),
+        "(component (core module (func (result i32))))".to_owned(),
+    ] {
+        assert!(built::validate_fixture(&wat::parse_str(invalid).unwrap()).is_err());
+    }
+}
+
+#[test]
 fn go_component_intake_rejects_tenant_native_cache_and_wasi() {
     // Supply a real Wasmtime native artifact from a trusted synthetic empty component.
     // No fixture is built or instantiated, and no native artifact is deserialized.
@@ -447,8 +597,13 @@ fn trusted_components_have_one_allocator_and_only_declared_imports() {
         let name = workload["name"].as_str().unwrap();
         let bytes = fs::read(components.join(format!("{name}.wasm")))
             .expect("missing trusted-built component");
+        let raw = fs::read(components.join("raw").join(format!("{name}.wasm")))
+            .expect("missing pre-composition TinyGo output");
+        built::validate_fixture(&raw).unwrap();
         built::validate_component(&bytes).unwrap();
-        println!("{name}: valid component, exactly one core cabi_realloc, allowed imports only");
+        println!(
+            "{name}: TinyGo handler module has one cabi_realloc; final component valid, allowed imports only"
+        );
     }
 }
 

@@ -835,6 +835,10 @@ pub struct TreeDiagnostic {
 pub struct TreeVerdict(Vec<TreeDiagnostic>);
 
 impl TreeVerdict {
+    pub(super) fn from_diagnostics(diagnostics: Vec<TreeDiagnostic>) -> Self {
+        Self(diagnostics)
+    }
+
     pub fn supported(&self) -> bool {
         self.0.is_empty()
     }

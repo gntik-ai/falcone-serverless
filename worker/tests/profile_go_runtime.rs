@@ -90,6 +90,9 @@ fn built_go_components() {
     ] {
         let bytes = fs::read(components.join(format!("{name}.wasm")))
             .expect("missing trusted-built component");
+        let raw = fs::read(components.join("raw").join(format!("{name}.wasm")))
+            .expect("missing pre-composition TinyGo output");
+        built::validate_fixture(&raw).unwrap();
         let imports = built::validate_component(&bytes).unwrap();
         let loaded = compiler
             .compile_declared(

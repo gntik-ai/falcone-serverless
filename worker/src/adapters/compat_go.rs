@@ -1,17 +1,7 @@
 //! Static Go source eligibility, never a compiler, executor or production enablement gate.
 //! The artifact validator remains authoritative for every compiled component.
+pub use super::compat::TreeVerdict as Verdict;
 use super::compat::{TreeDiagnostic, TreeFile};
-
-#[derive(Debug)]
-pub struct Verdict(Vec<TreeDiagnostic>);
-impl Verdict {
-    pub fn supported(&self) -> bool {
-        self.0.is_empty()
-    }
-    pub fn diagnostics(&self) -> &[TreeDiagnostic] {
-        &self.0
-    }
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -140,8 +130,15 @@ fn check_comments(out: &mut Vec<TreeDiagnostic>, file: &TreeFile<'_>, all: &[Tok
     for token in all.iter().filter(|t| t.kind == Kind::Comment) {
         let mut offset = token.at;
         for line in token.text.split_inclusive('\n') {
-            if let Some(at) = line.find("go:") {
-                let directive = &line[at..];
+            let body = line.trim_start();
+            let body = body
+                .strip_prefix("//")
+                .or_else(|| body.strip_prefix("/*"))
+                .unwrap_or(body)
+                .trim_start();
+            let directive = body.strip_prefix('*').unwrap_or(body).trim_start();
+            if directive.starts_with("go:") {
+                let at = line.len() - directive.len();
                 let (code, construct) = if directive.starts_with("go:generate") {
                     ("WASM-INSTALL-HOOK", "go:generate directive")
                 } else {
@@ -156,7 +153,10 @@ fn check_comments(out: &mut Vec<TreeDiagnostic>, file: &TreeFile<'_>, all: &[Tok
                     "WASM-NATIVE-LIBRARY",
                     "cgo preamble",
                 );
-            } else if line.starts_with("//export ") || line.starts_with("//line ") {
+            } else if line.starts_with("//export ")
+                || line.starts_with("//line ")
+                || line.starts_with("/*line ")
+            {
                 emit(
                     out,
                     file,
@@ -211,5 +211,5 @@ pub fn check_tree(files: &[TreeFile<'_>]) -> Verdict {
             i += 1;
         }
     }
-    Verdict(out)
+    Verdict::from_diagnostics(out)
 }

@@ -34,6 +34,12 @@ returns JSON bytes or a fixed handler error. The interface allow-list is:
 
 No WASI interface is allowed. The trusted build uses the existing pinned wasi-virt
 revision from `worker/qualification/javascript/versions.toml` in deny-all mode.
+For componentization only, `prepare-build-wit.py` stages a build-only world that
+includes the unchanged `falcone:host/function@0.2.0` world and the authenticated
+TinyGo bundle's `wasi:cli/imports` world (including its I/O, clocks and random
+dependencies). It copies the bundled WIT versions without selecting new pins and
+fails closed if that runtime world is missing or ambiguous. This does not change
+`worker/wit/host.wit` or the final component's allowed imports.
 Every final component still passes the unchanged worker import gate. Any leftover
 WASI import rejects qualification; there is no alternate execution path.
 
@@ -68,6 +74,8 @@ The compatibility checker scans all supplied files, including build-tagged files
 It checks every line or block comment before traversing imports. This includes
 comments inside grouped imports, between imports and at file level. Strings are
 opaque. Build tags, unknown compiler directives and export directives are refused;
+line and block-form location directives are also refused. Ordinary prose such as
+`algo: x` is not a compiler directive.
 `go:generate` is an install hook. `go:linkname` and `go:wasmimport` both map to
 `WASM-UNSUPPORTED-API` (reviewer decision recorded here). Diagnostics name a fixed
 construct, file, physical line and column, never source payload or tenant values.
@@ -130,10 +138,16 @@ cargo test --locked -p falcone-serverless-worker --test profile_go -- --ignored 
 ```
 
 The script builds only the three positive sources using `tinygo build
--target=wasip2`, embeds the `function` world, denies WASI, validates all nested
-modules, requires exactly one core `cabi_realloc` export, and packages the runtime
-test binary and compiler child. It never executes a guest. A SHA or import mismatch
-fails closed. Without FS_TOOLCHAIN_CACHE the ignored export check prints UNVERIFIED
+-target=wasip2` and the build-only `function` world, then denies WASI. It retains
+TinyGo's pre-composition output under `raw/<name>.wasm`. The trusted-build check
+validates that output and requires exactly one core module exporting
+`falcone:host/handler@0.2.0#handle`, with exactly one function export named
+`cabi_realloc` in that same module. An adapter allocator cannot satisfy that check.
+The final composed component separately passes full validation of all nested
+modules and the unchanged import gate; wasi-virt modules may own their own
+allocators. Both raw and final outputs are covered by `SHA256SUMS` and packaged
+alongside the runtime test binary and compiler child. It never executes a guest.
+A SHA or import mismatch fails closed. Without FS_TOOLCHAIN_CACHE the ignored export check prints UNVERIFIED
 with the reason and contributes no evidence.
 
 An operator packages `bin/profile-go-runtime` and `bin/artifact-compile-child`

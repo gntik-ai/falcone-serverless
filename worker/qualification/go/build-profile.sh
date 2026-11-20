@@ -57,7 +57,7 @@ PY
 [[ ! -e "$FS_PROFILE_COMPONENTS" ]] || { echo 'output directory already exists' >&2; exit 1; }
 stage=$(mktemp -d "$TMPDIR/profile-go.XXXXXXXX")
 trap 'rm -rf -- "$stage"' EXIT
-mkdir "$stage/components"
+mkdir "$stage/components" "$stage/components/raw"
 export GOROOT="$FS_TOOLCHAIN_CACHE/go"
 export TINYGOROOT="$FS_TOOLCHAIN_CACHE/tinygo"
 export PATH="$GOROOT/bin:$PATH"
@@ -65,14 +65,15 @@ export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local GOENV=off CGO_ENABLED=0
 export GOCACHE="$stage/go-cache" GOPATH="$stage/gopath"
 [[ $("$GOROOT/bin/go" version) == 'go version go1.26.11 linux/amd64' ]] || { echo 'Go version mismatch' >&2; exit 1; }
 [[ $("$TINYGOROOT/bin/tinygo" version) == 'tinygo version 0.44.0 '* ]] || { echo 'TinyGo version mismatch' >&2; exit 1; }
+python3 worker/qualification/go/prepare-build-wit.py "$TINYGOROOT" "$root/worker/wit/host.wit" "$stage/wit"
 
 # Static checks precede builds. The negative directory is never passed to a compiler.
 cargo test --offline --locked -p falcone-serverless-worker --test profile_go --test language_profile_matrix
 for name in echo-json uppercase hash-sha256; do
     (cd "$profile" && "$TINYGOROOT/bin/tinygo" build -target=wasip2 -buildmode=c-shared \
-        -wit-package "$root/worker/wit" -wit-world function \
-        -o "$stage/$name.raw.wasm" "./examples/$name")
-    "$FS_TOOLCHAIN_CACHE/bin/wasi-virt" --deny-all "$stage/$name.raw.wasm" -o "$stage/components/$name.wasm"
+        -wit-package "$stage/wit" -wit-world function \
+        -o "$stage/components/raw/$name.wasm" "./examples/$name")
+    "$FS_TOOLCHAIN_CACHE/bin/wasi-virt" --deny-all "$stage/components/raw/$name.wasm" -o "$stage/components/$name.wasm"
 done
 FS_PROFILE_COMPONENTS="$stage/components" cargo test --offline --locked -p falcone-serverless-worker \
     --test profile_go -- --ignored --exact trusted_components_have_one_allocator_and_only_declared_imports --nocapture
@@ -90,5 +91,5 @@ if len(tests) != 1:
 shutil.copy2(tests[0], sys.argv[2])
 PY
 cp "$CARGO_TARGET_DIR/debug/artifact-compile-child" "$stage/components/bin/"
-(cd "$stage/components" && sha256sum ./*.wasm bin/* > SHA256SUMS)
+(cd "$stage/components" && sha256sum ./*.wasm raw/*.wasm bin/* > SHA256SUMS)
 mv "$stage/components" "$FS_PROFILE_COMPONENTS"
