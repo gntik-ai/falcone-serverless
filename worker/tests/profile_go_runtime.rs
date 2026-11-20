@@ -433,3 +433,91 @@ fn built_profile_components() {
     assert!(failures.is_empty(), "profile blocked: {failures:?}");
     println!("{}", json!({"check": "profile_go", "status": "passed"}));
 }
+
+const BUILD_SCRIPT: &str = include_str!("../qualification/go/build-profile.sh");
+
+/// Runs the pinned tool with the build script's own options and a package that does not exist,
+/// so the tool parses every flag and then fails on the package. Returns its stderr.
+fn run_with_script_options(
+    tinygo: &std::path::Path,
+    scratch: &std::path::Path,
+    extra: &str,
+) -> String {
+    let line = BUILD_SCRIPT
+        .lines()
+        .find(|line| line.contains("\"$tinygo\" build "))
+        .expect("the script builds with tinygo");
+    let words: Vec<&str> = line
+        .split_whitespace()
+        .skip_while(|word| *word != "build")
+        .skip(1)
+        .collect();
+    let mut args = vec!["build".to_owned()];
+    let last = words.len() - 1;
+    for (at, word) in words.iter().enumerate() {
+        let word = word.trim_matches('"');
+        args.push(if at == last {
+            "./does-not-exist".to_owned()
+        } else if word.contains('$') {
+            // A path value (the WIT directory or the output file) in the script.
+            scratch
+                .join(if word.ends_with(".wasm") {
+                    "out.wasm"
+                } else {
+                    "wit"
+                })
+                .display()
+                .to_string()
+        } else {
+            word.to_owned()
+        });
+    }
+    args.extend(extra.split_whitespace().map(str::to_owned));
+    let output = std::process::Command::new(tinygo)
+        .args(&args)
+        .current_dir(scratch)
+        .env("GOTOOLCHAIN", "local")
+        .env("GOPROXY", "off")
+        .env("GOFLAGS", "-mod=readonly")
+        .output()
+        .expect("the pinned tinygo runs");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The build script's options are executed against the pinned tools, never just compared with a
+/// list: an option the pinned tinygo rejects fails here, as `--deny-all` did for wasi-virt.
+#[test]
+#[ignore = "UNVERIFIED: requires FS_TOOLCHAIN_CACHE with the pinned tinygo and wasm-tools"]
+fn the_build_script_options_are_accepted_by_the_pinned_tools() {
+    let Some(cache_root) = std::env::var_os("FS_TOOLCHAIN_CACHE") else {
+        println!("UNVERIFIED: FS_TOOLCHAIN_CACHE unset; no pinned tool executed");
+        return;
+    };
+    let cache_root = PathBuf::from(cache_root);
+    let tinygo = cache_root.join("tinygo/bin/tinygo");
+    let scratch = std::env::temp_dir().join(format!("profile-go-options-{}", std::process::id()));
+    std::fs::create_dir(&scratch).unwrap();
+    let scratch = Scratch(scratch);
+    let rejected = "flag provided but not defined";
+
+    // The control: the detector goes red on an option the pinned tinygo does not define.
+    let control = run_with_script_options(&tinygo, &scratch.0, "--deny-all");
+    assert!(
+        control.contains(rejected),
+        "the control was not rejected: {control}"
+    );
+
+    let stderr = run_with_script_options(&tinygo, &scratch.0, "");
+    assert!(
+        !stderr.contains(rejected),
+        "the script's tinygo options are rejected: {stderr}"
+    );
+
+    // The only wasm-tools invocation of the script asks for the version.
+    assert!(BUILD_SCRIPT.contains("\"$wasm_tools\" --version"));
+    let status = std::process::Command::new(cache_root.join("bin/wasm-tools"))
+        .arg("--version")
+        .status()
+        .expect("the pinned wasm-tools runs");
+    assert!(status.success());
+}

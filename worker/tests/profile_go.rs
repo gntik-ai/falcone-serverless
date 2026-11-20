@@ -696,6 +696,19 @@ fn cgo_native_process_gpu_and_catalogue_imports_are_rejected() {
         code("package main\nimport \"reflect\"\nvar _ = reflect.TypeOf(1)\n"),
         Vec::<&str>::new()
     );
+    // A dot import exposes the members unqualified; the limits are still found, in either form.
+    assert_eq!(
+        code("package main\nimport . \"reflect\"\nvar _ = StructOf(nil)\n"),
+        ["WASM-UNSUPPORTED-API"]
+    );
+    assert_eq!(
+        code("package main\nimport (\n\t. \"reflect\"\n)\nfunc f() { MakeFunc(nil, nil) }\n"),
+        ["WASM-UNSUPPORTED-API"]
+    );
+    assert_eq!(
+        code("package main\nimport . \"reflect\"\nvar _ = TypeOf(1)\n"),
+        Vec::<&str>::new()
+    );
     // An undeclared interface in //go:wasmimport is outside the allow-list; a listed one is not.
     assert_eq!(
         code(

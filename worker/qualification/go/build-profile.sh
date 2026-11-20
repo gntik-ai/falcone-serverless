@@ -53,6 +53,8 @@ done
 
 # Static checks precede the build: pins, interfaces, negative fixtures. A failure stops here.
 cargo test --offline --locked -p falcone-serverless-worker --test profile_go
+# The script's own tinygo and wasm-tools options are run against the pinned tools.
+cargo test --offline --locked -p falcone-serverless-worker --test profile_go_runtime -- --ignored --exact the_build_script_options_are_accepted_by_the_pinned_tools --nocapture
 
 # TinyGo's wasip2 target composes the component itself from the build-only world, which adds
 # wasi:random/random to the function world. The bindings carry no cabi_realloc: TinyGo's runtime
