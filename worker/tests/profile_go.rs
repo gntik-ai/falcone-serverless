@@ -44,6 +44,9 @@ const TINYGO_SOURCE: &str = "https://github.com/tinygo-org/tinygo/releases/downl
 const GO_VERSION: &str = "1.26.11";
 const GO_SHA256: &str = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec";
 const GO_SOURCE: &str = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz";
+const TARGET: &str = "wasip2";
+const WIT_PACKAGE: &str = "falcone:host@0.2.0";
+const WIT_WORLD: &str = "function";
 
 fn worker() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -89,6 +92,29 @@ fn pins_ok(manifest: &toml::Value, versions: &toml::Value, matrix: &Value) -> Re
             .ok_or_else(|| format!("pin {} is not a string", path.join(".")))
     };
     for (what, actual, decided) in [
+        ("versions target", field(versions, &["target"])?, TARGET),
+        ("versions engine", field(versions, &["engine"])?, "TinyGo"),
+        (
+            "versions tinygo.name",
+            field(versions, &["tinygo", "name"])?,
+            "TinyGo",
+        ),
+        ("versions go.name", field(versions, &["go", "name"])?, "Go"),
+        (
+            "manifest wit.package",
+            field(manifest, &["wit", "package"])?,
+            WIT_PACKAGE,
+        ),
+        (
+            "manifest wit.world",
+            field(manifest, &["wit", "world"])?,
+            WIT_WORLD,
+        ),
+        (
+            "manifest target",
+            field(manifest, &["toolchain", "target"])?,
+            TARGET,
+        ),
         (
             "versions tinygo.version",
             field(versions, &["tinygo", "version"])?,
@@ -152,9 +178,6 @@ fn pins_ok(manifest: &toml::Value, versions: &toml::Value, matrix: &Value) -> Re
             return Err(format!("{what} is {actual:?}, decided {decided:?}"));
         }
     }
-    if field(manifest, &["toolchain", "target"])? != "wasip2" {
-        return Err("target must be wasip2".into());
-    }
     if field(manifest, &["toolchain", "wasi"])? != "none"
         || matrix["profiles"]["go"]["wasiVersion"] != "none"
     {
@@ -181,7 +204,11 @@ fn a_missing_floating_or_different_pin_is_rejected_in_every_source() {
         "^0.44.0", "~0.44.0", ">=0.44.0", "0.44.x", "0.44", "*", "latest", "", "v0.44.0", "0.44.1",
         "1.26.10",
     ];
-    let toml_paths: [(&str, &[&str]); 6] = [
+    let toml_paths: [(&str, &[&str]); 10] = [
+        ("versions", &["target"]),
+        ("versions", &["engine"]),
+        ("versions", &["tinygo", "name"]),
+        ("versions", &["go", "name"]),
         ("versions", &["tinygo", "version"]),
         ("versions", &["tinygo", "sha256"]),
         ("versions", &["go", "version"]),
@@ -189,7 +216,10 @@ fn a_missing_floating_or_different_pin_is_rejected_in_every_source() {
         ("versions", &["go", "source"]),
         ("versions", &["tinygo", "source"]),
     ];
-    let manifest_paths: [&[&str]; 4] = [
+    let manifest_paths: [&[&str]; 7] = [
+        &["toolchain", "target"],
+        &["wit", "package"],
+        &["wit", "world"],
         &["toolchain", "tinygo"],
         &["toolchain", "tinygo_sha256"],
         &["toolchain", "go"],
@@ -1194,11 +1224,82 @@ fn copy_tree_or_file(from: &Path, to: &Path) {
 
 // ---------------------------------------------------------------- documentation drift
 
-#[test]
-fn published_documentation_matches_the_manifest_and_the_matrix() {
-    let document = read(&worker().join("../docs/qualification/profiles/go.md"));
-    let manifest = manifest();
-    let matrix = matrix();
+/// The cell texts of the documentation table row that starts with `label`.
+fn table_row<'a>(document: &'a str, label: &str) -> Result<Vec<&'a str>, String> {
+    document
+        .lines()
+        .filter(|line| line.starts_with('|'))
+        .map(|line| {
+            line.trim_matches('|')
+                .split('|')
+                .map(str::trim)
+                .collect::<Vec<_>>()
+        })
+        .find(|cells| cells.first().is_some_and(|cell| cell.starts_with(label)))
+        .ok_or_else(|| format!("documentation has no `{label}` row in the versions table"))
+}
+
+/// The documentation says what the manifest and the matrix say, field by field: the versions
+/// table row of each component carries that component's own version and sha256, so a value
+/// that survives elsewhere on the page cannot hide a changed one.
+fn docs_ok(document: &str, manifest: &toml::Value, matrix: &Value) -> Result<(), String> {
+    for (label, version, sha256) in [
+        (
+            "TinyGo",
+            manifest["toolchain"]["tinygo"].as_str().unwrap(),
+            Some(manifest["toolchain"]["tinygo_sha256"].as_str().unwrap()),
+        ),
+        (
+            "Go toolchain",
+            manifest["toolchain"]["go"].as_str().unwrap(),
+            Some(manifest["toolchain"]["go_sha256"].as_str().unwrap()),
+        ),
+        (
+            "Wasmtime",
+            manifest["toolchain"]["wasmtime"].as_str().unwrap(),
+            None,
+        ),
+        (
+            "WASI",
+            manifest["toolchain"]["wasi"].as_str().unwrap(),
+            None,
+        ),
+    ] {
+        let cells = table_row(document, label)?;
+        if cells.get(1).copied() != Some(&format!("`{version}`")[..]) {
+            return Err(format!(
+                "`{label}` row version is {:?}, manifest {version:?}",
+                cells.get(1)
+            ));
+        }
+        if let Some(sha256) = sha256
+            && cells.get(2).copied() != Some(&format!("`{sha256}`")[..])
+        {
+            return Err(format!(
+                "`{label}` row sha256 is {:?}, manifest {sha256:?}",
+                cells.get(2)
+            ));
+        }
+    }
+    let wit = table_row(document, "WIT package")?;
+    let expected = format!(
+        "`{}`, world `{}`",
+        manifest["wit"]["package"].as_str().unwrap(),
+        manifest["wit"]["world"].as_str().unwrap()
+    );
+    if wit.get(1).copied() != Some(expected.as_str()) {
+        return Err(format!(
+            "`WIT package` row is {:?}, manifest {expected:?}",
+            wit.get(1)
+        ));
+    }
+    let flat = document.split_whitespace().collect::<Vec<_>>().join(" ");
+    if !flat.contains(&format!(
+        "each manifest entry carries `go = \"{}\"`",
+        manifest["toolchain"]["go"].as_str().unwrap()
+    )) {
+        return Err("the standard-library binding does not name the pinned Go toolchain".into());
+    }
     let mut tokens: Vec<String> = vec![
         manifest["profile"]["id"].as_str().unwrap().to_owned(),
         manifest["profile"]["matrix_revision"]
@@ -1256,13 +1357,79 @@ fn published_documentation_matches_the_manifest_and_the_matrix() {
         tokens.push(flag);
     }
     for token in tokens {
-        assert!(
-            document.contains(&token),
-            "documentation is missing `{token}`"
-        );
+        if !document.contains(&token) {
+            return Err(format!("documentation is missing `{token}`"));
+        }
     }
     // A stale or wrong value is not accepted by the same check, and the status is not raised.
-    assert!(!document.contains("0.43.0") && !document.contains("go-wasi-v0"));
-    assert!(!document.contains("wasi-virt` is used"));
-    assert!(!document.to_lowercase().contains("status: `enabled`"));
+    if document.contains("0.43.0") || document.contains("go-wasi-v0") {
+        return Err("documentation names a stale version".into());
+    }
+    if document.contains("wasi-virt` is used") {
+        return Err("documentation says wasi-virt is used".into());
+    }
+    if document.to_lowercase().contains("status: `enabled`") {
+        return Err("documentation raises the status".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn published_documentation_matches_the_manifest_and_the_matrix() {
+    let document = read(&worker().join("../docs/qualification/profiles/go.md"));
+    docs_ok(&document, &manifest(), &matrix()).unwrap();
+}
+
+#[test]
+fn a_changed_documented_version_digest_or_interface_is_drift() {
+    let document = read(&worker().join("../docs/qualification/profiles/go.md"));
+    let (manifest, matrix) = (manifest(), matrix());
+    let tinygo_row = "| TinyGo, target `wasip2` | `0.44.0` |";
+    let go_row = "| Go toolchain | `1.26.11` | `9849f4e0";
+    assert!(document.contains(tinygo_row) && document.contains(go_row));
+    for (from, to) in [
+        (go_row, "| Go toolchain | `1.26.10` | `9849f4e0"),
+        (go_row, "| Go toolchain | `1.26.11` | `0849f4e0"),
+        (tinygo_row, "| TinyGo, target `wasip2` | `0.44.1` |"),
+        ("| Wasmtime | `49.0.5` |", "| Wasmtime | `49.0.4` |"),
+        ("| WASI | `none` |", "| WASI | `0.2.6` |"),
+        (
+            "`falcone:host@0.2.0`, world `function`",
+            "`falcone:host@0.2.1`, world `function`",
+        ),
+        (
+            "`falcone:host@0.2.0`, world `function`",
+            "`falcone:host@0.2.0`, world `handler`",
+        ),
+        ("`go = \"1.26.11\"`", "`go = \"1.26.10\"`"),
+    ] {
+        assert!(document.contains(from), "{from}");
+        let changed = document.replacen(from, to, 1);
+        assert!(
+            docs_ok(&changed, &manifest, &matrix).is_err(),
+            "{from} -> {to} is not drift"
+        );
+    }
+    // The decided Go version still appears elsewhere on the page, which is not enough.
+    let only_the_table = document.replacen(go_row, "| Go toolchain | `1.26.10` | `9849f4e0", 1);
+    assert!(only_the_table.contains("1.26.11"));
+    assert!(docs_ok(&only_the_table, &manifest, &matrix).is_err());
+}
+
+#[test]
+fn the_decided_wit_package_and_world_are_the_ones_host_wit_declares() {
+    let wit = read(&worker().join("wit/host.wit"));
+    assert!(wit.lines().any(|l| l == format!("package {WIT_PACKAGE};")));
+    assert!(wit.contains(&format!("world {WIT_WORLD} {{")));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_operator_build_script_is_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(worker().join("qualification/go/build-profile.sh"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert!(mode & 0o111 != 0, "build-profile.sh mode {mode:o}");
 }

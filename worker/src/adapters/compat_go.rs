@@ -393,6 +393,13 @@ fn imports(tokens: &[Token<'_>]) -> Vec<(usize, Option<String>)> {
                         out.push((t.at, unquote(t)));
                         index += 1;
                     }
+                    // Anything else where an import spec must start is malformed syntax: it is
+                    // reported as an unresolved import path and consumed, so every pass of this
+                    // loop advances and a hostile source cannot stall the checker.
+                    Some(t) if t.text != ")" && t.text != ";" => {
+                        out.push((t.at, None));
+                        index += 1;
+                    }
                     _ => {}
                 }
                 if code.get(index).is_some_and(|t| t.text == ";") {
@@ -402,13 +409,6 @@ fn imports(tokens: &[Token<'_>]) -> Vec<(usize, Option<String>)> {
                     if grouped {
                         index += 1;
                     }
-                    break;
-                }
-                if !code.get(index).is_some_and(|t| {
-                    matches!(t.kind, Kind::String | Kind::RawString | Kind::Word)
-                        || matches!(t.text, "." | "_")
-                }) {
-                    // Not an import spec: stop this group instead of looping forever.
                     break;
                 }
             }
@@ -672,6 +672,39 @@ mod tests {
 
     const CLEAN: &str =
         "package main\n\nimport (\n\t\"strings\"\n)\n\nfunc init() { _ = strings.ToUpper }\n";
+
+    /// Runs `check_guest` on its own thread so a stall fails the test instead of hanging it.
+    fn bounded(text: &'static str) -> Vec<(&'static str, &'static str, usize, usize)> {
+        let (send, receive) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = send.send(run(text));
+        });
+        receive
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("check_guest did not return")
+    }
+
+    #[test]
+    fn malformed_import_syntax_is_rejected_and_never_stalls_the_checker() {
+        for source in [
+            "package main\nimport ( broken )\n",
+            "package main\nimport (\n\tbroken\n\tmore\n)\n",
+            "package main\nimport ( a b )\n",
+            "package main\nimport ( 1 2 3\n",
+            "package main\nimport broken\n",
+            "package main\nimport ( . )\n",
+        ] {
+            let found = bounded(source);
+            assert!(
+                found
+                    .iter()
+                    .any(|d| d.0 == UNSUPPORTED && d.1 == "import path" && d.2 >= 2),
+                "{source:?}: {found:?}"
+            );
+        }
+        assert_eq!(bounded("package main\nimport ()\n"), []);
+        assert_eq!(bounded("package main\nimport (\n\t;\n)\n"), []);
+    }
 
     #[test]
     fn a_clean_guest_is_supported() {
