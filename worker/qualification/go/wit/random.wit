@@ -1,0 +1,9 @@
+package wasi:random@0.2.0;
+
+/// The one WASI interface the Falcone host provides (operator decision 2026-11-20). The host
+/// links exactly these two functions, backed by the operating system CSPRNG, and traps when
+/// get-random-bytes is asked for more than 65536 bytes.
+interface random {
+    get-random-bytes: func(len: u64) -> list<u8>;
+    get-random-u64: func() -> u64;
+}

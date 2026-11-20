@@ -63,7 +63,12 @@ evidence object make the absence of qualification explicit.
 The `allowedInterfaces` list caps grantable capabilities; membership never grants
 authority by itself. Each entry must resolve at its exact package version in
 [worker/wit/host.wit](../../worker/wit/host.wit), parsed with wit-parser. For
-example, `falcone:host/storage@0.2.0` names an interface, not a grant. Wildcards,
+example, `falcone:host/storage@0.2.0` names an interface, not a grant. The one
+exception is `wasi:random/random@0.2.0` (operator decision, 2026-11-20): the host
+provides exactly `get-random-bytes` and `get-random-u64`, backed by the operating
+system CSPRNG (never a seeded or deterministic source), and `get-random-bytes` traps
+above 65536 bytes. Every other WASI interface, including `wasi:random/insecure@0.2.0`
+and `wasi:random/insecure-seed@0.2.0`, is rejected. Wildcards,
 unknown interfaces and version substitutions are rejected. Empty seed lists
 grant no capabilities. Future consumers must still intersect this ceiling with
 verified invocation grants and enforce scope, limits and cancellation.
@@ -119,23 +124,29 @@ human review must assess the policy and prose.
 | --- | --- | --- |
 | JavaScript | `javascript-wasi-v1` | Disabled; tested examples are named, but no evidence is recorded. |
 | Python | `python-wasi-v1` | Disabled; no evidence or tested examples. |
-| Go | `go-wasi-v1` | Disabled; no evidence or tested examples. |
+| Go | `go-wasi-v1` | Disabled; tested examples are named, but no evidence is recorded. |
 
 Every committed profile is disabled and has an empty evidence object. The Python
-and Go seeds keep an empty capability ceiling and unqualified versions. JavaScript
+seed keeps an empty capability ceiling and unqualified versions. JavaScript
 records the operator-approved jco toolchain version `1.41.0`, `wasiVersion` `none`
 (the final component may import only `falcone:host/*@0.2.0`), the eight
 `falcone:host` imports of the `function` world as its capability ceiling, and its
 tested examples; its package catalogue stays unqualified, so no third-party package
 is accepted. Recording these pins does not qualify JavaScript.
 See [the JavaScript qualification](../qualification/profiles/javascript.md).
+Go records the operator-approved TinyGo toolchain version `0.44.0` (`wasip2` target, Go
+`1.26.11`), `wasiVersion` `0.2.0`, the same eight `falcone:host` imports plus
+`wasi:random/random@0.2.0` as its capability ceiling, and its tested examples; its package
+catalogue stays unqualified, so no third-party module is accepted. Recording these pins does
+not qualify Go. See [the Go qualification](../qualification/profiles/go.md).
 No profile is enabled and no real evidence is produced by this contract change.
 Publication is merge-only; rollback is a revert until a later consumer pins a
 matrix revision.
 
 ### WIT 0.2.0 encoding requirement
 
-`allowedInterfaces` resolve only to the eight imports of `falcone:host@0.2.0`.
+`allowedInterfaces` resolve only to the eight imports of `falcone:host@0.2.0` and, for a
+profile whose toolchain runtime needs entropy, `wasi:random/random@0.2.0`.
 Every guest also exports `falcone:host/handler@0.2.0`. Canonical strings are
 UTF-8 only: supported toolchains emit UTF-8, and qualification must preserve
 that encoding. UTF-16 and compact Latin-1 (`latin1+utf16`) lift/lower options

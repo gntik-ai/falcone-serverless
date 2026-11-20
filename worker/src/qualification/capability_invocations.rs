@@ -842,6 +842,8 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
         "wasi:filesystem/preopens@0.2.0",
         "wasi:sockets/tcp@0.2.0",
         "wasi:cli/environment@0.2.0",
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
         "falcone:host/storage@0.2.0",
         "falcone:host/http@0.2.0",
         "falcone:host/events@0.2.0",
@@ -861,20 +863,78 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
         assert!(error.contains(import), "{error}");
         assert_eq!(binding.0.load(Ordering::SeqCst), 0);
     }
-    let binding = Arc::new(Recording::default());
-    let source = include_str!("fixtures/capability-import.wat")
-        .replace("IMPORT", "falcone:host/cancellation@0.2.0");
-    host::instantiate(
+    // Controls: the ungated host interface and the one WASI interface the host provides.
+    for control in [
+        "falcone:host/cancellation@0.2.0",
+        "wasi:random/random@0.2.0",
+    ] {
+        let binding = Arc::new(Recording::default());
+        let source = include_str!("fixtures/capability-import.wat").replace("IMPORT", control);
+        host::instantiate(
+            &engine,
+            &source,
+            Host::new(Context::default(), binding.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            binding.0.load(Ordering::SeqCst),
+            1,
+            "{control}: control must record its start marker"
+        );
+    }
+}
+
+/// The one WASI interface the host provides: `wasi:random/random@0.2.0`, with exactly
+/// `get-random-bytes` and `get-random-u64`, backed by the operating system CSPRNG.
+#[cfg_attr(test, test)]
+pub fn wasi_random_is_the_only_wasi_interface_and_is_bounded() {
+    let _case = crate::capability_support::serial_case();
+    let engine = wasmtime::Engine::default();
+    let source = include_str!("fixtures/capability-random.wat").replace("EXTRA", "");
+    let start = || {
+        host::instantiate(
+            &engine,
+            &source,
+            Host::new(Context::default(), Arc::new(Recording::default())),
+        )
+        .unwrap()
+    };
+    let (mut store, instance) = start();
+    let next = instance
+        .get_typed_func::<(), (u64,)>(&mut store, "u64")
+        .unwrap();
+    let first = next.call(&mut store, ()).unwrap().0;
+    let second = next.call(&mut store, ()).unwrap().0;
+    assert_ne!(first, second, "two draws in one invocation must differ");
+    let bytes = instance
+        .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes")
+        .unwrap();
+    assert_eq!(bytes.call(&mut store, (0,)).unwrap(), (0,));
+    assert_eq!(bytes.call(&mut store, (65_536,)).unwrap(), (65_536,));
+    // One byte above the bound is a trap, not a clamped or partial answer.
+    let error = bytes.call(&mut store, (65_537,)).unwrap_err();
+    assert!(format!("{error:#}").contains("limit-exceeded"), "{error:#}");
+    // Draws come from the OS CSPRNG: two draws differ and one draw is not constant.
+    let (mut store, instance) = start();
+    for export in ["differs", "varied"] {
+        let check = instance
+            .get_typed_func::<(u64,), (u32,)>(&mut store, export)
+            .unwrap();
+        assert_eq!(check.call(&mut store, (4096,)).unwrap(), (1,), "{export}");
+    }
+    // Any other function of the interface fails to link: nothing else is provided.
+    let extra = include_str!("fixtures/capability-random.wat")
+        .replace("EXTRA", "(export \"get-random-extra\" (func (result u64)))");
+    let result = host::instantiate(
         &engine,
-        &source,
-        Host::new(Context::default(), binding.clone()),
-    )
-    .unwrap();
-    assert_eq!(
-        binding.0.load(Ordering::SeqCst),
-        1,
-        "control must record its start marker"
+        &extra,
+        Host::new(Context::default(), Arc::new(Recording::default())),
     );
+    let error = match result {
+        Ok(_) => panic!("an extra wasi:random function must not link"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("get-random-extra"), "{error}");
 }
 
 #[cfg_attr(test, test)]

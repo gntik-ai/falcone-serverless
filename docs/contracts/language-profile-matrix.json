@@ -59,11 +59,26 @@
       "id": "go-wasi-v1",
       "status": "disabled",
       "wasmtimeVersion": "49.0.5",
-      "wasiVersion": "unqualified",
-      "toolchainVersion": "unqualified",
+      "wasiVersion": "0.2.0",
+      "toolchainVersion": "0.44.0",
       "packageCatalogueVersion": "unqualified",
-      "allowedInterfaces": [],
-      "testedExamples": [],
+      "allowedInterfaces": [
+        "falcone:host/storage@0.2.0",
+        "falcone:host/http@0.2.0",
+        "falcone:host/events@0.2.0",
+        "falcone:host/workflows@0.2.0",
+        "falcone:host/logging@0.2.0",
+        "falcone:host/cancellation@0.2.0",
+        "falcone:host/progress@0.2.0",
+        "falcone:host/invocation-context@0.2.0",
+        "wasi:random/random@0.2.0"
+      ],
+      "testedExamples": [
+        "hash-sha256",
+        "byte-stats",
+        "random-bytes",
+        "events-handle"
+      ],
       "diagnostics": [
         "WASM-NATIVE-LIBRARY",
         "WASM-GPU",

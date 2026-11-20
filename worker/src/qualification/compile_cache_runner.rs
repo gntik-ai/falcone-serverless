@@ -165,6 +165,7 @@ fn main() -> std::process::ExitCode {
             capability_invocations::exhausted_execution_handles_do_not_start_untracked_workflows();
             capability_invocations::execution_handles_retain_bounded_workflow_metadata();
             capability_invocations::absent_grants_and_ambient_imports_fail_before_a_guest_start();
+            capability_invocations::wasi_random_is_the_only_wasi_interface_and_is_bounded();
             capability_invocations::event_scope_and_oversized_lazy_arguments_are_checked_before_binding();
             capability_invocations::logging_is_ungated_and_record_lists_are_lifted_lazily();
             capability_invocations::structured_logging_redacts_guest_credentials_before_binding();

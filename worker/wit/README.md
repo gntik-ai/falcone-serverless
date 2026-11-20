@@ -11,7 +11,16 @@ World `function` imports exactly `storage`, `http`, `events`, `workflows`,
 `logging`, `cancellation`, `progress` and `invocation-context`. Linking is
 deny-by-default: only these versioned Falcone interfaces are permitted. This
 package grants no WASI filesystem, sockets, generic HTTP, environment or secret
-interface. WAS-03 profiles must use these Falcone imports only.
+interface. WAS-03 profiles must use these Falcone imports only, with one exception
+(operator decision, 2026-11-20): the host provides the WASI interface
+`wasi:random/random@0.2.0`, because the pinned TinyGo wasip2 runtime imports it from
+reactor init and Go `crypto/rand` reads it. Only `get-random-bytes` and `get-random-u64`
+are linked, both backed by the operating system CSPRNG and never by a seeded or
+deterministic source. `get-random-bytes` traps for a length above 65536 bytes, each call
+counts toward the invocation's time, fuel and host-call limits, and no limit is raised.
+`wasi:random/insecure`, `wasi:random/insecure-seed` and every other `wasi:*` interface stay
+rejected with `undeclared_import`. The interface is not part of the `function` world: it is
+admitted by the import gate and the linker only.
 
 ## Per-call ceilings
 

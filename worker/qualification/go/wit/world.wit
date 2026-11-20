@@ -1,0 +1,9 @@
+package falcone:go-build@0.2.0;
+
+/// Build-only world for TinyGo wasip2: the function world of falcone:host@0.2.0 plus the one
+/// WASI interface the pinned TinyGo runtime imports from reactor init. The final component is
+/// validated by the worker import gate, which accepts nothing else.
+world function {
+    include falcone:host/function@0.2.0;
+    import wasi:random/random@0.2.0;
+}

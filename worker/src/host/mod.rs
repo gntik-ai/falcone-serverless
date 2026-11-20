@@ -167,7 +167,8 @@ pub fn import_allowed(import: &str, grants: &Grants) -> bool {
         "falcone:host/logging@0.2.0"
         | "falcone:host/cancellation@0.2.0"
         | "falcone:host/progress@0.2.0"
-        | "falcone:host/invocation-context@0.2.0" => true,
+        | "falcone:host/invocation-context@0.2.0"
+        | "wasi:random/random@0.2.0" => true,
         _ => false,
     }
 }

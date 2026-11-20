@@ -82,7 +82,11 @@ fixture. Production budgets remain owned by WAS-01/profile policy.
 Validation order is size, raw Wasm magic (non-Wasm including ELF is rejected as
 precompiled input), full component-model validation, component-only check, then
 exact top-level interface-instance imports from `falcone:host@0.2.0` world
-`function`. Nested core modules are validated too. AVC-R5/profile declared-memory
+`function`, plus the one WASI interface `wasi:random/random@0.2.0` (operator decision,
+2026-11-20: a narrow host-provided CSPRNG with `get-random-bytes` bounded to 65536
+bytes). Every other `wasi:*` import, including `wasi:random/insecure@0.2.0` and
+`wasi:random/insecure-seed@0.2.0`, is `undeclared_import`. Nested core modules are
+validated too. AVC-R5/profile declared-memory
 checks and guest memory/epoch enforcement remain RUN-01 work; this module does
 not claim to implement them. The local execute command consumes the verified cache
 before starting its guest deadline; no platform runtime adapter is wired.

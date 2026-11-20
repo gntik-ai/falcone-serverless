@@ -1,5 +1,6 @@
 //! Fail-closed legacy language adapters. Qualification never enables a production profile.
 pub mod compat;
+pub mod compat_go;
 pub mod javascript;
 
 use crate::{

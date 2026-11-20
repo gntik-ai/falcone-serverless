@@ -1,0 +1,70 @@
+# Go (TinyGo wasip2) profile pins: the one source of truth, under worker/src so that the image
+# build context (worker/Containerfile copies only worker/src) can embed it. Operator decision
+# 2026-11-19: copy exactly, never look up, upgrade or substitute. Recording pins does not
+# qualify or enable the profile. The qualification scripts and the manifest in
+# worker/qualification/ read or are checked against this file; tests fail on any drift.
+qualification_status = "disabled"
+target = "wasip2"
+wasi = "0.2.0"
+
+[tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+# TinyGo 0.44.0 accepts Go 1.25 through 1.27 (compileopts/config.go:22-23).
+[go]
+name = "Go"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+
+# The one WASI interface the host provides (operator decision 2026-11-20): the TinyGo runtime
+# imports it from reactor init. Only these two functions are linked, backed by the OS CSPRNG.
+[wasi_random]
+interface = "wasi:random/random@0.2.0"
+functions = ["get-random-bytes", "get-random-u64"]
+max_bytes = 65536
+
+# Third-party Go modules: none. The catalogue is unqualified and empty.
+[modules]
+packages = []
+
+# The standard-library packages a tenant source may import. They are bound to the pinned Go
+# toolchain: TinyGo compiles the standard library that ships with that exact release.
+[stdlib]
+go = "1.26.11"
+packages = [
+  "bufio",
+  "bytes",
+  "crypto/hmac",
+  "crypto/rand",
+  "crypto/sha1",
+  "crypto/sha256",
+  "crypto/sha512",
+  "encoding/base64",
+  "encoding/binary",
+  "encoding/hex",
+  "encoding/json",
+  "errors",
+  "fmt",
+  "io",
+  "maps",
+  "math",
+  "math/bits",
+  "reflect",
+  "regexp",
+  "slices",
+  "sort",
+  "strconv",
+  "strings",
+  "unicode",
+  "unicode/utf8",
+]

@@ -135,7 +135,9 @@ fn validate(schema: &Value, matrix: &Value) -> Result<(), String> {
         }
         for interface in profile["allowedInterfaces"].as_array().unwrap() {
             let interface = interface.as_str().unwrap();
-            if interface.contains('*') || !interfaces.contains(interface) {
+            // The one WASI interface the host provides (operator decision, 2026-11-20).
+            let wasi_random = interface == "wasi:random/random@0.2.0";
+            if interface.contains('*') || !(interfaces.contains(interface) || wasi_random) {
                 return Err(format!(
                     "allowedInterfaces: {language}: unknown or wildcard WIT interface {interface}"
                 ));
@@ -423,4 +425,33 @@ fn exported_handler_is_not_a_grantable_import() {
             .unwrap_err()
             .contains("allowedInterfaces")
     );
+}
+
+#[test]
+fn wasi_random_is_the_only_wasi_interface_a_profile_may_list() {
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string(contracts().join("language-profile-matrix.schema.json")).unwrap(),
+    )
+    .unwrap();
+    let with = |interface: &str| {
+        let mut matrix = fixture("valid", "enabled-wasi-none");
+        matrix["profiles"]["javascript"]["allowedInterfaces"] = serde_json::json!([interface]);
+        validate(&schema, &matrix)
+    };
+    with("wasi:random/random@0.2.0").unwrap();
+    for rejected in [
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
+        "wasi:random/random@0.2.6",
+        "wasi:cli/environment@0.2.0",
+        "wasi:filesystem/types@0.2.0",
+        "wasi:sockets/tcp@0.2.0",
+        "wasi:clocks/monotonic-clock@0.2.0",
+        "wasi:io/streams@0.2.0",
+    ] {
+        assert!(
+            with(rejected).unwrap_err().contains("allowedInterfaces"),
+            "{rejected}"
+        );
+    }
 }

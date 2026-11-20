@@ -4,6 +4,7 @@
 //! is bounded by the guest linear memory capped by the store limiter. UTF-8
 //! validation still takes CPU proportional to the guest range. No raw ABI lifting.
 use super::{Bindings, Context, HostError, Level, Operation, Pair, Reply, import_allowed};
+use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::BTreeMap;
 use std::sync::{
     Arc, Condvar, Mutex, OnceLock, Weak,
@@ -33,6 +34,9 @@ const EXECUTION_ID_BYTES: usize = 1024;
 // for detached calls, but bound *all* running helpers, including binding drops.
 const HELPER_THREADS: usize = 20 + 4;
 const STALLED_PER_BINDING: usize = 4;
+// `wasi:random/random@0.2.0#get-random-bytes` above this length traps. The buffer is host
+// memory outside guest linear memory, so the bound is fixed and never configurable.
+const RANDOM_BYTES_MAX: u64 = 65_536;
 
 #[derive(Default)]
 struct BudgetState {
@@ -710,6 +714,38 @@ pub(super) fn instantiate_in_store(
                 Ok((store.data().cancelled.load(Ordering::Acquire),))
             },
         )?;
+    // The only WASI interface: exactly these two functions, backed by the operating system
+    // CSPRNG (never seeded or deterministic). No WASI crate and no bulk WASI linking, so a
+    // component that needs any other function of the interface fails to instantiate. Each call
+    // counts as a host call, so its work is bounded by the invocation's time and call limits.
+    let mut random = linker.instance(crate::artifact::validate::WASI_RANDOM)?;
+    random.func_wrap(
+        "get-random-bytes",
+        |store: StoreContextMut<'_, Host>, (len,): (u64,)| {
+            store.data().enter()?;
+            if len > RANDOM_BYTES_MAX {
+                return Err(wasmtime::Error::msg(
+                    "limit-exceeded: wasi:random get-random-bytes length",
+                ));
+            }
+            let mut bytes = vec![0; len as usize];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("wasi:random entropy source unavailable"))?;
+            Ok((bytes,))
+        },
+    )?;
+    random.func_wrap(
+        "get-random-u64",
+        |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
+            let mut bytes = [0; 8];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("wasi:random entropy source unavailable"))?;
+            Ok((u64::from_le_bytes(bytes),))
+        },
+    )?;
     let mut context = linker.instance("falcone:host/invocation-context@0.2.0")?;
     context.func_wrap(
         "invocation-key",

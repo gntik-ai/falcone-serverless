@@ -46,12 +46,15 @@ fn raw_component_accepts_exact_world_function_interfaces() {
         })
         .collect();
     assert_eq!(expected.len(), 8);
+    // The world's eight imports plus the one WASI interface the host provides.
+    let mut allowed = expected.clone();
+    allowed.insert("wasi:random/random@0.2.0".to_owned());
     assert_eq!(
         artifact::validate::ALLOWED_IMPORTS
             .iter()
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>(),
-        expected
+        allowed
     );
     let bytes = small();
     let validated = artifact::validate::validate(&bytes, bytes.len()).unwrap();
@@ -59,6 +62,67 @@ fn raw_component_accepts_exact_world_function_interfaces() {
         validated.imports.iter().cloned().collect::<BTreeSet<_>>(),
         expected
     );
+}
+
+fn with_import(name: &str, kind: &str) -> Vec<u8> {
+    // A top-level import, which is the only place the import gate looks.
+    let source = include_str!("fixtures/was-02/allowed.wat").replacen(
+        "(core module (func",
+        &format!("(import \"{name}\" {kind})\n  (core module (func"),
+        1,
+    );
+    wat::parse_str(source).unwrap()
+}
+
+#[test]
+fn wasi_random_is_the_only_accepted_wasi_import() {
+    use artifact::validate::validate;
+    let accepted = with_import("wasi:random/random@0.2.0", "(instance)");
+    let validated = validate(&accepted, accepted.len()).unwrap();
+    assert!(
+        validated
+            .imports
+            .contains(&"wasi:random/random@0.2.0".to_owned())
+    );
+    for name in [
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
+        "wasi:random/random@0.2.6",
+        "wasi:cli/environment@0.2.0",
+        "wasi:cli/stdout@0.2.0",
+        "wasi:filesystem/types@0.2.0",
+        "wasi:sockets/tcp@0.2.0",
+        "wasi:clocks/monotonic-clock@0.2.0",
+        "wasi:io/streams@0.2.0",
+    ] {
+        let bytes = with_import(name, "(instance)");
+        let error = validate(&bytes, bytes.len()).unwrap_err();
+        assert_eq!(error.code, "undeclared_import", "{name}");
+        assert_eq!(error.import.as_deref(), Some(name));
+    }
+    // The Instance-only rule stays: the allowed name as a function import is rejected.
+    let function = with_import("wasi:random/random@0.2.0", "(func)");
+    assert_eq!(
+        validate(&function, function.len()).unwrap_err().code,
+        "undeclared_import"
+    );
+}
+
+#[test]
+fn a_tenant_supplied_precompiled_artifact_is_rejected_on_the_go_path() {
+    use artifact::validate::validate;
+    // A Wasmtime native artifact (ELF) and a serialized-looking blob are never parsed as
+    // components: the first check answers precompiled_rejected, for any language profile.
+    for bytes in [
+        include_bytes!("fixtures/was-02/native.elf").as_slice(),
+        b"\x7fELF\x02\x01\x01\0wasmtime-go-precompiled".as_slice(),
+        b"wasmtime-precompiled go component".as_slice(),
+    ] {
+        assert_eq!(
+            validate(bytes, 1 << 20).unwrap_err().code,
+            "precompiled_rejected"
+        );
+    }
 }
 
 #[test]

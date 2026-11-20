@@ -9,7 +9,11 @@ pub const HANDLER_EXPORT: &str = "falcone:host/handler@0.2.0";
 
 use super::Error;
 
-pub const ALLOWED_IMPORTS: [&str; 8] = [
+/// The one WASI interface the host provides (operator decision 2026-11-20): the TinyGo wasip2
+/// runtime imports it from reactor init. Every other `wasi:*` import stays `undeclared_import`.
+pub const WASI_RANDOM: &str = "wasi:random/random@0.2.0";
+
+pub const ALLOWED_IMPORTS: [&str; 9] = [
     "falcone:host/storage@0.2.0",
     "falcone:host/http@0.2.0",
     "falcone:host/events@0.2.0",
@@ -18,6 +22,7 @@ pub const ALLOWED_IMPORTS: [&str; 8] = [
     "falcone:host/cancellation@0.2.0",
     "falcone:host/progress@0.2.0",
     "falcone:host/invocation-context@0.2.0",
+    WASI_RANDOM,
 ];
 
 #[derive(Debug)]

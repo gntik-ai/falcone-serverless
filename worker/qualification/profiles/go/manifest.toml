@@ -1,0 +1,219 @@
+# Go (TinyGo wasip2) Wasm profile qualification manifest (matrix revision 2).
+# Operator decisions 2026-11-19 and 2026-11-20. The toolchain pins are copied from
+# ../../../src/qualification/go_versions.toml (the one source of truth, under worker/src so the
+# image build context contains it) and a static test keeps them equal. Recording this manifest
+# does not qualify or enable the profile: the matrix entry stays disabled until the built
+# components and their cluster evidence are recorded.
+
+[profile]
+id = "go-wasi-v1"
+matrix_revision = "2"
+# Never selected or changed by a diagnostic; OCI is only ever named as an alternative in text.
+mode = "wasm"
+status = "disabled"
+# qualified only when every static and cluster check passes; a failure is blocked.
+qualification = "not-qualified"
+engine = "TinyGo"
+
+[toolchain]
+wasmtime = "49.0.5"
+# The final component may import one WASI interface (wasi:random/random@0.2.0, see [wasi]).
+wasi = "0.2.0"
+target = "wasip2"
+tinygo = "0.44.0"
+tinygo_sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+go = "1.26.11"
+go_sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = [
+  "falcone:host/storage@0.2.0",
+  "falcone:host/http@0.2.0",
+  "falcone:host/events@0.2.0",
+  "falcone:host/workflows@0.2.0",
+  "falcone:host/logging@0.2.0",
+  "falcone:host/cancellation@0.2.0",
+  "falcone:host/progress@0.2.0",
+  "falcone:host/invocation-context@0.2.0",
+]
+
+# The one WASI interface the host provides (operator decision 2026-11-20): the TinyGo runtime
+# imports it from reactor init and Go crypto/rand reads it. Only these two functions are
+# linked, backed by the OS CSPRNG; get-random-bytes traps above max_bytes. Every other wasi:*
+# import is rejected with undeclared_import.
+[wasi]
+interfaces = ["wasi:random/random@0.2.0"]
+functions = ["get-random-bytes", "get-random-u64"]
+max_bytes = 65536
+
+# No third-party Go module is accepted: the catalogue is unqualified and empty. A separately
+# versioned module would be listed here with an exact version.
+[catalogue]
+revision = "unqualified"
+modules = []
+
+# Standard-library packages tenant sources may import. Each is bound to the pinned Go release,
+# because TinyGo compiles the standard library that ships with that exact toolchain.
+[[stdlib]]
+package = "bufio"
+go = "1.26.11"
+[[stdlib]]
+package = "bytes"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/hmac"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/rand"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/sha1"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/sha256"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/sha512"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/base64"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/binary"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/hex"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/json"
+go = "1.26.11"
+[[stdlib]]
+package = "errors"
+go = "1.26.11"
+[[stdlib]]
+package = "fmt"
+go = "1.26.11"
+[[stdlib]]
+package = "io"
+go = "1.26.11"
+[[stdlib]]
+package = "maps"
+go = "1.26.11"
+[[stdlib]]
+package = "math"
+go = "1.26.11"
+[[stdlib]]
+package = "math/bits"
+go = "1.26.11"
+[[stdlib]]
+package = "reflect"
+go = "1.26.11"
+[[stdlib]]
+package = "regexp"
+go = "1.26.11"
+[[stdlib]]
+package = "slices"
+go = "1.26.11"
+[[stdlib]]
+package = "sort"
+go = "1.26.11"
+[[stdlib]]
+package = "strconv"
+go = "1.26.11"
+[[stdlib]]
+package = "strings"
+go = "1.26.11"
+[[stdlib]]
+package = "unicode"
+go = "1.26.11"
+[[stdlib]]
+package = "unicode/utf8"
+go = "1.26.11"
+
+[[workloads]]
+name = "hash-sha256"
+source = "examples/hash-sha256/main.go"
+input = "examples/hash-sha256/input.json"
+expected = "examples/hash-sha256/expected.json"
+imports = []
+
+[[workloads]]
+name = "byte-stats"
+source = "examples/byte-stats/main.go"
+input = "examples/byte-stats/input.json"
+expected = "examples/byte-stats/expected.json"
+imports = []
+
+[[workloads]]
+name = "random-bytes"
+source = "examples/random-bytes/main.go"
+input = "examples/random-bytes/input.json"
+expected = "examples/random-bytes/expected.json"
+# crypto/rand reads wasi:random through the TinyGo runtime; nothing is imported by the source.
+imports = []
+
+[[workloads]]
+name = "events-handle"
+source = "examples/events-handle/main.go"
+request = "examples/events-handle/request.json"
+cases = "examples/events-handle/cases.json"
+imports = ["falcone:host/events@0.2.0"]
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "A native library, cgo or a plugin cannot run in Wasm mode. Port it to pure Go; OCI mode is a separate, explicitly authorized choice."
+[diagnostics."WASM-GPU"]
+message = "GPU access is outside the falcone:host capability host and is rejected."
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "Spawning a process (os/exec) is not available in Wasm mode."
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "go:generate and other install or build hooks are never run; nothing is installed."
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "The module, or its version, is not in the pinned package catalogue. Qualification and the build are rejected and nothing is downloaded. OCI mode is a separate, explicitly authorized alternative."
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "The package or API is outside this profile's supported subset, including documented TinyGo limits."
+
+# One negative fixture per code: `path` is a source directory of the module, `file`, `line` and
+# `column` locate the one diagnostic it must yield, and nothing is built or run for any of them.
+[[negative]]
+code = "WASM-NATIVE-LIBRARY"
+path = "negative/native-library"
+file = "negative/native-library/main.go"
+line = 6
+column = 8
+
+[[negative]]
+code = "WASM-GPU"
+path = "negative/gpu"
+file = "negative/gpu/main.go"
+line = 4
+column = 2
+
+[[negative]]
+code = "WASM-PROCESS-SPAWN"
+path = "negative/process-spawn"
+file = "negative/process-spawn/main.go"
+line = 4
+column = 2
+
+[[negative]]
+code = "WASM-INSTALL-HOOK"
+path = "negative/install-hook"
+file = "negative/install-hook/main.go"
+line = 3
+column = 1
+
+[[negative]]
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+path = "negative/package-not-in-catalogue"
+file = "negative/package-not-in-catalogue/main.go"
+line = 4
+column = 2
+
+[[negative]]
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-api"
+file = "negative/unsupported-api/main.go"
+line = 8
+column = 6

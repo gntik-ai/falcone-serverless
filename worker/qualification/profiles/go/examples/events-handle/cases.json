@@ -1,0 +1,42 @@
+{
+  "example": "events-handle",
+  "cases": [
+    {
+      "name": "publishes-the-request-once",
+      "params": "{\"order\":\"o-1\"}",
+      "calls": [
+        {
+          "op": "publish",
+          "destination": "qualification.go.events",
+          "payload": "{\"order\":\"o-1\"}"
+        }
+      ],
+      "response": {
+        "result": "{\"published\":15}"
+      }
+    },
+    {
+      "name": "publishes-a-larger-request",
+      "params": "{\"order\":\"o-2\",\"items\":[1,2,3]}",
+      "calls": [
+        {
+          "op": "publish",
+          "destination": "qualification.go.events",
+          "payload": "{\"order\":\"o-2\",\"items\":[1,2,3]}"
+        }
+      ],
+      "response": {
+        "result": "{\"published\":31}"
+      }
+    },
+    {
+      "name": "empty-input-is-invalid-and-publishes-nothing",
+      "params": "",
+      "calls": [],
+      "response": {
+        "error": "invalid_input",
+        "message": "empty input"
+      }
+    }
+  ]
+}
