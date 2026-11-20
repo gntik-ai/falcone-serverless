@@ -1,0 +1,121 @@
+# Source qualification only. No operator build/cluster evidence has been recorded.
+[profile]
+id = "go-wasi-v1"
+matrix_revision = "2"
+mode = "wasm"
+status = "disabled"
+qualification = "not-qualified"
+
+[toolchain]
+wasmtime = "49.0.5"
+target = "wasip2"
+wasi = "none"
+
+# Operator decision 2026-11-19. Record, never choose or upgrade these pins.
+[toolchain.tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+[toolchain.go]
+name = "Go"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[stdlib]
+toolchain = "Go 1.26.11 / TinyGo 0.44.0"
+packages = ["crypto/sha256", "encoding/hex", "strconv", "strings"]
+
+[catalogue]
+revision = "unqualified"
+packages = []
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = ["falcone:host/storage@0.2.0", "falcone:host/http@0.2.0", "falcone:host/events@0.2.0", "falcone:host/workflows@0.2.0", "falcone:host/logging@0.2.0", "falcone:host/cancellation@0.2.0", "falcone:host/progress@0.2.0", "falcone:host/invocation-context@0.2.0"]
+
+[[workloads]]
+name = "echo-json"
+source = "examples/echo-json/main.go"
+input = "examples/echo-json/input.json"
+expected = "examples/echo-json/expected.json"
+imports = []
+
+[[workloads]]
+name = "uppercase"
+source = "examples/uppercase/main.go"
+input = "examples/uppercase/input.json"
+expected = "examples/uppercase/expected.json"
+imports = []
+
+[[workloads]]
+name = "hash-sha256"
+source = "examples/hash-sha256/main.go"
+input = "examples/hash-sha256/input.json"
+expected = "examples/hash-sha256/expected.json"
+imports = []
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "cgo, import C, native libraries and plugins are rejected."
+
+[diagnostics."WASM-GPU"]
+message = "GPU access is outside the capability host."
+
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "Process spawning, os/exec and goroutines are unsupported."
+
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "go:generate and install/build hooks are never run."
+
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "Third-party modules are outside the empty pinned catalogue."
+
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "Off-allow-list standard packages, reflection, build tags, go:linkname and go:wasmimport are unsupported."
+
+[[negative]]
+path = "negative/native-library"
+file = "main.go"
+line = 3
+code = "WASM-NATIVE-LIBRARY"
+
+[[negative]]
+path = "negative/gpu"
+file = "main.go"
+line = 3
+code = "WASM-GPU"
+
+[[negative]]
+path = "negative/process-spawn"
+file = "main.go"
+line = 3
+code = "WASM-PROCESS-SPAWN"
+
+[[negative]]
+path = "negative/install-hook"
+file = "main.go"
+line = 3
+code = "WASM-INSTALL-HOOK"
+
+[[negative]]
+path = "negative/package-not-in-catalogue"
+file = "main.go"
+line = 3
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+
+[[negative]]
+path = "negative/unsupported-api"
+file = "main.go"
+line = 3
+code = "WASM-UNSUPPORTED-API"
+
+[limits]
+reflection = "General reflection and dynamic code loading are unsupported."
+concurrency = "Goroutines, process spawning and threads are unsupported."
+ambient_io = "No ambient filesystem, environment or network access; use the capability host only."
+allocator = "TinyGo owns cabi_realloc; bindings accept runtime buffers and retain them through post-return."
