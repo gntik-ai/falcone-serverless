@@ -1,0 +1,83 @@
+[toolchains.tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+[toolchains.go]
+name = "Go toolchain"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[profile]
+id = "go-wasi-v1"
+matrix_revision = "2"
+mode = "wasm"
+status = "disabled"
+qualification = "unverified"
+
+[runtime]
+wasmtime = "49.0.5"
+wasi = "0.2.0"
+target = "wasip2"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = [
+  "falcone:host/storage@0.2.0",
+  "falcone:host/http@0.2.0",
+  "falcone:host/events@0.2.0",
+  "falcone:host/workflows@0.2.0",
+  "falcone:host/logging@0.2.0",
+  "falcone:host/cancellation@0.2.0",
+  "falcone:host/progress@0.2.0",
+  "falcone:host/invocation-context@0.2.0",
+  "wasi:random/random@0.2.0",
+]
+
+[catalogue]
+revision = "unqualified"
+modules = []
+
+# Each standard-library package is versioned by the approved Go toolchain.
+[stdlib]
+"encoding/json" = "go@1.26.11"
+"encoding/hex" = "go@1.26.11"
+"crypto/sha256" = "go@1.26.11"
+"crypto/rand" = "go@1.26.11"
+"regexp" = "go@1.26.11"
+"sort" = "go@1.26.11"
+"strings" = "go@1.26.11"
+
+[[workloads]]
+name = "json-transform"
+source = "examples/json-transform/main.go"
+input = '{"items":[{"name":"beta","price":5,"quantity":2},{"name":"alpha","price":7,"quantity":1}]}'
+expected = '{"names":["ALPHA","BETA"],"total":17}'
+imports = ["wasi:random/random@0.2.0"]
+
+[[workloads]]
+name = "text-regex"
+source = "examples/text-regex/main.go"
+input = '{"text":"order-12 order-345"}'
+expected = '{"orders":["12","345"]}'
+imports = ["wasi:random/random@0.2.0"]
+
+[[workloads]]
+name = "hash-sha256"
+source = "examples/hash-sha256/main.go"
+input = '{"message":"abc"}'
+expected = '{"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}'
+imports = ["wasi:random/random@0.2.0"]
+
+[diagnostics]
+WASM-NATIVE-LIBRARY = "cgo/native code is unavailable."
+WASM-PROCESS-SPAWN = "Processes and guest threads are unavailable."
+WASM-INSTALL-HOOK = "Build/install directives are never executed."
+WASM-GPU = "GPU/device access is unavailable."
+WASM-PACKAGE-NOT-IN-CATALOGUE = "The module or version is outside the pinned catalogue."
+WASM-UNSUPPORTED-API = "Unlisted stdlib, reflection, unsafe, linkname and undeclared host imports are unavailable."

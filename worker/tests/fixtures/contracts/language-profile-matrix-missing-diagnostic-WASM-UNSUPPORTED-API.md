@@ -38,3 +38,11 @@
 `WASM-PROCESS-SPAWN`
 `WASM-INSTALL-HOOK`
 `WASM-PACKAGE-NOT-IN-CATALOGUE`
+
+`toolchains`
+`tinygo`
+`name`
+`version`
+`source`
+`archive`
+`sha256`

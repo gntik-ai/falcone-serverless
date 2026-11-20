@@ -701,6 +701,33 @@ pub(super) fn instantiate_in_store(
         }
     }
     let mut linker = Linker::new(engine);
+    // The sole WASI interface. Never use a broad WASI linker here: insecure randomness,
+    // clocks, IO, filesystem, environment and sockets remain unavailable.
+    let mut random = linker.instance("wasi:random/random@0.2.0")?;
+    random.func_wrap(
+        "get-random-u64",
+        move |mut store: StoreContextMut<'_, Host>, (): ()| {
+            random_enter(&mut store, deadline, 8)?;
+            let mut bytes = [0; 8];
+            random_fill(&mut bytes)?;
+            random_ready(&store, deadline)?;
+            Ok((u64::from_le_bytes(bytes),))
+        },
+    )?;
+    random.func_wrap(
+        "get-random-bytes",
+        move |mut store: StoreContextMut<'_, Host>, (len,): (u64,)| {
+            store.data().enter()?;
+            if len > 65_536 {
+                return Err(wasmtime::Error::msg("random-byte-limit"));
+            }
+            random_charge(&mut store, deadline, len)?;
+            let mut bytes = vec![0; len as usize];
+            random_fill(&mut bytes)?;
+            random_ready(&store, deadline)?;
+            Ok((bytes,))
+        },
+    )?;
     linker
         .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(
@@ -985,6 +1012,56 @@ pub(super) fn instantiate_in_store(
         arm_deadline(store, deadline, || {});
     }
     linker.instantiate(store, component)
+}
+
+fn random_fill(bytes: &mut [u8]) -> wasmtime::Result<()> {
+    use ring::rand::SecureRandom;
+    ring::rand::SystemRandom::new()
+        .fill(bytes)
+        .map_err(|_| wasmtime::Error::msg("OS entropy unavailable"))
+}
+
+fn random_ready(store: &StoreContextMut<'_, Host>, deadline: Instant) -> wasmtime::Result<()> {
+    if store.data().cancelled.load(Ordering::Acquire) {
+        return Err(wasmtime::Error::msg("random-cancelled"));
+    }
+    let until = store.data().until.unwrap_or(deadline).min(deadline);
+    if Instant::now() >= until {
+        store.data().late_host_call.store(true, Ordering::Release);
+        return Err(wasmtime::Error::msg("random-after-deadline"));
+    }
+    Ok(())
+}
+
+fn random_enter(
+    store: &mut StoreContextMut<'_, Host>,
+    deadline: Instant,
+    bytes: u64,
+) -> wasmtime::Result<()> {
+    store.data().enter()?;
+    random_charge(store, deadline, bytes)
+}
+
+fn random_charge(
+    store: &mut StoreContextMut<'_, Host>,
+    deadline: Instant,
+    bytes: u64,
+) -> wasmtime::Result<()> {
+    random_ready(store, deadline)?;
+    if bytes > store.data().output_limit() as u64 {
+        store.data().buffer_limited.store(true, Ordering::Release);
+        return Err(wasmtime::Error::msg("random-output-limit"));
+    }
+    // Charge before allocation/entropy, including zero-length requests. Qualification's
+    // fuel-disabled engine is supported; production Prepared always requires fuel.
+    if let Ok(fuel) = store.get_fuel() {
+        let Some(left) = fuel.checked_sub(bytes + 1) else {
+            store.data().fuel_exhausted.store(true, Ordering::Release);
+            return Err(wasmtime::Trap::OutOfFuel.into());
+        };
+        store.set_fuel(left)?;
+    }
+    Ok(())
 }
 
 // Only a host-imposed memory refusal is a guest memory-limit outcome. A normal

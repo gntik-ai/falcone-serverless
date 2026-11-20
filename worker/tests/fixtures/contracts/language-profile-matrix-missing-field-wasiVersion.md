@@ -37,3 +37,11 @@
 `WASM-GPU`
 `WASM-PROCESS-SPAWN`
 `WASM-INSTALL-HOOK`
+
+`toolchains`
+`tinygo`
+`name`
+`version`
+`source`
+`archive`
+`sha256`

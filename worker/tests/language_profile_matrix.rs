@@ -135,7 +135,10 @@ fn validate(schema: &Value, matrix: &Value) -> Result<(), String> {
         }
         for interface in profile["allowedInterfaces"].as_array().unwrap() {
             let interface = interface.as_str().unwrap();
-            if interface.contains('*') || !interfaces.contains(interface) {
+            if interface.contains('*')
+                || (!interfaces.contains(interface)
+                    && !(language == "go" && interface == "wasi:random/random@0.2.0"))
+            {
                 return Err(format!(
                     "allowedInterfaces: {language}: unknown or wildcard WIT interface {interface}"
                 ));

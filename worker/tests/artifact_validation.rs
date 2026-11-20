@@ -32,7 +32,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
     let (package, _) = resolve.push_path("wit/host.wit").unwrap();
     let package = &resolve.packages[package];
     let world = &resolve.worlds[package.worlds["function"]];
-    let expected: BTreeSet<_> = world
+    let mut expected: BTreeSet<_> = world
         .imports
         .values()
         .map(|item| {
@@ -46,6 +46,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
         })
         .collect();
     assert_eq!(expected.len(), 8);
+    expected.insert("wasi:random/random@0.2.0".to_owned());
     assert_eq!(
         artifact::validate::ALLOWED_IMPORTS
             .iter()
@@ -53,11 +54,46 @@ fn raw_component_accepts_exact_world_function_interfaces() {
             .collect::<BTreeSet<_>>(),
         expected
     );
-    let bytes = small();
+    let bytes = wat::parse_str(include_str!("fixtures/was-02/allowed.wat").replacen(
+        "(component",
+        "(component (import \"wasi:random/random@0.2.0\" (instance))",
+        1,
+    ))
+    .unwrap();
     let validated = artifact::validate::validate(&bytes, bytes.len()).unwrap();
     assert_eq!(
         validated.imports.iter().cloned().collect::<BTreeSet<_>>(),
         expected
+    );
+}
+
+#[test]
+fn only_the_exact_random_instance_is_allowed() {
+    for name in [
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
+        "wasi:cli/environment@0.2.0",
+        "wasi:filesystem/types@0.2.0",
+        "wasi:sockets/tcp@0.2.0",
+        "wasi:clocks/wall-clock@0.2.0",
+        "wasi:io/streams@0.2.0",
+        "wasi:random/random@0.2.1",
+    ] {
+        let bytes = wat::parse_str(format!("(component (import \"{name}\" (instance)))")).unwrap();
+        assert_eq!(
+            artifact::validate::validate(&bytes, bytes.len())
+                .unwrap_err()
+                .code,
+            "undeclared_import",
+            "{name}"
+        );
+    }
+    let bytes = wat::parse_str("(component (import \"wasi:random/random@0.2.0\" (func)))").unwrap();
+    assert_eq!(
+        artifact::validate::validate(&bytes, bytes.len())
+            .unwrap_err()
+            .code,
+        "undeclared_import"
     );
 }
 

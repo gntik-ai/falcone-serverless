@@ -9,7 +9,7 @@ pub const HANDLER_EXPORT: &str = "falcone:host/handler@0.2.0";
 
 use super::Error;
 
-pub const ALLOWED_IMPORTS: [&str; 8] = [
+pub const ALLOWED_IMPORTS: [&str; 9] = [
     "falcone:host/storage@0.2.0",
     "falcone:host/http@0.2.0",
     "falcone:host/events@0.2.0",
@@ -18,6 +18,7 @@ pub const ALLOWED_IMPORTS: [&str; 8] = [
     "falcone:host/cancellation@0.2.0",
     "falcone:host/progress@0.2.0",
     "falcone:host/invocation-context@0.2.0",
+    "wasi:random/random@0.2.0",
 ];
 
 #[derive(Debug)]

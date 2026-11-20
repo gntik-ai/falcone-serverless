@@ -192,6 +192,22 @@
               "$ref": "#/$defs/evidenceRecord"
             }
           }
+        },
+        "toolchains": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "tinygo",
+            "go"
+          ],
+          "properties": {
+            "tinygo": {
+              "$ref": "#/$defs/toolchainPin"
+            },
+            "go": {
+              "$ref": "#/$defs/toolchainPin"
+            }
+          }
         }
       },
       "allOf": [
@@ -319,6 +335,38 @@
     "exactVersion": {
       "type": "string",
       "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$"
+    },
+    "toolchainPin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "source",
+        "archive",
+        "sha256"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "$ref": "#/$defs/exactVersion"
+        },
+        "source": {
+          "type": "string",
+          "pattern": "^https://"
+        },
+        "archive": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9.-]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
     }
   }
 }

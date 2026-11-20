@@ -842,6 +842,10 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
         "wasi:filesystem/preopens@0.2.0",
         "wasi:sockets/tcp@0.2.0",
         "wasi:cli/environment@0.2.0",
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
+        "wasi:clocks/wall-clock@0.2.0",
+        "wasi:io/streams@0.2.0",
         "falcone:host/storage@0.2.0",
         "falcone:host/http@0.2.0",
         "falcone:host/events@0.2.0",
@@ -1354,4 +1358,101 @@ pub fn helper_permits_cover_thread_local_destructors() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg_attr(test, test)]
+pub fn random_is_fresh_bounded_and_narrowly_linked() {
+    let _case = crate::capability_support::serial_case();
+    let engine = wasmtime::Engine::default();
+    let source = include_str!("fixtures/capability-random.wat");
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        source,
+        Host::new(Context::default(), Arc::new(Recording::default())),
+    )
+    .unwrap();
+    let different = instance
+        .get_typed_func::<(), (bool,)>(&mut store, "different")
+        .unwrap();
+    assert_eq!(different.call(&mut store, ()).unwrap(), (true,));
+    let bytes = instance
+        .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes")
+        .unwrap();
+    for len in [0, 65_536] {
+        assert_eq!(bytes.call(&mut store, (len,)).unwrap(), (len as u32,));
+    }
+    let error = bytes.call(&mut store, (65_537,)).unwrap_err();
+    assert!(format!("{error:#}").contains("random-byte-limit"));
+    assert!(
+        host::instantiate(
+            &engine,
+            source.replace("get-random-u64", "insecure-random"),
+            Host::new(Context::default(), Arc::new(Recording::default())),
+        )
+        .is_err()
+    );
+}
+
+#[cfg_attr(test, test)]
+pub fn random_obeys_invocation_fuel_deadline_and_call_budget() {
+    let _case = crate::capability_support::serial_case();
+    let mut config = wasmtime::Config::new();
+    config.consume_fuel(true);
+    let engine = wasmtime::Engine::new(&config).unwrap();
+    for reason in ["fuel", "deadline", "calls", "cancelled"] {
+        let mut host = Host::new(Context::default(), Arc::new(Recording::default()));
+        if reason == "calls" {
+            host.set_max_host_calls(0);
+        }
+        let flag = host.cancellation();
+        let (mut store, instance) = host::instantiate(
+            &engine,
+            include_str!("fixtures/capability-random.wat"),
+            host,
+        )
+        .unwrap();
+        store.set_fuel(10_000).unwrap();
+        if reason == "deadline" {
+            store.data_mut().set_until(std::time::Instant::now());
+        }
+        if reason == "cancelled" {
+            flag.store(true, Ordering::Release);
+        }
+        // Guest instructions alone use far less than 10,000 fuel. The 64 KiB host work
+        // must debit the same invocation budget before allocating or reading entropy.
+        let run = instance
+            .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes")
+            .unwrap();
+        let error = run.call(&mut store, (65_536,)).unwrap_err();
+        let error = format!("{error:#}");
+        let expected = match reason {
+            "fuel" => "fuel",
+            "deadline" => "deadline",
+            "calls" => "budget",
+            _ => "cancelled",
+        };
+        assert!(error.contains(expected), "{reason}: {error}");
+    }
+}
+
+#[cfg_attr(test, test)]
+pub fn random_preserves_a_narrowed_host_output_limit() {
+    let _case = crate::capability_support::serial_case();
+    let engine = wasmtime::Engine::default();
+    let limits = falcone_serverless_worker::limits::Limits::compatibility().narrowed(
+        falcone_serverless_worker::limits::Field::HostToGuestBytes,
+        16,
+    );
+    let (mut store, instance) = host::instantiate(
+        &engine,
+        include_str!("fixtures/capability-random.wat"),
+        Host::with_limits(Context::default(), Arc::new(Recording::default()), limits),
+    )
+    .unwrap();
+    let bytes = instance
+        .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes")
+        .unwrap();
+    assert_eq!(bytes.call(&mut store, (16,)).unwrap(), (16,));
+    let error = bytes.call(&mut store, (17,)).unwrap_err();
+    assert!(format!("{error:#}").contains("random-output-limit"));
 }

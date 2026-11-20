@@ -1,0 +1,49 @@
+# Synthetic documentation coverage fixture
+
+## Versioning and compatibility
+
+## Fields
+
+## Diagnostics
+
+## Enablement evidence
+
+## Seeded profiles
+
+`adversarial`
+`allowedInterfaces`
+`artifactId`
+`compatibility`
+`crashRecovery`
+`diagnostics`
+`digest`
+`eolPolicy`
+`evidence`
+`go`
+`id`
+`javascript`
+`leakage`
+`matrixVersion`
+`packageCatalogueVersion`
+`profiles`
+`python`
+`status`
+`testedExamples`
+`toolchainVersion`
+`wasiVersion`
+`wasmtimeVersion`
+
+`WASM-NATIVE-LIBRARY`
+`WASM-GPU`
+`WASM-PROCESS-SPAWN`
+`WASM-INSTALL-HOOK`
+`WASM-PACKAGE-NOT-IN-CATALOGUE`
+`WASM-UNSUPPORTED-API`
+
+`toolchains`
+`tinygo`
+`name`
+`version`
+`source`
+
+`sha256`

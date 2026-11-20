@@ -119,10 +119,17 @@ human review must assess the policy and prose.
 | --- | --- | --- |
 | JavaScript | `javascript-wasi-v1` | Disabled; tested examples are named, but no evidence is recorded. |
 | Python | `python-wasi-v1` | Disabled; no evidence or tested examples. |
-| Go | `go-wasi-v1` | Disabled; no evidence or tested examples. |
+| Go | `go-wasi-v1` | Disabled; examples and pins recorded, no qualification evidence. |
 
 Every committed profile is disabled and has an empty evidence object. The Python
-and Go seeds keep an empty capability ceiling and unqualified versions. JavaScript
+seed keeps an empty capability ceiling and unqualified versions. Go records TinyGo `0.44.0`
+and Go `1.26.11`, including their operator archive URLs and SHA256 in `toolchains`; its
+`wasiVersion` is `0.2.0` and its ceiling is the eight Falcone interfaces plus exactly
+`wasi:random/random@0.2.0`. See [Go qualification](../qualification/profiles/go.md).
+Only `get-random-u64` and `get-random-bytes` link, backed by the OS CSPRNG through
+`ring::rand::SystemRandom`. Requests above 65536 bytes trap, and calls charge invocation
+fuel and host-call budgets and check deadline/cancellation. No other WASI import is allowed.
+The Go profile stays disabled with empty evidence. JavaScript
 records the operator-approved jco toolchain version `1.41.0`, `wasiVersion` `none`
 (the final component may import only `falcone:host/*@0.2.0`), the eight
 `falcone:host` imports of the `function` world as its capability ceiling, and its
@@ -135,10 +142,17 @@ matrix revision.
 
 ### WIT 0.2.0 encoding requirement
 
-`allowedInterfaces` resolve only to the eight imports of `falcone:host@0.2.0`.
+`allowedInterfaces` resolve to the eight imports of `falcone:host@0.2.0`, with the
+Go-only ceiling exception `wasi:random/random@0.2.0` described above.
 Every guest also exports `falcone:host/handler@0.2.0`. Canonical strings are
 UTF-8 only: supported toolchains emit UTF-8, and qualification must preserve
 that encoding. UTF-16 and compact Latin-1 (`latin1+utf16`) lift/lower options
 are rejected before instantiation. Guest result and handler-error payload
 ceilings count UTF-8 bytes and use the configured guest-to-host limit.
 This version break does not enable any language profile.
+
+The optional `toolchains` object records Go and TinyGo pins: name, exact version,
+HTTPS source, archive basename and lowercase SHA256. Both matrix copies carry the same pins.
+
+`toolchains` has `tinygo` and `go` entries. Each pin carries `name`, `version`,
+`source`, `archive` and `sha256`; all are required when the object is present.

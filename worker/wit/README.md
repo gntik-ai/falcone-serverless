@@ -9,9 +9,14 @@ a ceiling is compatible; lowering one breaks guests.
 
 World `function` imports exactly `storage`, `http`, `events`, `workflows`,
 `logging`, `cancellation`, `progress` and `invocation-context`. Linking is
-deny-by-default: only these versioned Falcone interfaces are permitted. This
-package grants no WASI filesystem, sockets, generic HTTP, environment or secret
-interface. WAS-03 profiles must use these Falcone imports only.
+deny-by-default. In addition to these versioned Falcone interfaces the worker permits
+exactly `wasi:random/random@0.2.0` (operator decision 2026-11-20). Only
+`get-random-u64` and `get-random-bytes` link, using the OS CSPRNG through the locked
+`ring::rand::SystemRandom`; requests above 65536 bytes trap before allocation. Calls
+charge invocation fuel and host-call budgets and check deadlines/cancellation.
+This does not change this WIT world or grant WASI insecure randomness, clocks, IO,
+filesystem, sockets, generic HTTP, environment or secrets. Profiles must still
+declare their exact subset; the Go profile alone lists the random interface.
 
 ## Per-call ceilings
 

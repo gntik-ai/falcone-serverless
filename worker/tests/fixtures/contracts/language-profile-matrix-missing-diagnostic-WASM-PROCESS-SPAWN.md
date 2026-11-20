@@ -39,3 +39,11 @@
 `WASM-INSTALL-HOOK`
 `WASM-PACKAGE-NOT-IN-CATALOGUE`
 `WASM-UNSUPPORTED-API`
+
+`toolchains`
+`tinygo`
+`name`
+`version`
+`source`
+`archive`
+`sha256`

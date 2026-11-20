@@ -149,3 +149,18 @@ Review checks additionally cover the exact ten added paths, unchanged existing s
 Source-only validation on 2026-10-22 confirmed the exact ten added paths against the immutable baseline, unchanged existing files, all nine ADR templates and statuses, the R3 acceptance gates, published story references, existing baseline line numbers, working local document links, exactly 15 coverage rows and nonempty table cells. Manual review confirmed the Decision-section coverage described above. The embedded fragment diff passed `git apply --check` without being applied, and both JSON validation commands passed. These checks validate documentation consistency; they do not supply runtime feasibility, performance or security evidence, and passing tests of the placeholder worker/controller cannot qualify WAS-01.
 
 The platform operator should confirm owner-role assignments in review. Later acceptance of proposals, applying report edits, any cross-repository work and runtime qualification require separate changes. No issues are created or transferred here. Rollback consists of reverting these ten added documents and has no runtime effect.
+
+## Narrow entropy import (operator decision 2026-11-20)
+
+The worker import gate permits the eight `falcone:host@0.2.0` interfaces plus exactly
+`wasi:random/random@0.2.0`. Its linker defines only `get-random-u64` and
+`get-random-bytes`, backed by the OS CSPRNG via the already-locked
+`ring::rand::SystemRandom`. Lengths above 65536 bytes trap before allocation.
+Calls charge the existing invocation fuel and host-call budgets, check deadline
+and cancellation, and retain the store-wide `memories(1)` control. There is no
+WASI linker bundle: insecure and insecure-seed, clocks, IO, cli, filesystem and
+sockets remain rejected. The Go profile stays disabled until trusted build and
+restricted-cluster evidence exist; R3 second review and operator approval still
+apply. See [the host import contract](../worker/wit/README.md) and
+[Go qualification](qualification/profiles/go.md). This implementation note does
+not change the Proposed status of the ADRs above.
