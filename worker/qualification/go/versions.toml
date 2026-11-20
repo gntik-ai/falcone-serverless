@@ -1,0 +1,26 @@
+# Operator decision 2026-11-19. Recording pins does not qualify or enable the profile.
+# TinyGo with the wasip2 target emits a component directly, with no adapter.
+engine = "TinyGo"
+target = "wasip2"
+qualification_status = "disabled"
+
+# wasi-virt is deliberately not pinned and not used. Composing a WASI-Virt adapter adds a second
+# linear memory, which the store-wide memories(1) limit of Host::new rejects, and the revision
+# bca61c27 of the JavaScript profile has no --deny-all option. WASI is removed through the
+# TinyGo build configuration instead (see build-profile.sh); a leftover WASI import still fails
+# the validate.rs import gate.
+
+[tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+# TinyGo 0.44.0 accepts Go 1.25 through 1.27 (compileopts/config.go:22-23).
+[go]
+name = "Go"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"

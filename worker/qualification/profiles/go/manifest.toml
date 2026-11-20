@@ -1,0 +1,247 @@
+# Go (TinyGo wasip2) Wasm profile qualification manifest (matrix revision 2).
+# Operator decisions 2026-11-07, 2026-11-19 and 2026-11-20. The toolchain pins are copied from
+# ../../go/versions.toml and a static test keeps them equal. Recording this manifest does not
+# qualify or enable the profile: the matrix entry stays disabled until built components and
+# their evidence are recorded.
+
+[profile]
+id = "go-wasi-v1"
+matrix_revision = "2"
+# Never selected or changed by a diagnostic; OCI is only ever named as an alternative in text.
+mode = "wasm"
+status = "disabled"
+# qualified only when every static and cluster check passes; a failure is blocked.
+qualification = "not-qualified"
+engine = "TinyGo"
+
+[toolchain]
+wasmtime = "49.0.5"
+wasi = "none"
+target = "wasip2"
+tinygo = "0.44.0"
+tinygo_sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+go = "1.26.11"
+go_sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+# The ceiling for Go guests; verified invocation grants still apply. http, workflows and
+# progress have no Go binding in this revision, so they are not allowed.
+interfaces = [
+  "falcone:host/storage@0.2.0",
+  "falcone:host/events@0.2.0",
+  "falcone:host/logging@0.2.0",
+  "falcone:host/cancellation@0.2.0",
+  "falcone:host/invocation-context@0.2.0",
+]
+
+# The trusted bindings every guest imports. They declare no cabi_realloc: the TinyGo runtime
+# exports the single one and the host calls it to place buffers it passes to the guest.
+[bindings]
+module = "falcone.invalid/profile/bindings"
+directory = "bindings"
+cabi_realloc = "runtime"
+
+# Build flags that remove the toolchain's WASI use and keep one linear memory. The build
+# never composes a second component and never calls wasi-virt.
+[build]
+command = "tinygo build -target=wasip2"
+flags = ["-gc=leaking", "-scheduler=none", "-panic=trap", "-no-debug"]
+memories = 1
+
+# Standard-library entries are bound to the pinned Go toolchain: each carries its version.
+[[stdlib]]
+package = "bytes"
+go = "1.26.11"
+[[stdlib]]
+package = "crypto/sha256"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/hex"
+go = "1.26.11"
+[[stdlib]]
+package = "encoding/json"
+go = "1.26.11"
+[[stdlib]]
+package = "errors"
+go = "1.26.11"
+[[stdlib]]
+package = "math"
+go = "1.26.11"
+[[stdlib]]
+package = "sort"
+go = "1.26.11"
+[[stdlib]]
+package = "strconv"
+go = "1.26.11"
+[[stdlib]]
+package = "strings"
+go = "1.26.11"
+[[stdlib]]
+package = "unicode/utf8"
+go = "1.26.11"
+
+# No third-party module is accepted: the catalogue is unqualified and empty. A module added
+# here needs an exact version.
+[catalogue]
+revision = "unqualified"
+modules = []
+
+[[workloads]]
+name = "json-transform"
+main = "workloads/json-transform/main.go"
+package = "./workloads/json-transform"
+input = "workloads/json-transform/input.json"
+expected = "workloads/json-transform/expected.json"
+imports = []
+
+[[workloads]]
+name = "text-scan"
+main = "workloads/text-scan/main.go"
+package = "./workloads/text-scan"
+input = "workloads/text-scan/input.json"
+expected = "workloads/text-scan/expected.json"
+imports = []
+
+[[workloads]]
+name = "hash-sha256"
+main = "workloads/hash-sha256/main.go"
+package = "./workloads/hash-sha256"
+input = "workloads/hash-sha256/input.json"
+expected = "workloads/hash-sha256/expected.json"
+imports = []
+
+[[workloads]]
+name = "events-handle"
+main = "examples/events-handle/main.go"
+package = "./examples/events-handle"
+request = "examples/events-handle/request.json"
+cases = "examples/events-handle/cases.json"
+imports = ["falcone:host/storage@0.2.0", "falcone:host/events@0.2.0"]
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "A native library cannot run in Wasm mode (cgo, plugin, native sources). Port it to a supported Go package; OCI mode is a separate, explicitly authorized choice."
+[diagnostics."WASM-GPU"]
+message = "GPU access is outside the falcone:host capability host and is rejected."
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "Spawning a process (os/exec) is not available in Wasm mode."
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "go:generate and other build hooks are never run; nothing is generated or installed."
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "The module, or its version, is not in the pinned package catalogue. Qualification and the build are rejected and nothing is downloaded. OCI mode is a separate, explicitly authorized alternative."
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "The package or construct is outside this profile's supported subset: reflect, unsafe, go:linkname, guest-declared wasm imports and exports, and standard-library packages TinyGo or the profile does not support."
+
+# One negative fixture per documented construct. `path` is a source directory; each
+# diagnostic names the file, line, column and construct it must yield, and nothing else may
+# be reported. Nothing is built or instantiated for any of them.
+[[negative]]
+name = "native-library"
+code = "WASM-NATIVE-LIBRARY"
+path = "negative/native-library"
+[[negative.diagnostics]]
+file = "main.go"
+line = 7
+column = 8
+construct = "cgo"
+
+[[negative]]
+name = "gpu"
+code = "WASM-GPU"
+path = "negative/gpu"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "GPU package"
+
+[[negative]]
+name = "process-spawn"
+code = "WASM-PROCESS-SPAWN"
+path = "negative/process-spawn"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "os/exec"
+
+[[negative]]
+name = "install-hook"
+code = "WASM-INSTALL-HOOK"
+path = "negative/install-hook"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 1
+construct = "go:generate"
+
+[[negative]]
+name = "package-not-in-catalogue"
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+path = "negative/package-not-in-catalogue"
+[[negative.diagnostics]]
+file = "go.mod"
+line = 5
+column = 1
+construct = "module requirement"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "package import"
+
+[[negative]]
+name = "unsupported-reflect"
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-reflect"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "reflect"
+
+[[negative]]
+name = "unsupported-unsafe"
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-unsafe"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "unsafe"
+
+[[negative]]
+name = "unsupported-linkname"
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-linkname"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 10
+construct = "unsafe"
+[[negative.diagnostics]]
+file = "main.go"
+line = 6
+column = 1
+construct = "go:linkname"
+
+[[negative]]
+name = "unsupported-wasmimport"
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-wasmimport"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 1
+construct = "go:wasmimport"
+
+[[negative]]
+name = "unsupported-stdlib"
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-stdlib"
+[[negative.diagnostics]]
+file = "main.go"
+line = 4
+column = 8
+construct = "standard library package"
