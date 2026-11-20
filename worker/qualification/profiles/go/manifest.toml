@@ -1,0 +1,125 @@
+# Static eligibility only. No cluster evidence: UNVERIFIED, never enabled.
+[profile]
+id = "go-wasi-v1"
+matrix_revision = "2"
+mode = "wasm"
+status = "disabled"
+qualification = "not-qualified"
+
+[toolchain]
+wasmtime = "49.0.5"
+tinygo = "0.44.0"
+tinygo_sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+go = "1.26.11"
+go_sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+target = "wasip2"
+wasi = "none"
+wasi_virt_rev = "bca61c27499d2c290b5431cfcff013737b3ba01d"
+
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = [
+  "falcone:host/storage@0.2.0",
+  "falcone:host/http@0.2.0",
+  "falcone:host/events@0.2.0",
+  "falcone:host/workflows@0.2.0",
+  "falcone:host/logging@0.2.0",
+  "falcone:host/cancellation@0.2.0",
+  "falcone:host/progress@0.2.0",
+  "falcone:host/invocation-context@0.2.0"
+]
+
+[catalogue]
+revision = "unqualified"
+packages = []
+
+[stdlib]
+go = "1.26.11"
+tinygo = "0.44.0"
+packages = ["crypto/sha256", "encoding/hex", "encoding/json", "unsafe"]
+
+[limits]
+max_guest_to_host_bytes = 1048576
+max_host_to_guest_bytes = 1048576
+host_call_timeout_ms = 30000
+abi_arena_bytes = 8388608
+unsupported = ["cgo", "processes and goroutines", "install hooks", "GPU packages", "third-party modules", "direct reflection", "ambient filesystem, network and environment", "dynamic loading"]
+
+[[workloads]]
+name = "json-transform"
+bindings = ["abi.go"]
+source = "examples/json-transform"
+input = "examples/json-transform/input.json"
+expected = "examples/json-transform/expected.json"
+imports = []
+
+[[workloads]]
+name = "hash-sha256"
+bindings = ["abi.go"]
+source = "examples/hash-sha256"
+input = "examples/hash-sha256/input.json"
+expected = "examples/hash-sha256/expected.json"
+imports = []
+
+[[workloads]]
+name = "storage-events"
+bindings = ["abi.go", "storage.go"]
+source = "examples/storage-events"
+input = "examples/storage-events/input.json"
+expected = "examples/storage-events/expected.json"
+imports = ["falcone:host/storage@0.2.0", "falcone:host/events@0.2.0"]
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "cgo and native libraries are unavailable in Wasm mode."
+
+[diagnostics."WASM-GPU"]
+message = "GPU packages are outside the capability host."
+
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "Processes and goroutines are unavailable in this profile."
+
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "Generation, install and build hooks are never run."
+
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "No third-party module is in the empty unqualified catalogue."
+
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "The API, directive or interface is outside the supported subset."
+
+[[negative]]
+code = "WASM-NATIVE-LIBRARY"
+path = "negative/native-library"
+file = "main.go"
+line = 3
+
+[[negative]]
+code = "WASM-GPU"
+path = "negative/gpu"
+file = "main.go"
+line = 3
+
+[[negative]]
+code = "WASM-PROCESS-SPAWN"
+path = "negative/process-spawn"
+file = "main.go"
+line = 3
+
+[[negative]]
+code = "WASM-INSTALL-HOOK"
+path = "negative/install-hook"
+file = "main.go"
+line = 3
+
+[[negative]]
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+path = "negative/package-not-in-catalogue"
+file = "go.mod"
+line = 3
+
+[[negative]]
+code = "WASM-UNSUPPORTED-API"
+path = "negative/unsupported-api"
+file = "main.go"
+line = 3

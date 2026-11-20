@@ -1,0 +1,46 @@
+{
+  "provenance": "Project-authored synthetic replay expectations; cluster execution UNVERIFIED.",
+  "cases": [
+    {
+      "name": "stored-payload",
+      "params": {
+        "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi"
+      },
+      "state": {
+        "tenants/synthetic/rate/ws-synthetic-0001/item": "{\"value\":7}"
+      },
+      "calls": [
+        {
+          "op": "read",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001/item",
+          "checkpoint": false
+        },
+        {
+          "op": "publish",
+          "destination": "console.openapi.spec.accessed",
+          "payload": "{\"value\":7}"
+        }
+      ],
+      "response": {
+        "published": true
+      }
+    },
+    {
+      "name": "denied-read",
+      "params": {
+        "__ow_path": "/v1/workspaces/ws-synthetic-0001/openapi"
+      },
+      "state": {},
+      "calls": [
+        {
+          "op": "read",
+          "key": "tenants/synthetic/rate/ws-synthetic-0001/item",
+          "checkpoint": false
+        }
+      ],
+      "response": {
+        "published": false
+      }
+    }
+  ]
+}
