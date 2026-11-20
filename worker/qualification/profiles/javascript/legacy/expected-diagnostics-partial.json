@@ -1,0 +1,29 @@
+{
+  "status": "recorded",
+  "scope": "partial: only the four files below were available, so imports of the two absent files are reported as unresolved. This never stands in for the full-tree golden.",
+  "files": [
+    "actions/openapi-spec-serve.mjs",
+    "src/config.mjs",
+    "src/spec-version-repo.mjs",
+    "src/spec-cache.mjs"
+  ],
+  "diagnostics": [
+    {"code": "WASM-PACKAGE-NOT-IN-CATALOGUE", "construct": "package import", "file": "actions/openapi-spec-serve.mjs", "line": 1, "column": 16},
+    {"code": "WASM-PACKAGE-NOT-IN-CATALOGUE", "construct": "package import", "file": "actions/openapi-spec-serve.mjs", "line": 2, "column": 23},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "unresolved relative import", "file": "actions/openapi-spec-serve.mjs", "line": 6, "column": 34},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "unresolved relative import", "file": "src/config.mjs", "line": 1, "column": 41},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 13, "column": 15},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 39, "column": 25},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 40, "column": 20},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 41, "column": 20},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 42, "column": 17},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 43, "column": 15},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 44, "column": 18},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 45, "column": 18},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 47, "column": 35},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "process.env", "file": "src/config.mjs", "line": 50, "column": 14},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "node:crypto API", "file": "src/spec-cache.mjs", "line": 1, "column": 28},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "unresolved syntax", "file": "src/spec-cache.mjs", "line": 8, "column": 12},
+    {"code": "WASM-UNSUPPORTED-API", "construct": "unresolved syntax", "file": "src/spec-version-repo.mjs", "line": 1, "column": 23}
+  ]
+}

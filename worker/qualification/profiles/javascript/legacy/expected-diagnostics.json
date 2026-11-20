@@ -1,0 +1,20 @@
+{
+  "status": "pending",
+  "reason": "src/spec-audit.mjs and src/network.mjs were not available when this was recorded, so the diagnostics of the complete six-file tree are not recorded and are not invented. The operator-run step adds the two files (sha256 in sources.toml), reruns profile_javascript and records the computed diagnostics here with status recorded.",
+  "required": [
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/spec-cache.mjs", "line": 1, "construct": "node:crypto API"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 13, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 39, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 40, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 41, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 42, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 43, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 44, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 45, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 47, "construct": "process.env"},
+    {"code": "WASM-UNSUPPORTED-API", "file": "src/config.mjs", "line": 50, "construct": "process.env"},
+    {"code": "WASM-PACKAGE-NOT-IN-CATALOGUE", "file": "actions/openapi-spec-serve.mjs", "line": 1, "construct": "package import"},
+    {"code": "WASM-PACKAGE-NOT-IN-CATALOGUE", "file": "actions/openapi-spec-serve.mjs", "line": 2, "construct": "package import"}
+  ],
+  "diagnostics": null
+}
