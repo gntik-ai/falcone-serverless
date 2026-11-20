@@ -36,8 +36,11 @@ random/insecure-seed, cli, filesystem, sockets, clocks and io.
 The fixture bindings use TinyGo's runtime `cabi_realloc` as the sole allocator export.
 `Region` accepts input allocated by that allocator through a bounded linear-memory view;
 it does not require pointers to come from a separate arena. Go-owned output and result slots
-stay rooted for the invocation. The build uses `tinygo build -target=wasip2` with the Falcone
-world, trap-only panics and no guest scheduler; no adapter or wasi-virt is used. Runtime checks require exactly one core cabi_realloc
+stay rooted for the invocation. The build uses `tinygo build -target=wasip2` with the profile-local
+`go-function` world in `worker/qualification/profiles/go/wit`. It includes the canonical Falcone
+function world and exactly `wasi:random/random@0.2.0`, with vendored dependencies checked against
+the canonical host contract. The builder selects the world named in the manifest. It uses
+trap-only panics and no guest scheduler; no adapter or wasi-virt is used. Runtime checks require exactly one core cabi_realloc
 export and one linear memory, then validate, compile and execute with Host's `memories(1)`.
 The memory limit is unchanged. Tenant precompiled artifacts remain `precompiled_rejected`.
 
@@ -110,7 +113,7 @@ merge. Rollback is a merge-only revert; no runtime state or profile enablement c
   },
   "wit": {
     "package": "falcone:host@0.2.0",
-    "world": "function",
+    "world": "go-function",
     "interfaces": [
       "falcone:host/storage@0.2.0",
       "falcone:host/http@0.2.0",

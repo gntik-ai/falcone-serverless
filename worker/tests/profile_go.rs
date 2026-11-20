@@ -93,6 +93,18 @@ fn directives_are_checked_independently_of_import_traversal() {
 }
 
 #[test]
+fn goroutines_are_rejected_without_reporting_comment_or_string_contents() {
+    let diagnostics = report("package main\nfunc main() {\n go func() {}()\n}\n");
+    assert_eq!(diagnostics.len(), 1);
+    let diagnostic = &diagnostics[0];
+    assert_eq!(diagnostic.code, "WASM-PROCESS-SPAWN");
+    assert_eq!(diagnostic.construct, "goroutine");
+    assert_eq!(diagnostic.path, "main.go");
+    assert_eq!((diagnostic.line, diagnostic.column), (3, 2));
+    assert!(report("package main\n// go secret-value\nvar s = `go secret-value`\n").is_empty());
+}
+
+#[test]
 fn missing_floating_module_and_unbound_stdlib_pins_are_rejected() {
     let good = manifest();
     for path in [
@@ -102,6 +114,7 @@ fn missing_floating_module_and_unbound_stdlib_pins_are_rejected() {
         vec!["runtime", "wasi"],
         vec!["runtime", "target"],
         vec!["wit", "package"],
+        vec!["wit", "world"],
     ] {
         for value in [None, Some("latest"), Some("^1.26.11"), Some("1.26")] {
             let mut bad = good.clone();
@@ -237,6 +250,64 @@ fn contract(manifest: &toml::Value) -> serde_json::Value {
         "testedExamples": manifest["workloads"].as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect::<Vec<_>>(),
         "diagnostics": manifest["diagnostics"],
     })
+}
+
+#[test]
+fn trusted_build_world_imports_exactly_the_manifest_interfaces() {
+    use std::collections::BTreeSet;
+    let manifest = manifest();
+    let mut resolve = wit_parser::Resolve::default();
+    let (package, _) = resolve
+        .push_dir(worker().join("qualification/profiles/go/wit"))
+        .expect("resolve the trusted Go build's WIT package and vendored dependencies");
+    let world = &resolve.worlds
+        [resolve.packages[package].worlds[manifest["wit"]["world"].as_str().unwrap()]];
+    let interface_name = |item: &wit_parser::WorldItem| match item {
+        wit_parser::WorldItem::Interface { id, .. } => {
+            let interface = &resolve.interfaces[*id];
+            resolve.packages[interface.package.unwrap()]
+                .name
+                .interface_id(interface.name.as_deref().unwrap())
+        }
+        _ => panic!("the profile world permits only interface imports and exports"),
+    };
+    let imports: BTreeSet<_> = world.imports.values().map(interface_name).collect();
+    let declared: BTreeSet<_> = manifest["wit"]["interfaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(imports, declared);
+    assert_eq!(
+        world
+            .exports
+            .values()
+            .map(interface_name)
+            .collect::<Vec<_>>(),
+        ["falcone:host/handler@0.2.0"]
+    );
+    assert_eq!(
+        fs::read(worker().join("qualification/profiles/go/wit/deps/falcone-host/host.wit"))
+            .unwrap(),
+        fs::read(worker().join("wit/host.wit")).unwrap(),
+        "vendored Falcone WIT must track the canonical contract"
+    );
+    let random = resolve
+        .interfaces
+        .iter()
+        .find_map(|(_, interface)| {
+            (interface.name.as_deref() == Some("random")).then_some(interface)
+        })
+        .unwrap();
+    assert_eq!(
+        random
+            .functions
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["get-random-bytes", "get-random-u64"])
+    );
 }
 
 #[test]
@@ -400,6 +471,7 @@ fn trusted_builder_rejects_an_archive_hash_mismatch_before_running_tools() {
         .env("FS_TRUSTED_COMPILER_IMAGE", "1")
         .env("FS_TOOLCHAIN_CACHE", &directory)
         .env("FS_PROFILE_COMPONENTS", directory.join("output"))
+        .env_remove("TMPDIR")
         .output()
         .unwrap();
     fs::remove_dir_all(directory).unwrap();

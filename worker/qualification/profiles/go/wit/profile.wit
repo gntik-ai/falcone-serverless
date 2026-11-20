@@ -1,0 +1,8 @@
+package falcone:profile-go@0.2.0;
+
+/// TinyGo's wasip2 runtime needs secure entropy during reactor initialization.
+/// Keep the canonical Falcone world unchanged for other language profiles.
+world go-function {
+    include falcone:host/function@0.2.0;
+    import wasi:random/random@0.2.0;
+}

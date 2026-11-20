@@ -250,7 +250,7 @@ fn profile(text: &str) -> Option<toml::Value> {
         || get("runtime", "wasi")? != "0.2.0"
         || get("runtime", "wasmtime")? != "49.0.5"
         || get("wit", "package")? != "falcone:host@0.2.0"
-        || get("wit", "world")? != "function"
+        || get("wit", "world")? != "go-function"
         || get("profile", "status")? != "disabled"
     {
         return None;

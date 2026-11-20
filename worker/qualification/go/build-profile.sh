@@ -5,15 +5,13 @@ set -euo pipefail
 [[ ${FS_TRUSTED_COMPILER_IMAGE:-} == 1 ]] || { echo 'requires the trusted compiler image' >&2; exit 1; }
 : "${FS_TOOLCHAIN_CACHE:?offline toolchain cache required}"
 : "${FS_PROFILE_COMPONENTS:?new output directory required}"
-: "${TMPDIR:?run scratch directory required}"
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TMPDIR/profile-go-cargo}"
 profile=worker/qualification/profiles/go
 
 # Validate bytes before any toolchain executable is invoked. The trusted image supplies
 # the extracted tools from exactly these archives; a missing archive or mismatch stops here.
-python3 - "$FS_TOOLCHAIN_CACHE" worker/qualification/go/versions.toml <<'PY'
+wit_world=$(python3 - "$FS_TOOLCHAIN_CACHE" worker/qualification/go/versions.toml "$profile/manifest.toml" <<'PY'
 import hashlib, pathlib, sys, tomllib
 cache = pathlib.Path(sys.argv[1])
 pins = tomllib.loads(pathlib.Path(sys.argv[2]).read_text())
@@ -22,7 +20,11 @@ for name in ('tinygo', 'go'):
     archive = cache / pin['archive']
     if not archive.is_file() or hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest() != pin['sha256']:
         raise SystemExit('toolchain archive sha256 mismatch: ' + name)
+print(tomllib.loads(pathlib.Path(sys.argv[3]).read_text())['wit']['world'])
 PY
+)
+: "${TMPDIR:?run scratch directory required}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TMPDIR/profile-go-cargo}"
 export GOROOT="$FS_TOOLCHAIN_CACHE/go"
 export TINYGOROOT="$FS_TOOLCHAIN_CACHE/tinygo"
 export PATH="$GOROOT/bin:$TINYGOROOT/bin:$PATH"
@@ -45,7 +47,7 @@ for name in json-transform text-regex hash-sha256; do
     (
         cd "$stage/source"
         "$TINYGOROOT/bin/tinygo" build -target=wasip2 -buildmode=c-shared -panic=trap -scheduler=none \
-            -wit-package="$root/worker/wit" -wit-world=function \
+            -wit-package="$root/$profile/wit" -wit-world="$wit_world" \
             -o "$stage/components/$name.wasm" "./examples/$name"
     )
 done

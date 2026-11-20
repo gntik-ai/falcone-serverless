@@ -1,0 +1,8 @@
+package wasi:random@0.2.0;
+
+/// The sole WASI interface permitted by the Go profile and the worker host.
+/// The host uses the OS CSPRNG and traps on byte lengths above 65536.
+interface random {
+    get-random-bytes: func(len: u64) -> list<u8>;
+    get-random-u64: func() -> u64;
+}
