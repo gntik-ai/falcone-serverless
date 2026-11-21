@@ -153,7 +153,8 @@ Each pin has `name`, `version`, `source`, `archive` and `sha256`; the schema
 requires the exact operator-approved values. The manifest and `go_versions.toml`
 are checked against these pins. `allowedInterfaces` remains Falcone-only.
 Go's separate host WASI ceiling is random/random, cli/stdout, io/streams and io/error
-at 0.2.0. Random is OS CSPRNG-backed and traps above 65,536 requested bytes.
+at 0.2.0. Random is OS CSPRNG-backed and traps above 65,536 requested bytes or above the
+configured `host_to_guest_bytes`, whichever is lower.
 Stdout discards bytes with an invocation-local accepted count capped at 65,536
 and a truncation flag; check-write reports remaining space. No stdout bytes leave
 the host through a file, socket or logging pipeline. No other WASI is linked.

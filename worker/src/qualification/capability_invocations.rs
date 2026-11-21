@@ -842,6 +842,15 @@ pub fn absent_grants_and_ambient_imports_fail_before_a_guest_start() {
         "wasi:filesystem/preopens@0.2.0",
         "wasi:sockets/tcp@0.2.0",
         "wasi:cli/environment@0.2.0",
+        // WASI interfaces outside the narrow random and stdout set stay denied in the pod too.
+        "wasi:random/insecure@0.2.0",
+        "wasi:random/insecure-seed@0.2.0",
+        "wasi:cli/stdin@0.2.0",
+        "wasi:cli/stderr@0.2.0",
+        "wasi:cli/exit@0.2.0",
+        "wasi:clocks/wall-clock@0.2.0",
+        "wasi:clocks/monotonic-clock@0.2.0",
+        "wasi:io/poll@0.2.0",
         "falcone:host/storage@0.2.0",
         "falcone:host/http@0.2.0",
         "falcone:host/events@0.2.0",
@@ -1354,6 +1363,47 @@ pub fn helper_permits_cover_thread_local_destructors() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg_attr(test, test)]
+pub fn wasi_random_obeys_a_narrowed_host_to_guest_limit() {
+    let _case = crate::capability_support::serial_case();
+    let engine = wasmtime::Engine::default();
+    let instantiate = |output_bytes: u64| {
+        let limits = crate::limits::Limits::parse(&format!(
+            r#"{{"version":1,"compiler_cpu_seconds":120,
+            "compiler_memory_bytes":4294967296,"guest_memory_bytes":2097152,
+            "guest_to_host_bytes":128,"host_to_guest_bytes":{output_bytes},
+            "guest_deadline_ms":1000,"host_call_deadline_ms":50,"termination_budget_ms":500}}"#
+        ))
+        .unwrap();
+        let host = Host::with_limits(Context::default(), Arc::new(Recording::default()), limits);
+        host::instantiate(&engine, include_str!("fixtures/capability-random.wat"), host).unwrap()
+    };
+    let (mut store, instance) = instantiate(128);
+    let draw = instance
+        .get_typed_func::<(), (u64,)>(&mut store, "draw")
+        .unwrap();
+    let bytes = instance
+        .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes-len")
+        .unwrap();
+    draw.call(&mut store, ()).unwrap();
+    assert_eq!(bytes.call(&mut store, (128,)).unwrap(), (128,));
+    assert!(!store.data().buffer_limited());
+    // Above the configured limit, though far below the 64 KiB WASI cap.
+    let (mut store, instance) = instantiate(128);
+    let bytes = instance
+        .get_typed_func::<(u64,), (u32,)>(&mut store, "bytes-len")
+        .unwrap();
+    assert!(bytes.call(&mut store, (129,)).is_err());
+    assert!(store.data().buffer_limited());
+    // A limit below eight bytes refuses the u64 result as well.
+    let (mut store, instance) = instantiate(4);
+    let draw = instance
+        .get_typed_func::<(), (u64,)>(&mut store, "draw")
+        .unwrap();
+    assert!(draw.call(&mut store, ()).is_err());
+    assert!(store.data().buffer_limited());
 }
 
 #[test]

@@ -51,6 +51,8 @@ assert args[-1] == './missing-probe-package'
 assert pathlib.Path(os.environ['TINYGOROOT']).parent.name == 'tinygo'
 assert pathlib.Path(os.environ['GOROOT']).parent.name == 'go'
 assert subprocess.check_output(['wasm-tools', '--version'], text=True).strip() == 'wasm-tools 1.258.3'
+# TinyGo runs $WASMTOOLS before PATH: it must name the verified componentizer.
+assert subprocess.check_output([os.environ['WASMTOOLS'], '--version'], text=True).strip() == 'wasm-tools 1.258.3'
 sys.exit('missing-probe-package: expected loader failure')
 '''),
         "go": ("go/bin/go", "#!/bin/sh\necho 'go version go1.26.11 linux/amd64'\n"),
@@ -75,7 +77,9 @@ sys.exit('missing-probe-package: expected loader failure')
         path.chmod(0o755)
     env = dict(os.environ, FS_TRUSTED_COMPILER_IMAGE="1", FS_OPTION_PROBE_ONLY="1",
                FS_TOOLCHAIN_CACHE=str(cache), FS_PROFILE_COMPONENTS=str(scratch / "components"),
-               TMPDIR=str(scratch))
+               TMPDIR=str(scratch),
+               # A poisoned inherited override: the build must replace it.
+               WASMTOOLS=str(cache / "bin/wasm-tools"))
     command = ["bash", str(root / "worker/qualification/go/build-profile.sh")]
     result = subprocess.run(command, env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr

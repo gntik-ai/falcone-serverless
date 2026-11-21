@@ -767,7 +767,13 @@ fn link_random(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     random.func_wrap(
         "get-random-u64",
         |store: StoreContextMut<'_, Host>, (): ()| {
-            store.data().enter()?;
+            let host = store.data();
+            host.enter()?;
+            // The eight result bytes count against a narrowed host-to-guest limit too.
+            if host.output_limit() < 8 {
+                host.record::<()>(&Err(HostError::LimitExceeded));
+                return Err(wasmtime::Error::msg("random byte limit exceeded"));
+            }
             let mut bytes = [0; 8];
             SystemRandom::new()
                 .fill(&mut bytes)
@@ -778,8 +784,11 @@ fn link_random(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
     random.func_wrap(
         "get-random-bytes",
         |store: StoreContextMut<'_, Host>, (len,): (u64,)| {
-            store.data().enter()?;
-            if len > WASI_BYTES as u64 {
+            let host = store.data();
+            host.enter()?;
+            // Checked before allocation: the configured limit can be below the WASI cap.
+            if len > WASI_BYTES.min(host.output_limit()) as u64 {
+                host.record::<()>(&Err(HostError::LimitExceeded));
                 return Err(wasmtime::Error::msg("random byte limit exceeded"));
             }
             let mut bytes = vec![0; len as usize];

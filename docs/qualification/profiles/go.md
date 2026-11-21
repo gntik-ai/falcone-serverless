@@ -29,7 +29,9 @@ still apply. Host WASI is separate from matrix `allowedInterfaces`, which stays
 Falcone-only. The only WASI instances are `wasi:random/random@0.2.0`,
 `wasi:cli/stdout@0.2.0`, `wasi:io/streams@0.2.0`, and `wasi:io/error@0.2.0`.
 Randomness comes from the operating system CSPRNG through pinned ring SystemRandom;
-`get-random-bytes` traps above 65,536 bytes. Stdout is output-only, capped at 65,536
+`get-random-bytes` traps above 65,536 bytes or above the configured
+`host_to_guest_bytes`, whichever is lower, and `get-random-u64` traps when that limit
+is below 8 bytes; both set the buffer-limit flag. Stdout is output-only, capped at 65,536
 bytes per invocation. Additional bytes are silently dropped and set a truncation
 flag; `check-write` reports no more than remaining capacity. The worker has no
 existing stdout byte record: bytes are discarded, with only the accepted byte count
