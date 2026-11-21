@@ -1378,7 +1378,12 @@ pub fn wasi_random_obeys_a_narrowed_host_to_guest_limit() {
         ))
         .unwrap();
         let host = Host::with_limits(Context::default(), Arc::new(Recording::default()), limits);
-        host::instantiate(&engine, include_str!("fixtures/capability-random.wat"), host).unwrap()
+        host::instantiate(
+            &engine,
+            include_str!("fixtures/capability-random.wat"),
+            host,
+        )
+        .unwrap()
     };
     let (mut store, instance) = instantiate(128);
     let draw = instance
