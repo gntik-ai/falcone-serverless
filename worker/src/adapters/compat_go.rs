@@ -93,10 +93,18 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
                 }
                 Kind::String
             }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
-                at += 1;
-                while at < bytes.len() && (bytes[at].is_ascii_alphanumeric() || bytes[at] == b'_') {
-                    at += 1;
+            _ if text[at..]
+                .chars()
+                .next()
+                .is_some_and(|c| c == '_' || c.is_alphabetic()) =>
+            {
+                // Go identifiers may contain Unicode letters and digits. Keep the
+                // whole name intact for both import aliases and their uses.
+                while let Some(c) = text[at..].chars().next() {
+                    if c != '_' && !c.is_alphanumeric() {
+                        break;
+                    }
+                    at += c.len_utf8();
                 }
                 Kind::Word
             }

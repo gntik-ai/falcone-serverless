@@ -164,10 +164,6 @@ fn field_keys(matrix: &Value) -> BTreeSet<String> {
         match node {
             Value::Object(object) => {
                 for (key, child) in object {
-                    // Optional language-specific pins have dedicated profile checks.
-                    if key == "toolchainPins" {
-                        continue;
-                    }
                     keys.insert(key.clone());
                     collect(child, keys);
                 }
@@ -214,9 +210,45 @@ fn validate_document(matrix: &Value, path: &Path) -> Result<(), String> {
 }
 
 #[test]
+fn toolchain_pin_documentation_drift_is_rejected() {
+    let matrix = read_json(contracts().join("language-profile-matrix.json"));
+    let document = fs::read_to_string(contracts().join("language-profile-matrix.md")).unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "matrix-pin-documentation-{}.md",
+        std::process::id()
+    ));
+    for key in [
+        "toolchainPins",
+        "tinygo",
+        "go",
+        "wasm_tools",
+        "name",
+        "version",
+        "source",
+        "archive",
+        "sha256",
+    ] {
+        let token = format!("`{key}`");
+        assert!(document.contains(&token), "missing drift witness: {key}");
+        fs::write(&path, document.replace(&token, key)).unwrap();
+        let result = validate_document(&matrix, &path);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(result, Err(format!("documentation field: {key}")));
+    }
+}
+
+#[test]
 fn language_profile_matrix_documentation_contract() {
     let matrix = read_json(contracts().join("language-profile-matrix.json"));
     validate_document(&matrix, &contracts().join("language-profile-matrix.md")).unwrap();
+    // The historical synthetic fixtures cover the shared contract fields.
+    // Go's optional pins are covered by removing each field from the actual
+    // published document in toolchain_pin_documentation_drift_is_rejected.
+    let mut matrix = matrix;
+    matrix["profiles"]["go"]
+        .as_object_mut()
+        .unwrap()
+        .remove("toolchainPins");
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/contracts");
     validate_document(&matrix, &fixtures.join("language-profile-matrix-valid.md")).unwrap();
     for (category, items) in [

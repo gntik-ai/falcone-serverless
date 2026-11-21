@@ -205,6 +205,37 @@ fn directives_and_every_reflect_alias_have_source_locations() {
 }
 
 #[test]
+fn unicode_reflect_aliases_cannot_bypass_unsupported_api_diagnostics() {
+    use falcone_serverless_worker::adapters::compat_go::{TreeFile, check_tree};
+    for alias in ["ρ", "反射", "rρ", "_反射", "ρ２"] {
+        for imports in [
+            format!("{alias} \"reflect\""),
+            format!("({alias} \"reflect\"; _ \"reflect\")"),
+            format!("(_ \"reflect\"; {alias} \"reflect\")"),
+            format!("(. \"reflect\"; {alias} \"reflect\"; _ \"reflect\")"),
+        ] {
+            let source = format!("package main\nimport {imports}\nvar _ = {alias}.MakeFunc\n");
+            let verdict = check_tree(
+                &[TreeFile {
+                    path: "main.go",
+                    text: &source,
+                }],
+                None,
+            );
+            assert!(
+                verdict.diagnostics().iter().any(|d| {
+                    d.path == "main.go"
+                        && d.line == 3
+                        && d.code == "WASM-UNSUPPORTED-API"
+                        && d.construct == "unsupported reflection API"
+                }),
+                "alias {alias}, imports {imports}: {verdict:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn documented_workloads_interfaces_and_negative_diagnostics() {
     use falcone_serverless_worker::adapters::compat_go::{TreeFile, check_tree};
     let m = manifest();

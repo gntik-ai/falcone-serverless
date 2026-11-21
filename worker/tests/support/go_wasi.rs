@@ -54,7 +54,7 @@ pub fn csprng_is_linked_narrowly_and_bounded() {
 }
 
 pub fn stdout_is_bounded_and_invocation_local() {
-    let source = include_str!("../../src/qualification/fixtures/wasi-stdout.wat");
+    let source = include_str!("../fixtures/go/wasi-stdout.wat");
     let invoke = |length, blocking, barrier: Option<&std::sync::Barrier>| {
         let engine = wasmtime::Engine::default();
         let (mut store, instance) = host::instantiate(&engine, source, host()).unwrap();
@@ -89,7 +89,7 @@ pub fn one_memory_and_only_declared_functions_are_linked() {
       (core instance (instantiate $mem))
       (core instance (instantiate $mem)))"#;
     assert!(host::instantiate(&engine, two_memories, host()).is_err());
-    let unlinked = include_str!("../../src/qualification/fixtures/wasi-stdout.wat").replace(
+    let unlinked = include_str!("../fixtures/go/wasi-stdout.wat").replace(
         "[method]output-stream.write",
         "[method]output-stream.unlinked",
     );
