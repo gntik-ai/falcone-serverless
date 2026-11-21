@@ -1,9 +1,24 @@
 //! Static qualification diagnostics, never an execution or enablement gate.
-//! Comments are checked independently of import traversal. Strings and rune
-//! literals are opaque, so tenant text is never included in diagnostics.
+//! Directives are checked independently of import traversal. Diagnostics use
+//! fixed construct names and never include tenant text.
 use std::collections::BTreeSet;
 
 const UNSUPPORTED: &str = "WASM-UNSUPPORTED-API";
+const REFLECT_ALLOWED: [&str; 3] = ["TypeOf", "ValueOf", "DeepEqual"];
+// Public names in the pinned Go reflect package identify unqualified dot-import
+// uses. Both import forms then use the same allowed subset above. Unknown named
+// selectors are also rejected; an unknown unqualified name cannot compile.
+const REFLECT_EXPORTS: &str = "
+    Append AppendSlice ArenaNew Array ArrayOf Bool BothDir Chan ChanDir ChanOf
+    Complex64 Complex128 Copy DeepEqual Float32 Float64 Func FuncOf Indirect Int
+    Int8 Int16 Int32 Int64 Interface Invalid Kind MakeChan MakeFunc MakeMap
+    MakeMapWithSize MakeSlice Map MapIter MapOf Method New NewAt Pointer PointerTo
+    Ptr PtrTo RecvDir Select SelectCase SelectDefault SelectDir SelectRecv
+    SelectSend SendDir Slice SliceAt SliceHeader SliceOf String StringHeader
+    Struct StructField StructOf StructTag Swapper Type TypeAssert TypeFor TypeOf
+    Uint Uint8 Uint16 Uint32 Uint64 Uintptr UnsafePointer Value ValueError ValueOf
+    VisibleFields Zero
+";
 
 pub struct TreeFile<'a> {
     pub path: &'a str,
@@ -188,6 +203,20 @@ pub fn check_tree(files: &[TreeFile<'_>], go_mod: Option<&str>) -> Verdict {
         }
     }
     for file in files {
+        // Like go generate, inspect column-one directives even in raw strings.
+        // The trusted build never runs generators, but static eligibility must
+        // still reject those install hooks.
+        for (line, text) in file.text.lines().enumerate() {
+            if text.starts_with("//go:generate") {
+                emit(
+                    &mut out,
+                    file.path,
+                    line + 1,
+                    "WASM-INSTALL-HOOK",
+                    "go:generate",
+                );
+            }
+        }
         let all = tokens(file.text);
         // Never let grouped imports consume a directive without checking it.
         for token in &all {
@@ -301,7 +330,7 @@ pub fn check_tree(files: &[TreeFile<'_>], go_mod: Option<&str>) -> Verdict {
             if aliases.contains(token.text) && tokens.get(index + 1).is_some_and(|t| t.text == ".")
             {
                 if let Some(api) = tokens.get(index + 2)
-                    && !matches!(api.text, "TypeOf" | "ValueOf" | "DeepEqual")
+                    && !REFLECT_ALLOWED.contains(&api.text)
                 {
                     emit(
                         &mut out,
@@ -312,10 +341,11 @@ pub fn check_tree(files: &[TreeFile<'_>], go_mod: Option<&str>) -> Verdict {
                     );
                 }
             } else if dot_reflect
-                && matches!(
-                    token.text,
-                    "MakeFunc" | "StructOf" | "FuncOf" | "NewAt" | "SliceAt"
-                )
+                && index.checked_sub(1).is_none_or(|i| tokens[i].text != ".")
+                && REFLECT_EXPORTS
+                    .split_whitespace()
+                    .any(|name| name == token.text)
+                && !REFLECT_ALLOWED.contains(&token.text)
             {
                 emit(
                     &mut out,

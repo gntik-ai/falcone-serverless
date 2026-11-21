@@ -40,44 +40,56 @@ fn componentization_world_declares_exactly_the_manifest_imports() {
         BTreeSet::from(["falcone:host/handler@0.2.0".into()])
     );
 }
-const PINS: [(&str, &str, &str, &str); 3] = [
+const PINS: [(&str, &str, &str, &str, &str, &str); 3] = [
     (
         "tinygo",
         "0.44.0",
         "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9",
         "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz",
+        "TinyGo",
+        "tinygo0.44.0.linux-amd64.tar.gz",
     ),
     (
         "go",
         "1.26.11",
         "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec",
         "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz",
+        "Go",
+        "go1.26.11.linux-amd64.tar.gz",
     ),
     (
         "wasm_tools",
         "1.258.3",
         "99b486a9ddc19af0260cd5f98f3b709a60817a3acd20efc9c582d719caebbf6d",
         "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.258.3/wasm-tools-1.258.3-x86_64-linux.tar.gz",
+        "wasm-tools",
+        "wasm-tools-1.258.3-x86_64-linux.tar.gz",
     ),
 ];
 fn pins_valid(manifest: &toml::Value, pins: &toml::Value, matrix: &Value) -> bool {
-    PINS.iter().all(|(key, version, sha, source)| {
-        [
-            manifest
-                .get("pins")
-                .and_then(|p| p.get(key))
-                .unwrap_or(&toml::Value::Boolean(false)),
-            pins.get(key).unwrap_or(&toml::Value::Boolean(false)),
-        ]
-        .iter()
-        .all(|p| {
-            p.get("version").and_then(toml::Value::as_str) == Some(*version)
-                && p.get("sha256").and_then(toml::Value::as_str) == Some(*sha)
-                && p.get("source").and_then(toml::Value::as_str) == Some(*source)
-        }) && matrix["toolchainPins"][key]["version"] == *version
-            && matrix["toolchainPins"][key]["sha256"] == *sha
-            && matrix["toolchainPins"][key]["source"].as_str() == pins[key]["source"].as_str()
-    }) && manifest["stdlib"]["toolchain"].as_str() == Some("1.26.11")
+    PINS.iter()
+        .all(|(key, version, sha, source, name, archive)| {
+            [
+                manifest
+                    .get("pins")
+                    .and_then(|p| p.get(key))
+                    .unwrap_or(&toml::Value::Boolean(false)),
+                pins.get(key).unwrap_or(&toml::Value::Boolean(false)),
+            ]
+            .iter()
+            .all(|p| {
+                p.get("version").and_then(toml::Value::as_str) == Some(*version)
+                    && p.get("sha256").and_then(toml::Value::as_str) == Some(*sha)
+                    && p.get("source").and_then(toml::Value::as_str) == Some(*source)
+                    && p.get("name").and_then(toml::Value::as_str) == Some(*name)
+                    && p.get("archive").and_then(toml::Value::as_str) == Some(*archive)
+            }) && matrix["toolchainPins"][key]["version"] == *version
+                && matrix["toolchainPins"][key]["sha256"] == *sha
+                && matrix["toolchainPins"][key]["source"].as_str() == pins[key]["source"].as_str()
+                && matrix["toolchainPins"][key]["name"] == *name
+                && matrix["toolchainPins"][key]["archive"] == *archive
+        })
+        && manifest["stdlib"]["toolchain"].as_str() == Some("1.26.11")
         && manifest["modules"].as_array().is_some_and(|modules| {
             modules.iter().all(|m| {
                 m.get("version")
@@ -138,7 +150,19 @@ fn exact_operator_pins_and_disabled_state() {
     );
     assert_eq!(go["status"], "disabled");
     assert_eq!(go["evidence"], serde_json::json!({}));
-    for (key, _, _, _) in PINS {
+    for (key, ..) in PINS {
+        for field in ["name", "archive"] {
+            let mut altered_manifest = m.clone();
+            let mut altered_pins = pins.clone();
+            let mut altered_matrix = go.clone();
+            altered_manifest["pins"][key][field] = "substituted".into();
+            altered_pins[key][field] = "substituted".into();
+            altered_matrix["toolchainPins"][key][field] = "substituted".into();
+            assert!(
+                !pins_valid(&altered_manifest, &altered_pins, &altered_matrix),
+                "operator pin {key}.{field} must survive coordinated copy drift"
+            );
+        }
         for bad in ["", "latest", ">=1.0.0", "0.0.0"] {
             let mut altered = m.clone();
             altered["pins"][key]["version"] = bad.into();
@@ -243,6 +267,75 @@ fn directives_and_every_reflect_alias_have_source_locations() {
         )
         .supported()
     );
+}
+
+#[test]
+fn generate_directives_inside_multiline_strings_are_rejected() {
+    use falcone_serverless_worker::adapters::compat_go::{TreeFile, check_tree};
+    let verdict = check_tree(
+        &[TreeFile {
+            path: "raw.go",
+            text: "package main\nvar text = `example\n//go:generate forbidden\n`\n",
+        }],
+        None,
+    );
+    assert!(
+        verdict.diagnostics().iter().any(|d| {
+            d.path == "raw.go"
+                && d.line == 3
+                && d.code == "WASM-INSTALL-HOOK"
+                && d.construct == "go:generate"
+        }),
+        "{verdict:?}"
+    );
+}
+
+#[test]
+fn reflection_policy_is_the_same_for_named_and_dot_imports() {
+    use falcone_serverless_worker::adapters::compat_go::{TreeFile, check_tree};
+    for api in [
+        "MakeFunc",
+        "MakeSlice",
+        "TypeFor",
+        "TypeAssert",
+        "Value",
+        "SelectSend",
+    ] {
+        for (import, prefix) in [("r \"reflect\"", "r."), (". \"reflect\"", "")] {
+            let source = format!("package main\nimport {import}\nvar _ = {prefix}{api}\n");
+            let verdict = check_tree(
+                &[TreeFile {
+                    path: "reflect.go",
+                    text: &source,
+                }],
+                None,
+            );
+            assert!(
+                verdict.diagnostics().iter().any(|d| {
+                    d.path == "reflect.go"
+                        && d.line == 3
+                        && d.code == "WASM-UNSUPPORTED-API"
+                        && d.construct == "unsupported reflection API"
+                }),
+                "{source}: {verdict:?}"
+            );
+        }
+    }
+    for (import, prefix) in [("r \"reflect\"", "r."), (". \"reflect\"", "")] {
+        let source = format!(
+            "package main\nimport {import}\nvar _, _, _ = {prefix}TypeOf, {prefix}ValueOf, {prefix}DeepEqual\n"
+        );
+        assert!(
+            check_tree(
+                &[TreeFile {
+                    path: "reflect.go",
+                    text: &source
+                }],
+                None
+            )
+            .supported()
+        );
+    }
 }
 
 #[test]

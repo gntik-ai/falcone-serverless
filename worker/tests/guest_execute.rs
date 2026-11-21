@@ -5,6 +5,66 @@ mod cases;
 mod executable;
 
 #[test]
+fn completed_execution_retains_bounded_stdout_metadata() {
+    use host::{Context, Host};
+    use std::sync::Arc;
+    struct Empty;
+    impl host::Bindings for Empty {
+        fn call(&self, _: &Context, _: host::Operation) -> Result<host::Reply, host::HostError> {
+            panic!("stdout must not call platform bindings")
+        }
+    }
+    let source = include_str!("fixtures/go/wasi-stdout.wat");
+    let (prefix, _) = source.rsplit_once("  (func (export \"write\")").unwrap();
+    let compiler = cases::compiler();
+    for (length, trap, expected) in [
+        (4, false, (4, false)),
+        (65537, false, (65536, true)),
+        (65537, true, (65536, true)),
+    ] {
+        let source = format!(
+            r#"{prefix}
+          (type $bytes (list u8))
+          (type $handler-error (variant (case "invalid-input" string) (case "failed" string)))
+          (type $result (result $bytes (error $handler-error)))
+          (core module $handler
+            (import "host" "memory" (memory 2))
+            (import "host" "write" (func $write (param i32 i32) (result i64)))
+            (export "memory" (memory 0))
+            (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 70000)
+            (func (export "handle") (param i32 i32) (result i32)
+              i32.const {length} i32.const 1 call $write drop
+              {failure}
+              i32.const 0 i64.const 0 i64.store
+              i32.const 8 i32.const 0 i32.store
+              i32.const 0))
+          (core instance $handler (instantiate $handler (with "host" (instance
+            (export "memory" (memory $mem "memory"))
+            (export "write" (func $guest "write"))))))
+          (func $handle (param "params" $bytes) (result $result)
+            (canon lift (core func $handler "handle") (memory $handler "memory")
+              (realloc (func $handler "realloc"))))
+          (instance $export (export "handler-error" (type $handler-error)) (export "handle" (func $handle)))
+          (export "falcone:host/handler@0.2.0" (instance $export)))"#,
+            failure = if trap { "unreachable" } else { "" }
+        );
+        let bytes = wat::parse_str(source).unwrap();
+        let execution = cases::prepare(
+            &compiler,
+            &bytes,
+            Host::new(Context::default(), Arc::new(Empty)),
+        )
+        .unwrap()
+        .call(b"");
+        assert_eq!(execution.result.is_err(), trap, "{execution:?}");
+        assert_eq!(
+            (execution.stdout_bytes, execution.stdout_truncated),
+            expected
+        );
+    }
+}
+
+#[test]
 fn empty_handler_is_rejected_before_compilation() {
     let bytes = wat::parse_str(
         "(component (instance $h) (export \"falcone:host/handler@0.2.0\" (instance $h)))",

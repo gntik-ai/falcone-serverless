@@ -1375,7 +1375,7 @@ fn narrow_wasi_import_gate() {
         "wasi:clocks/wall-clock@0.2.0",
         "wasi:io/poll@0.2.0",
     ];
-    let base = include_str!("../../tests/fixtures/was-02/allowed.wat");
+    let base = include_str!("execute_fixtures/handler.wat");
     for name in allowed.into_iter().chain(denied) {
         let source = base.replacen(
             "(component",

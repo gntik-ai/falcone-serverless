@@ -35,8 +35,8 @@ flag; `check-write` reports no more than remaining capacity. The worker has no
 existing stdout byte record: bytes are discarded, with only the accepted byte count
 and truncation flag recorded on the invocation's Host (`stdout_summary`). There is
 no file, network path or new logging pipeline. Hosts never share this metadata.
-This store-local summary has the Host's lifetime: `host::execute` consumes the Host,
-and its returned Execution does not contain stdout metadata.
+`host::execute` preserves the count and truncation flag in its returned Execution
+(`stdout_bytes`, `stdout_truncated`), including when the handler traps.
 The memory count remains `memories(1)`; fuel, host-call and time limits still apply.
 
 The only stdout functions are `get-stdout`, output-stream `write`, `check-write`,
@@ -53,9 +53,9 @@ entry points; dynamic construction (including MakeFunc) is unsupported, includin
 aliased and dot imports. It is a qualification diagnostic, not a Go parser or sandbox.
 Each diagnostic names a fixed construct plus file and line; no tenant source is echoed.
 No negative fixture is built or executed.
-Raw-string contents are opaque to this source checker. Go's separate `go generate`
-line scanner can interpret a column-one directive inside a raw string; the trusted
-build never invokes `go generate`. Directive prefix matching is conservative, so
+The checker also rejects column-one go:generate directives inside raw strings,
+matching Go's line scanner; the trusted build never invokes `go generate`.
+Directive prefix matching is conservative, so
 `//go:generated` is also rejected as an install hook.
 
 The default archive-probe test and the trusted build require Python 3.11 or newer
