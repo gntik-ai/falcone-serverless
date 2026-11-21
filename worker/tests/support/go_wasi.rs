@@ -7,7 +7,9 @@ pub struct Captured(Mutex<Vec<String>>);
 impl Bindings for Captured {
     fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
         match operation {
-            Operation::Log { message, fields, .. } => {
+            Operation::Log {
+                message, fields, ..
+            } => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].name, "stream");
                 assert_eq!(fields[0].value, "stdout");
