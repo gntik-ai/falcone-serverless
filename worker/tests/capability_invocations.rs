@@ -1,4 +1,4 @@
-pub use falcone_serverless_worker::host;
+pub use falcone_serverless_worker::{artifact, host};
 #[path = "../src/qualification/capability_support.rs"]
 mod capability_support;
 

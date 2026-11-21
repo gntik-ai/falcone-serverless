@@ -204,3 +204,24 @@ add compiler confinement or certify production budgets.
 Source builds belong to `ctr-source-build-api` ([source-build.md](source-build.md)); revision metadata belongs to `ctr-revision-runtime-manifest` (WAS-02.t2). Compiler image/runtime configuration and build authorization belong to DEP-01. This contract defines none of those interfaces. No credentials, keys, secret paths or Secret values are specified here.
 
 The contract test remains a documentation gate; WAS-02.t5 adds Linux executable validation and compile-containment fixtures. These do not claim WAS-01 runtime qualification. Rollout is merge-only with no platform runtime adapter. The WAS-01 local execute command preserves this contract's validation, supervised compilation and verified-load boundaries. Future runtime implementation and semantic review must preserve every boundary above.
+
+
+## Narrow host WASI for the disabled Go profile
+
+In addition to Falcone imports, the raw-component gate accepts exactly
+`wasi:random/random@0.2.0`, `wasi:cli/stdout@0.2.0`, `wasi:io/streams@0.2.0`,
+and `wasi:io/error@0.2.0`, each still an instance. Random exposes only
+get-random-u64 and get-random-bytes, using the OS CSPRNG through pinned ring;
+byte requests over 65,536 trap. Stdout exposes get-stdout and output-stream
+write, check-write, blocking-write-and-flush, flush, blocking-flush and drop.
+The io error resource is a type only and the host never creates one.
+The invocation-local sink discards bytes and records only a byte count (at most
+65,536) and truncation flag on Host; there is no existing stdout record or new log
+pipeline. Excess bytes are dropped with successful writes; check-write reports
+at most remaining capacity. Concurrent invocations have separate metadata.
+No wasmtime_wasi or broad linker registration is used. Other functions fail
+instantiation, and all other WASI interfaces fail undeclared_import, including
+insecure randomness, environment, stdin, stderr, exit, clocks and polling.
+The store-wide memories(1), fuel, host-call, time and all other ceilings are unchanged.
+Tenant precompiled artifacts still fail precompiled_rejected. Go remains disabled
+and unverified until operator-run trusted build and cluster evidence exist.

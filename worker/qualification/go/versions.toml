@@ -1,0 +1,21 @@
+# Operator pins, 2026-11-19/21. Single source read by the trusted build.
+[tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+[go]
+name = "Go"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[wasm_tools]
+name = "wasm-tools"
+version = "1.258.3"
+source = "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.258.3/wasm-tools-1.258.3-x86_64-linux.tar.gz"
+archive = "wasm-tools-1.258.3-x86_64-linux.tar.gz"
+sha256 = "99b486a9ddc19af0260cd5f98f3b709a60817a3acd20efc9c582d719caebbf6d"

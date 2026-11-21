@@ -164,6 +164,10 @@ fn field_keys(matrix: &Value) -> BTreeSet<String> {
         match node {
             Value::Object(object) => {
                 for (key, child) in object {
+                    // Optional language-specific pins have dedicated profile checks.
+                    if key == "toolchainPins" {
+                        continue;
+                    }
                     keys.insert(key.clone());
                     collect(child, keys);
                 }

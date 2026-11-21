@@ -336,9 +336,16 @@ pub struct Host {
     host_call_budget_exceeded: AtomicBool,
     late_host_call: AtomicBool,
     fuel_exhausted: AtomicBool,
+    stdout_bytes: usize,
+    stdout_truncated: bool,
 }
 
 impl Host {
+    /// Invocation-local stdout metadata. With no output record, bytes are discarded.
+    pub fn stdout_summary(&self) -> (usize, bool) {
+        (self.stdout_bytes, self.stdout_truncated)
+    }
+
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
         Self::with_limits(context, bindings, Limits::compatibility())
     }
@@ -371,6 +378,8 @@ impl Host {
             host_call_budget_exceeded: AtomicBool::new(false),
             late_host_call: AtomicBool::new(false),
             fuel_exhausted: AtomicBool::new(false),
+            stdout_bytes: 0,
+            stdout_truncated: false,
         }
     }
 
@@ -661,6 +670,126 @@ fn storage_resource<T: Send + 'static>(
     )
 }
 
+struct Stdout;
+pub struct WasiError;
+#[derive(ComponentType, wasmtime::component::Lower)]
+#[component(variant)]
+pub enum StreamError {
+    #[component(name = "last-operation-failed")]
+    LastOperationFailed(Resource<WasiError>),
+    #[component(name = "closed")]
+    Closed,
+}
+
+fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
+    linker.instance("wasi:io/error@0.2.0")?.resource(
+        "error",
+        ResourceType::host::<WasiError>(),
+        |store, _| {
+            store.data().enter()?;
+            Err(wasmtime::Error::msg("unissued io error"))
+        },
+    )?;
+    let mut streams = linker.instance("wasi:io/streams@0.2.0")?;
+    streams.resource(
+        "output-stream",
+        ResourceType::host::<Stdout>(),
+        |store, _| store.data().enter(),
+    )?;
+    for name in [
+        "[method]output-stream.write",
+        "[method]output-stream.blocking-write-and-flush",
+    ] {
+        streams.func_wrap(
+            name,
+            |mut store: StoreContextMut<'_, Host>,
+             (handle, bytes): (Resource<Stdout>, WasmList<u8>)| {
+                store.data().enter()?;
+                if handle.rep() != 0 {
+                    return Ok((Err::<(), _>(StreamError::Closed),));
+                }
+                // No stdout byte record exists. Validate the lazy range but never copy
+                // tenant bytes; record only the bounded accepted count and truncation.
+                let length = bytes.as_le_slice(&store).len();
+                let host = store.data_mut();
+                let accepted = length.min(65_536 - host.stdout_bytes);
+                host.stdout_bytes += accepted;
+                host.stdout_truncated |= accepted < length;
+                Ok((Ok::<(), StreamError>(()),))
+            },
+        )?;
+    }
+    streams.func_wrap(
+        "[method]output-stream.check-write",
+        |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
+            store.data().enter()?;
+            let result = if handle.rep() == 0 {
+                Ok((65_536 - store.data().stdout_bytes) as u64)
+            } else {
+                Err(StreamError::Closed)
+            };
+            Ok((result,))
+        },
+    )?;
+    for name in [
+        "[method]output-stream.flush",
+        "[method]output-stream.blocking-flush",
+    ] {
+        streams.func_wrap(
+            name,
+            |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
+                store.data().enter()?;
+                Ok((if handle.rep() == 0 {
+                    Ok(())
+                } else {
+                    Err(StreamError::Closed)
+                },))
+            },
+        )?;
+    }
+    linker.instance("wasi:cli/stdout@0.2.0")?.func_wrap(
+        "get-stdout",
+        |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
+            Ok((Resource::<Stdout>::new_own(0),))
+        },
+    )?;
+    Ok(())
+}
+
+// ring is already an exactly pinned production dependency. SystemRandom uses the
+// operating system CSPRNG; errors trap rather than substituting predictable bytes.
+fn link_random(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut random = linker.instance("wasi:random/random@0.2.0")?;
+    random.func_wrap(
+        "get-random-u64",
+        |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
+            let mut bytes = [0; 8];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("OS randomness unavailable"))?;
+            Ok((u64::from_le_bytes(bytes),))
+        },
+    )?;
+    random.func_wrap(
+        "get-random-bytes",
+        |store: StoreContextMut<'_, Host>, (len,): (u64,)| {
+            store.data().enter()?;
+            if len > 65_536 {
+                return Err(wasmtime::Error::msg("random byte limit exceeded"));
+            }
+            let mut bytes = vec![0; len as usize];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("OS randomness unavailable"))?;
+            Ok((bytes,))
+        },
+    )?;
+    Ok(())
+}
+
 /// Qualification-only: compiles raw source in process, never native artifacts.
 /// A runtime adapter must use the supervised trusted compiler for tenant input;
 /// this fixture entry point does not enforce compilation CPU or memory budgets.
@@ -701,6 +830,8 @@ pub(super) fn instantiate_in_store(
         }
     }
     let mut linker = Linker::new(engine);
+    link_random(&mut linker)?;
+    link_stdout(&mut linker)?;
     linker
         .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(

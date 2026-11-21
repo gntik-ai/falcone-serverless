@@ -6,7 +6,7 @@ pub mod net;
 pub mod outcome;
 pub use execute::{ExecuteError, Execution, Prepared, execute};
 mod runtime;
-pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, instantiate};
+pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, StreamError, WasiError, instantiate};
 use wasmtime::component::{ComponentType, Lift, Lower};
 
 pub fn aggregate_within_limit(parts: &[usize]) -> bool {
@@ -167,7 +167,11 @@ pub fn import_allowed(import: &str, grants: &Grants) -> bool {
         "falcone:host/logging@0.2.0"
         | "falcone:host/cancellation@0.2.0"
         | "falcone:host/progress@0.2.0"
-        | "falcone:host/invocation-context@0.2.0" => true,
+        | "falcone:host/invocation-context@0.2.0"
+        | "wasi:random/random@0.2.0"
+        | "wasi:cli/stdout@0.2.0"
+        | "wasi:io/streams@0.2.0"
+        | "wasi:io/error@0.2.0" => true,
         _ => false,
     }
 }
