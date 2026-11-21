@@ -155,6 +155,7 @@ are checked against these pins. `allowedInterfaces` remains Falcone-only.
 Go's separate host WASI ceiling is random/random, cli/stdout, io/streams and io/error
 at 0.2.0. Random is OS CSPRNG-backed and traps above 65,536 requested bytes or above the
 configured `host_to_guest_bytes`, whichever is lower.
-Stdout discards bytes with an invocation-local accepted count capped at 65,536
-and a truncation flag; check-write reports remaining space. No stdout bytes leave
-the host through a file, socket or logging pipeline. No other WASI is linked.
+Stdout sends accepted bytes, capped at 65,536 per invocation, to the invocation's
+existing log record through the guest-logging binding, and keeps an invocation-local
+count and truncation flag; check-write reports remaining space. No stdout bytes leave
+the host through a file, socket or new logging pipeline. No other WASI is linked.

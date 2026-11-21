@@ -710,14 +710,31 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 if handle.rep() != 0 {
                     return Ok((Err::<(), _>(StreamError::Closed),));
                 }
-                // No stdout byte record exists. Validate the lazy range but never copy
-                // tenant bytes; record only the bounded accepted count and truncation.
-                let length = bytes.as_le_slice(&store).len();
+                // Only the accepted bytes are copied, into the invocation's existing log
+                // record through the same binding as guest logging; the rest are dropped.
+                let slice = bytes.as_le_slice(&store);
+                let length = slice.len();
+                let accepted = length.min(WASI_BYTES - store.data().stdout_bytes);
+                let message = String::from_utf8_lossy(&slice[..accepted]).into_owned();
                 let host = store.data_mut();
-                let accepted = length.min(WASI_BYTES - host.stdout_bytes);
                 host.stdout_bytes += accepted;
                 host.stdout_truncated |= accepted < length;
-                Ok((Ok::<(), StreamError>(()),))
+                if accepted == 0 {
+                    return Ok((Ok::<(), StreamError>(()),));
+                }
+                let result = store
+                    .data()
+                    .call(Operation::Log {
+                        severity: Level::Info,
+                        message,
+                        fields: vec![Pair {
+                            name: "stream".into(),
+                            value: "stdout".into(),
+                        }],
+                    })
+                    .and_then(empty);
+                store.data().record(&result);
+                Ok((result.map_err(|_| StreamError::Closed),))
             },
         )?;
     }

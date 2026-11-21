@@ -1,14 +1,25 @@
 use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-pub struct NoBindings;
-impl Bindings for NoBindings {
-    fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-        panic!("WASI must not call platform bindings")
+/// Records the invocation's log lines; WASI reaches no other platform binding.
+#[derive(Default)]
+pub struct Captured(Mutex<Vec<String>>);
+impl Bindings for Captured {
+    fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
+        match operation {
+            Operation::Log { message, fields, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].name, "stream");
+                assert_eq!(fields[0].value, "stdout");
+                self.0.lock().unwrap().push(message);
+                Ok(Reply::Empty)
+            }
+            _ => panic!("WASI must not call other platform bindings"),
+        }
     }
 }
 fn host() -> Host {
-    Host::new(Context::default(), Arc::new(NoBindings))
+    Host::new(Context::default(), Arc::new(Captured::default()))
 }
 
 pub fn csprng_is_linked_narrowly_and_bounded() {
@@ -57,7 +68,9 @@ pub fn stdout_is_bounded_and_invocation_local() {
     let source = include_str!("../fixtures/go/wasi-stdout.wat");
     let invoke = |length, blocking, barrier: Option<&std::sync::Barrier>| {
         let engine = wasmtime::Engine::default();
-        let (mut store, instance) = host::instantiate(&engine, source, host()).unwrap();
+        let captured = Arc::new(Captured::default());
+        let host = Host::new(Context::default(), captured.clone());
+        let (mut store, instance) = host::instantiate(&engine, source, host).unwrap();
         let write = instance
             .get_typed_func::<(u32, u32), (u64,)>(&mut store, "write")
             .unwrap();
@@ -68,17 +81,22 @@ pub fn stdout_is_bounded_and_invocation_local() {
         if let Some(barrier) = barrier {
             barrier.wait();
         }
-        (remaining, store.data().stdout_summary())
+        // The fixture writes zero bytes, so each captured byte is one NUL character.
+        let lines = captured.0.lock().unwrap().clone();
+        assert!(lines.iter().all(|line| line.bytes().all(|byte| byte == 0)));
+        let logged: usize = lines.iter().map(String::len).sum();
+        (remaining, store.data().stdout_summary(), logged)
     };
-    assert_eq!(invoke(4, 0, None), (65532, (4, false)));
-    assert_eq!(invoke(65536, 0, None), (0, (65536, false)));
-    assert_eq!(invoke(65537, 1, None), (0, (65536, true)));
+    // Captured in the invocation's log record, up to the bound, then truncated.
+    assert_eq!(invoke(4, 0, None), (65532, (4, false), 4));
+    assert_eq!(invoke(65536, 0, None), (0, (65536, false), 65536));
+    assert_eq!(invoke(65537, 1, None), (0, (65536, true), 65536));
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         let a = scope.spawn(|| invoke(123, 0, Some(&barrier)));
         let b = scope.spawn(|| invoke(456, 1, Some(&barrier)));
-        assert_eq!(a.join().unwrap(), (65413, (123, false)));
-        assert_eq!(b.join().unwrap(), (65080, (456, false)));
+        assert_eq!(a.join().unwrap(), (65413, (123, false), 123));
+        assert_eq!(b.join().unwrap(), (65080, (456, false), 456));
     });
 }
 

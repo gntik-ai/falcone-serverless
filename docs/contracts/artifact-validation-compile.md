@@ -215,10 +215,10 @@ get-random-u64 and get-random-bytes, using the OS CSPRNG through pinned ring;
 byte requests over 65,536 trap. Stdout exposes get-stdout and output-stream
 write, check-write, blocking-write-and-flush, flush, blocking-flush and drop.
 The io error resource is a type only and the host never creates one.
-The invocation-local sink discards bytes and records only a byte count (at most
-65,536) and truncation flag on Host, preserved in the returned Execution as
-stdout_bytes and stdout_truncated even on failure; there is no existing stdout
-record or new log pipeline. Excess bytes are dropped with successful writes; check-write reports
+The invocation-local sink sends accepted bytes (at most 65,536) to the invocation's
+existing log record through the guest-logging binding, and records the byte count and
+truncation flag on Host, preserved in the returned Execution as stdout_bytes and
+stdout_truncated even on failure; there is no new log pipeline. Excess bytes are dropped with successful writes; check-write reports
 at most remaining capacity. Concurrent invocations have separate metadata.
 No wasmtime_wasi or broad linker registration is used. Other functions fail
 instantiation, and all other WASI interfaces fail undeclared_import, including

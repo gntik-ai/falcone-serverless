@@ -33,10 +33,12 @@ Randomness comes from the operating system CSPRNG through pinned ring SystemRand
 `host_to_guest_bytes`, whichever is lower, and `get-random-u64` traps when that limit
 is below 8 bytes; both set the buffer-limit flag. Stdout is output-only, capped at 65,536
 bytes per invocation. Additional bytes are silently dropped and set a truncation
-flag; `check-write` reports no more than remaining capacity. The worker has no
-existing stdout byte record: bytes are discarded, with only the accepted byte count
-and truncation flag recorded on the invocation's Host (`stdout_summary`). There is
-no file, network path or new logging pipeline. Hosts never share this metadata.
+flag; `check-write` reports no more than remaining capacity. Accepted bytes go to
+the invocation's existing log record through the same binding as guest logging
+(one `info` line per write, field `stream=stdout`, decoded as lossy UTF-8); the
+accepted byte count and truncation flag are also kept on the invocation's Host
+(`stdout_summary`). There is no file, network path or new logging pipeline. Hosts
+never share this output or metadata.
 `host::execute` preserves the count and truncation flag in its returned Execution
 (`stdout_bytes`, `stdout_truncated`), including when the handler traps.
 The memory count remains `memories(1)`; fuel, host-call and time limits still apply.

@@ -10,8 +10,10 @@ fn completed_execution_retains_bounded_stdout_metadata() {
     use std::sync::Arc;
     struct Empty;
     impl host::Bindings for Empty {
-        fn call(&self, _: &Context, _: host::Operation) -> Result<host::Reply, host::HostError> {
-            panic!("stdout must not call platform bindings")
+        fn call(&self, _: &Context, op: host::Operation) -> Result<host::Reply, host::HostError> {
+            // Stdout reaches the platform only as the invocation's log record.
+            assert!(matches!(op, host::Operation::Log { .. }), "{op:?}");
+            Ok(host::Reply::Empty)
         }
     }
     let source = include_str!("fixtures/go/wasi-stdout.wat");
