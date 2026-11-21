@@ -101,6 +101,11 @@ pub enum Operation {
     ProgressCheckpoint {
         key: String,
     },
+    /// One line of the guest's WASI stdout for the invocation's log record. A binding
+    /// that does not keep the line returns an error, so the host flags truncation.
+    Stdout {
+        text: String,
+    },
 }
 
 pub enum Reply {

@@ -217,16 +217,20 @@ impl Logs {
     }
 
     /// Adds one log line, redacted. Past [`MAX_LINES`] lines are dropped; past the scan
-    /// budget the execution fails closed.
-    pub fn push(&mut self, text: &str) {
+    /// budget the execution fails closed. Returns whether the line was kept.
+    pub fn push(&mut self, text: &str) -> bool {
         if self.failed_closed || self.lines.len() >= MAX_LINES {
-            return;
+            return false;
         }
         match self.redactor.line(text, &mut self.budget) {
-            Some(line) => self.lines.push(line),
+            Some(line) => {
+                self.lines.push(line);
+                true
+            }
             None => {
                 self.failed_closed = true;
                 self.lines.clear();
+                false
             }
         }
     }

@@ -35,12 +35,15 @@ is below 8 bytes; both set the buffer-limit flag. Stdout is output-only, capped 
 bytes per invocation. Additional bytes are silently dropped and set a truncation
 flag. Each write is also bounded by the configured `guest_to_host_bytes`, before any
 byte is copied, and `check-write` reports no more than either bound. Accepted bytes
-are buffered on the invocation's Host and, when the invocation ends (including on a
-trap), handed once to its existing log record through the guest-logging binding:
-lossy UTF-8, in `info` lines of at most 4,096 characters with field `stream=stdout`,
-after the guest's own log lines, so the record keeps each line whole (at most 16
-lines). The record's own line count and redaction still apply. A refused line sets
-the truncation flag. The accepted byte count and truncation flag are kept on Host
+are buffered on the invocation's Host and leave as `Operation::Stdout` lines of at
+most 4,096 bytes (never splitting a UTF-8 sequence), through the supervised host-call
+path, so the call deadline, the execution deadline and cancellation apply: complete
+lines while the guest runs, the rest when the invocation ends (including on a trap)
+and before its outcome is classified. The platform records each as an `info` line
+with field `stream=stdout` in the invocation's existing log record, which keeps it
+whole (at most 16 lines); its line count and redaction still apply. A line the record
+does not keep, or that times out or is cancelled, sets the truncation flag and drops
+the rest. Guest logging is unchanged. The accepted byte count and truncation flag are kept on Host
 (`stdout_summary`). There is no file, network path or new logging pipeline. Hosts
 never share this output or metadata.
 `host::execute` preserves the count and truncation flag in its returned Execution

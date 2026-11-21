@@ -157,6 +157,6 @@ at 0.2.0. Random is OS CSPRNG-backed and traps above 65,536 requested bytes or a
 configured `host_to_guest_bytes`, whichever is lower.
 Stdout buffers accepted bytes, capped at 65,536 per invocation and at
 `guest_to_host_bytes` per write, and hands them to the invocation's existing log record
-through the guest-logging binding when it ends, in lines of at most 4,096 characters;
-it keeps an invocation-local count and truncation flag; check-write reports remaining space. No stdout bytes leave
+in lines of at most 4,096 bytes through the supervised host-call path; a line the
+record does not keep sets the truncation flag; it keeps an invocation-local count; check-write reports remaining space. No stdout bytes leave
 the host through a file, socket or new logging pipeline. No other WASI is linked.

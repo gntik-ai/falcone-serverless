@@ -21,7 +21,7 @@ pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
 use crate::limits::{Field, Limits};
 // Separate per-invocation bounds for the narrow WASI random and stdout APIs.
 const WASI_BYTES: usize = 65_536;
-/// The most characters of one stdout log line. With its `info` prefix and
+/// The most bytes, and so characters, of one stdout log line. With its `info` prefix and
 /// `stream=stdout` field it stays well inside the record's 8,192-character line.
 pub const STDOUT_LINE_CHARS: usize = 4096;
 // Tables allocate host memory separately from guest linear memory. Bound each
@@ -353,35 +353,43 @@ impl Host {
         (self.stdout_bytes, self.stdout_truncated)
     }
 
-    /// Hands the buffered stdout to the invocation's existing log record, once, in lines
-    /// of at most [`STDOUT_LINE_CHARS`] so the record keeps each one whole. The binding is
-    /// called directly: the guest has stopped, so no deadline or cancellation applies.
-    /// Returns false when the record refused any line.
-    pub fn flush_stdout(&self) -> bool {
+    /// Takes the next complete stdout line, or with `all` whatever is left. A line is at
+    /// most [`STDOUT_LINE_CHARS`] bytes and never splits a UTF-8 sequence.
+    fn take_stdout_line(&self, all: bool) -> Option<Vec<u8>> {
         let mut stdout = self
             .stdout
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let buffered = std::mem::take(&mut *stdout);
-        drop(stdout);
-        let text = String::from_utf8_lossy(&buffered);
-        let chars: Vec<char> = text.chars().collect();
-        let mut delivered = true;
-        for line in chars.chunks(STDOUT_LINE_CHARS) {
-            let result = self.bindings.call(
-                &self.context,
-                Operation::Log {
-                    severity: Level::Info,
-                    message: line.iter().collect(),
-                    fields: vec![Pair {
-                        name: "stream".into(),
-                        value: "stdout".into(),
-                    }],
-                },
-            );
-            delivered &= result.and_then(empty).is_ok();
+        if stdout.is_empty() || (!all && stdout.len() < STDOUT_LINE_CHARS) {
+            return None;
         }
-        delivered
+        let mut cut = stdout.len().min(STDOUT_LINE_CHARS);
+        while cut < stdout.len() && cut + 3 > STDOUT_LINE_CHARS && stdout[cut] & 0xc0 == 0x80 {
+            cut -= 1;
+        }
+        Some(stdout.drain(..cut).collect())
+    }
+
+    /// Hands buffered stdout to the invocation's log record as [`Operation::Stdout`] lines,
+    /// through the supervised host-call path: the call deadline, the execution deadline and
+    /// cancellation all apply. With `all` false only complete lines leave. Returns false,
+    /// and drops what is left, when the record did not keep a line.
+    pub fn flush_stdout(&self, all: bool) -> bool {
+        while let Some(line) = self.take_stdout_line(all) {
+            let text = String::from_utf8_lossy(&line).into_owned();
+            if self
+                .call(Operation::Stdout { text })
+                .and_then(empty)
+                .is_err()
+            {
+                self.stdout
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+                return false;
+            }
+        }
+        true
     }
 
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
@@ -763,6 +771,10 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     .extend_from_slice(&kept);
                 host.stdout_bytes += accepted;
                 host.stdout_truncated |= accepted < length;
+                // Complete lines leave while the guest runs, under its deadline.
+                if !store.data().flush_stdout(false) {
+                    store.data_mut().stdout_truncated = true;
+                }
                 Ok((Ok::<(), StreamError>(()),))
             },
         )?;

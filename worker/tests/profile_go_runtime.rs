@@ -198,6 +198,7 @@ fn built_profile_components() {
     // The same security criteria run locally and in the restricted pod.
     wasi_cases::csprng_is_linked_narrowly_and_bounded();
     wasi_cases::stdout_is_bounded_and_invocation_local();
+    wasi_cases::stdout_flush_is_supervised_and_reports_refusal();
     wasi_cases::one_memory_and_only_declared_functions_are_linked();
     println!(
         "Go runtime checks passed; qualification remains UNVERIFIED until artifact ID and SHA256 are recorded on #53"

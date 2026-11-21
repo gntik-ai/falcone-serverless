@@ -217,8 +217,9 @@ write, check-write, blocking-write-and-flush, flush, blocking-flush and drop.
 The io error resource is a type only and the host never creates one.
 The invocation-local sink buffers accepted bytes (at most 65,536, and at most
 guest_to_host_bytes per write) and hands them to the invocation's existing log record
-through the guest-logging binding when the invocation ends, in lines of at most 4,096
-characters, and records the byte count and
+as Operation::Stdout lines of at most 4,096 bytes through the supervised host-call path
+(complete lines while the guest runs, the rest before the outcome is classified; a line
+not kept sets the truncation flag), and records the byte count and
 truncation flag on Host, preserved in the returned Execution as stdout_bytes and
 stdout_truncated even on failure; there is no new log pipeline. Excess bytes are dropped with successful writes; check-write reports
 at most remaining capacity. Concurrent invocations have separate metadata.

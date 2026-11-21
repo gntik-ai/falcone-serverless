@@ -8,6 +8,10 @@ fn csprng_is_linked_narrowly_and_bounded() {
 fn stdout_is_bounded_and_invocation_local() {
     cases::stdout_is_bounded_and_invocation_local();
 }
+#[test]
+fn stdout_flush_is_supervised_and_reports_refusal() {
+    cases::stdout_flush_is_supervised_and_reports_refusal();
+}
 
 #[test]
 fn one_memory_and_only_declared_functions_are_linked() {

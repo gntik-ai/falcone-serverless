@@ -179,6 +179,10 @@ fn finish(
     result: Result<Vec<u8>, ExecuteError>,
     trap: Option<&wasmtime::Error>,
 ) -> Execution {
+    // Every execution ends here, so the rest of stdout leaves even on a trap. It goes
+    // through the supervised path before classification, so a deadline or cancellation
+    // reached while flushing is still classified.
+    let delivered = host.flush_stdout(true);
     let failed = wasmtime::Error::msg("handler_failed");
     let cancelled = host
         .cancellation()
@@ -209,8 +213,6 @@ fn finish(
         InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
-    // Every execution ends here, so buffered stdout reaches the log record even on a trap.
-    let delivered = host.flush_stdout();
     let (stdout_bytes, truncated) = host.stdout_summary();
     let stdout_truncated = truncated || !delivered;
     Execution {

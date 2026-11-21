@@ -139,6 +139,20 @@ impl Bindings for Capturing {
                     .push(&line);
                 Ok(Reply::Empty)
             }
+            // Stdout lines join the same record; a dropped line is reported, so the host
+            // flags truncation. Guest log calls keep their existing behaviour.
+            Operation::Stdout { text } => {
+                let kept = self
+                    .logs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(&format!("info {text} stream=stdout"));
+                if kept {
+                    Ok(Reply::Empty)
+                } else {
+                    Err(HostError::LimitExceeded)
+                }
+            }
             other => self.inner.call(context, other),
         }
     }
@@ -162,5 +176,61 @@ fn level(level: Level) -> &'static str {
         Level::Info => "info",
         Level::Warn => "warn",
         Level::Error => "error",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::redact::{Logs, MAX_LINES, Redactor};
+    use std::sync::atomic::AtomicBool;
+    use std::time::{Duration, Instant};
+
+    struct Unused;
+    impl Bindings for Unused {
+        fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
+            panic!("logging and stdout never reach the platform's bindings")
+        }
+    }
+
+    fn capturing() -> (Capturing, Arc<Mutex<Logs>>) {
+        let until = Instant::now() + Duration::from_secs(600);
+        let redactor = Redactor::new(["not-in-output"], until, &AtomicBool::new(false));
+        let logs = Arc::new(Mutex::new(Logs::new(redactor)));
+        let capturing = Capturing {
+            inner: Arc::new(Unused),
+            logs: logs.clone(),
+        };
+        (capturing, logs)
+    }
+
+    #[test]
+    fn stdout_dropped_by_the_record_is_reported_and_guest_logging_is_unchanged() {
+        let context = Context::default();
+        let (capturing, logs) = capturing();
+        let stdout = |text: &str| Operation::Stdout { text: text.into() };
+        assert!(capturing.call(&context, stdout("hello")).is_ok());
+        for _ in 1..MAX_LINES {
+            let log = Operation::Log {
+                severity: Level::Info,
+                message: "guest".into(),
+                fields: Vec::new(),
+            };
+            assert!(capturing.call(&context, log).is_ok());
+        }
+        // The record is full: stdout is refused, a guest log call still succeeds.
+        assert!(matches!(
+            capturing.call(&context, stdout("lost")),
+            Err(HostError::LimitExceeded)
+        ));
+        let log = Operation::Log {
+            severity: Level::Info,
+            message: "guest".into(),
+            fields: Vec::new(),
+        };
+        assert!(capturing.call(&context, log).is_ok());
+        let lines = logs.lock().unwrap().finish();
+        assert_eq!(lines.len(), MAX_LINES);
+        assert_eq!(lines[0], "info hello stream=stdout");
     }
 }

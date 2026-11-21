@@ -6,23 +6,31 @@ mod executable;
 
 #[test]
 fn completed_execution_retains_bounded_stdout_metadata() {
-    use host::{Context, Host};
-    use std::sync::Arc;
-    struct Empty;
+    use host::{Context, Host, outcome::InvocationOutcome};
+    use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
+    /// Accepts stdout lines; with `cancel`, cancels the execution while the last is flushed.
+    struct Empty {
+        cancel: Option<Arc<AtomicBool>>,
+    }
     impl host::Bindings for Empty {
         fn call(&self, _: &Context, op: host::Operation) -> Result<host::Reply, host::HostError> {
-            // Stdout reaches the platform only as the invocation's log record.
-            assert!(matches!(op, host::Operation::Log { .. }), "{op:?}");
+            // Stdout reaches the platform only as lines for the invocation's log record.
+            assert!(matches!(op, host::Operation::Stdout { .. }), "{op:?}");
+            if let Some(cancel) = &self.cancel {
+                cancel.store(true, Ordering::Release);
+            }
             Ok(host::Reply::Empty)
         }
     }
     let source = include_str!("fixtures/go/wasi-stdout.wat");
     let (prefix, _) = source.rsplit_once("  (func (export \"write\")").unwrap();
     let compiler = cases::compiler();
-    for (length, trap, expected) in [
-        (4, false, (4, false)),
-        (65537, false, (65536, true)),
-        (65537, true, (65536, true)),
+    for (length, trap, cancel, expected) in [
+        (4, false, false, (4, false)),
+        (65537, false, false, (65536, true)),
+        (65537, true, false, (65536, true)),
+        // Cancellation reached while flushing is classified after the flush.
+        (4, false, true, (4, false)),
     ] {
         let source = format!(
             r#"{prefix}
@@ -51,14 +59,19 @@ fn completed_execution_retains_bounded_stdout_metadata() {
             failure = if trap { "unreachable" } else { "" }
         );
         let bytes = wat::parse_str(source).unwrap();
-        let execution = cases::prepare(
-            &compiler,
-            &bytes,
-            Host::new(Context::default(), Arc::new(Empty)),
-        )
-        .unwrap()
-        .call(b"");
-        assert_eq!(execution.result.is_err(), trap, "{execution:?}");
+        let flag = Arc::new(AtomicBool::new(false));
+        let binding = Empty {
+            cancel: cancel.then(|| flag.clone()),
+        };
+        let mut host = Host::new(Context::default(), Arc::new(binding));
+        host.set_cancellation(flag);
+        let execution = cases::prepare(&compiler, &bytes, host).unwrap().call(b"");
+        assert_eq!(execution.result.is_err(), trap || cancel, "{execution:?}");
+        assert_eq!(
+            execution.outcome == InvocationOutcome::Cancelled,
+            cancel,
+            "{execution:?}"
+        );
         assert_eq!(
             (execution.stdout_bytes, execution.stdout_truncated),
             expected

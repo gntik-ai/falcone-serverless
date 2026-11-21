@@ -1,25 +1,40 @@
 use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
 use falcone_serverless_worker::limits::Limits;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::time::{Duration, Instant};
 
-/// Records the invocation's log lines; WASI reaches no other platform binding.
+/// Records the invocation's stdout lines; WASI reaches no other platform binding.
 #[derive(Default)]
-pub struct Captured(Mutex<Vec<String>>);
+pub struct Captured {
+    lines: Mutex<Vec<String>>,
+    /// Holds each line this long first, like a stalled log collector.
+    stall: Option<Duration>,
+    /// Refuses each line, like a full log collector.
+    refuse: bool,
+}
 impl Bindings for Captured {
     fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
-        match operation {
-            Operation::Log {
-                message, fields, ..
-            } => {
-                assert_eq!(fields.len(), 1);
-                assert_eq!(fields[0].name, "stream");
-                assert_eq!(fields[0].value, "stdout");
-                self.0.lock().unwrap().push(message);
-                Ok(Reply::Empty)
-            }
-            _ => panic!("WASI must not call other platform bindings"),
+        let Operation::Stdout { text } = operation else {
+            panic!("WASI must not call other platform bindings")
+        };
+        if let Some(stall) = self.stall {
+            std::thread::sleep(stall);
         }
+        if self.refuse {
+            return Err(HostError::LimitExceeded);
+        }
+        self.lines.lock().unwrap().push(text);
+        Ok(Reply::Empty)
     }
+}
+fn limits(guest_to_host: u64) -> Limits {
+    Limits::parse(&format!(
+        r#"{{"version":1,"compiler_cpu_seconds":120,
+        "compiler_memory_bytes":4294967296,"guest_memory_bytes":2097152,
+        "guest_to_host_bytes":{guest_to_host},"host_to_guest_bytes":1048576,
+        "guest_deadline_ms":1000,"host_call_deadline_ms":50,"termination_budget_ms":500}}"#
+    ))
+    .unwrap()
 }
 fn host() -> Host {
     Host::new(Context::default(), Arc::new(Captured::default()))
@@ -72,14 +87,7 @@ pub fn stdout_is_bounded_and_invocation_local() {
     let invoke = |length, blocking, guest_to_host: u64, barrier: Option<&std::sync::Barrier>| {
         let engine = wasmtime::Engine::default();
         let captured = Arc::new(Captured::default());
-        let limits = Limits::parse(&format!(
-            r#"{{"version":1,"compiler_cpu_seconds":120,
-            "compiler_memory_bytes":4294967296,"guest_memory_bytes":2097152,
-            "guest_to_host_bytes":{guest_to_host},"host_to_guest_bytes":1048576,
-            "guest_deadline_ms":1000,"host_call_deadline_ms":50,"termination_budget_ms":500}}"#
-        ))
-        .unwrap();
-        let host = Host::with_limits(Context::default(), captured.clone(), limits);
+        let host = Host::with_limits(Context::default(), captured.clone(), limits(guest_to_host));
         let (mut store, instance) = host::instantiate(&engine, source, host).unwrap();
         let write = instance
             .get_typed_func::<(u32, u32), (u64,)>(&mut store, "write")
@@ -91,11 +99,13 @@ pub fn stdout_is_bounded_and_invocation_local() {
         if let Some(barrier) = barrier {
             barrier.wait();
         }
-        // Buffered output reaches the log record when the invocation ends, once.
-        assert!(captured.0.lock().unwrap().is_empty());
-        assert!(store.data().flush_stdout());
-        assert!(store.data().flush_stdout());
-        let lines = captured.0.lock().unwrap().clone();
+        // Complete lines leave while the guest runs; the rest when the invocation ends.
+        let (accepted, _) = store.data().stdout_summary();
+        let early = captured.lines.lock().unwrap().len();
+        assert_eq!(early, accepted / host::STDOUT_LINE_CHARS);
+        assert!(store.data().flush_stdout(true));
+        assert!(store.data().flush_stdout(true));
+        let lines = captured.lines.lock().unwrap().clone();
         // The fixture writes zero bytes, so each captured byte is one NUL character.
         assert!(lines.iter().all(|line| line.bytes().all(|byte| byte == 0)));
         assert!(
@@ -120,6 +130,45 @@ pub fn stdout_is_bounded_and_invocation_local() {
         assert_eq!(a.join().unwrap(), (65413, (123, false), 123));
         assert_eq!(b.join().unwrap(), (65080, (456, false), 456));
     });
+}
+
+pub fn stdout_flush_is_supervised_and_reports_refusal() {
+    let source = include_str!("../fixtures/go/wasi-stdout.wat");
+    let run = |captured: Captured, cancel: bool| {
+        let engine = wasmtime::Engine::default();
+        let captured = Arc::new(captured);
+        let host = Host::with_limits(Context::default(), captured.clone(), limits(1048576));
+        let (mut store, instance) = host::instantiate(&engine, source, host).unwrap();
+        let write = instance
+            .get_typed_func::<(u32, u32), (u64,)>(&mut store, "write")
+            .unwrap();
+        write.call(&mut store, (4, 0)).unwrap();
+        if cancel {
+            store.data().cancellation().store(true, Ordering::Release);
+        }
+        let started = Instant::now();
+        let delivered = store.data().flush_stdout(true);
+        let elapsed = started.elapsed();
+        // Nothing is retried after a failed line.
+        assert!(store.data().flush_stdout(true));
+        (delivered, elapsed, captured.lines.lock().unwrap().len())
+    };
+    // A stalled collector is abandoned at the 50 ms host-call deadline.
+    let stalled = Captured {
+        stall: Some(Duration::from_secs(5)),
+        ..Captured::default()
+    };
+    let (delivered, elapsed, lines) = run(stalled, false);
+    assert!(!delivered && lines == 0, "{delivered} {lines}");
+    assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    // Cancellation stops the flush before the collector is reached.
+    assert!(!run(Captured::default(), true).0);
+    // A collector that drops the line is reported, so truncation is flagged.
+    let refusing = Captured {
+        refuse: true,
+        ..Captured::default()
+    };
+    assert!(!run(refusing, false).0);
 }
 
 pub fn one_memory_and_only_declared_functions_are_linked() {
