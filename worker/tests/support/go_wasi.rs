@@ -1,7 +1,7 @@
 use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
 use std::sync::Arc;
 
-struct NoBindings;
+pub struct NoBindings;
 impl Bindings for NoBindings {
     fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
         panic!("WASI must not call platform bindings")

@@ -4,7 +4,7 @@ mod wasi_cases;
 use falcone_serverless_worker::{
     artifact::{self, supervisor::CompileLimits},
     cache,
-    host::{self, Bindings, Context, Host, HostError, Operation, Reply},
+    host::{self, Context, Host},
 };
 use std::{
     fs,
@@ -12,14 +12,8 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
+use wasi_cases::NoBindings;
 use wasmparser::{Parser, Payload};
-
-struct NoBindings;
-impl Bindings for NoBindings {
-    fn call(&self, _: &Context, _: Operation) -> Result<Reply, HostError> {
-        panic!("pure Go workload called a platform binding")
-    }
-}
 struct Scratch(PathBuf);
 impl Drop for Scratch {
     fn drop(&mut self) {

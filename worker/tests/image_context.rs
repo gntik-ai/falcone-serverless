@@ -12,7 +12,6 @@ fn copy(from: &Path, to: &Path) {
     }
 }
 #[test]
-#[ignore = "operator-run release build of the Containerfile source context"]
 fn release_worker_uses_only_image_context() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let scratch = std::env::temp_dir().join(format!("go-image-context-{}", std::process::id()));

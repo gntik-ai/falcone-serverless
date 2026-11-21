@@ -3,7 +3,6 @@
 //! literals are opaque, so tenant text is never included in diagnostics.
 use std::collections::BTreeSet;
 
-pub const VERSIONS: &str = include_str!("../qualification/go_versions.toml");
 const UNSUPPORTED: &str = "WASM-UNSUPPORTED-API";
 
 pub struct TreeFile<'a> {

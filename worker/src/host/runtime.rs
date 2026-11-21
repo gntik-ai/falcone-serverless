@@ -19,6 +19,8 @@ use wasmtime::{Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits, Sto
 
 pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
 use crate::limits::{Field, Limits};
+// Separate per-invocation bounds for the narrow WASI random and stdout APIs.
+const WASI_BYTES: usize = 65_536;
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -712,7 +714,7 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 // tenant bytes; record only the bounded accepted count and truncation.
                 let length = bytes.as_le_slice(&store).len();
                 let host = store.data_mut();
-                let accepted = length.min(65_536 - host.stdout_bytes);
+                let accepted = length.min(WASI_BYTES - host.stdout_bytes);
                 host.stdout_bytes += accepted;
                 host.stdout_truncated |= accepted < length;
                 Ok((Ok::<(), StreamError>(()),))
@@ -724,7 +726,7 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
             store.data().enter()?;
             let result = if handle.rep() == 0 {
-                Ok((65_536 - store.data().stdout_bytes) as u64)
+                Ok((WASI_BYTES - store.data().stdout_bytes) as u64)
             } else {
                 Err(StreamError::Closed)
             };
@@ -777,7 +779,7 @@ fn link_random(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         "get-random-bytes",
         |store: StoreContextMut<'_, Host>, (len,): (u64,)| {
             store.data().enter()?;
-            if len > 65_536 {
+            if len > WASI_BYTES as u64 {
                 return Err(wasmtime::Error::msg("random byte limit exceeded"));
             }
             let mut bytes = vec![0; len as usize];

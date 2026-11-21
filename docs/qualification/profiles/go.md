@@ -17,6 +17,12 @@ output files. They export `falcone:host/handler@0.2.0`. Binding input and output
 TinyGo's runtime allocator; bindings export no `cabi_realloc`. The trusted build
 counts exactly one such core export and exactly one linear memory per component.
 No wasi-virt, preview1 adapter, runtime compilation or tenant precompiled input is used.
+Componentization uses the qualification-only `wit/function.wit` world. It includes
+the unchanged `falcone:host/function@0.2.0` world and exactly the four host WASI
+interfaces below. Its local WASI definitions describe only the supported output
+and random functions; they add no polling or input interfaces. The build stages
+`worker/wit/host.wit` as a dependency, and a default static test resolves this
+world and compares its imports with both manifest lists.
 
 The manifest's `wit.interfaces` are the Falcone capability ceiling; verified grants
 still apply. Host WASI is separate from matrix `allowedInterfaces`, which stays
@@ -29,6 +35,8 @@ flag; `check-write` reports no more than remaining capacity. The worker has no
 existing stdout byte record: bytes are discarded, with only the accepted byte count
 and truncation flag recorded on the invocation's Host (`stdout_summary`). There is
 no file, network path or new logging pipeline. Hosts never share this metadata.
+This store-local summary has the Host's lifetime: `host::execute` consumes the Host,
+and its returned Execution does not contain stdout metadata.
 The memory count remains `memories(1)`; fuel, host-call and time limits still apply.
 
 The only stdout functions are `get-stdout`, output-stream `write`, `check-write`,
@@ -39,22 +47,27 @@ streams are unavailable. Fixtures that import any of them fail closed.
 
 The static `compat_go::check_tree` seam checks all source files without executing
 any guest. It rejects cgo/import C, process APIs (os/exec and syscall), go:generate
-anywhere, GPU packages, uncatalogued modules, go:linkname and packages outside the
-stdlib subset. Reflection supports only TypeOf, ValueOf and DeepEqual as package
+in every comment token, GPU packages, uncatalogued modules, go:linkname and packages
+outside the stdlib subset. Reflection supports only TypeOf, ValueOf and DeepEqual as package
 entry points; dynamic construction (including MakeFunc) is unsupported, including
 aliased and dot imports. It is a qualification diagnostic, not a Go parser or sandbox.
 Each diagnostic names a fixed construct plus file and line; no tenant source is echoed.
 No negative fixture is built or executed.
+Raw-string contents are opaque to this source checker. Go's separate `go generate`
+line scanner can interpret a column-one directive inside a raw string; the trusted
+build never invokes `go generate`. Directive prefix matching is conservative, so
+`//go:generated` is also rejected as an install hook.
 
-Rerun static checks: `cargo test --workspace --locked`.
+Rerun default checks: `cargo test --workspace --locked`. This also builds the release
+worker from only the Containerfile inputs, without a container engine or guest tools.
 Operator build: set `FS_TRUSTED_COMPILER_IMAGE=1`, `FS_TOOLCHAIN_CACHE` to the offline
 cache, `FS_PROFILE_COMPONENTS` to a new output directory and `TMPDIR` to scratch,
-then run `bash worker/qualification/go/build-profile.sh`. The trusted image installs
-the verified archives at `tinygo/`, `go/`, and `bin/wasm-tools` in that cache. It
-supplies their extracted binaries; this script neither downloads nor installs tools.
-The script checks the archive digests and installed versions, probes its exact TinyGo
+then run `bash worker/qualification/go/build-profile.sh`. The trusted image supplies
+the pinned archives in that cache. The script checks each digest, extracts that same
+archive into invocation scratch, and executes only those extracted tools. Separate
+preinstalled binaries are ignored. It checks their versions and probes its exact TinyGo
 options in a scratch module (`module probe`, `go 1.26`), and builds every fixture.
-The cached wasm-tools is first on PATH for TinyGo componentization. It validates
+The verified wasm-tools is first on PATH for TinyGo componentization. It validates
 and lists imports and writes SHA256SUMS with a relocatable runtime test binary.
 Run `cargo test --locked -p falcone-serverless-worker --test profile_go_runtime -- --ignored --nocapture`
 for the trusted-image tests. Without FS_TOOLCHAIN_CACHE these report SKIPPED.

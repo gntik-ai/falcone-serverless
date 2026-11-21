@@ -9,6 +9,39 @@ fn manifest() -> toml::Value {
     )
     .unwrap()
 }
+
+#[test]
+fn componentization_world_declares_exactly_the_manifest_imports() {
+    use std::collections::BTreeSet;
+    use wit_parser::WorldItem;
+    let profile = root().join("qualification/profiles/go");
+    let script = fs::read_to_string(root().join("qualification/go/build-profile.sh")).unwrap();
+    assert!(script.contains("-wit-package \"$stage/wit\" -wit-world function"));
+    let mut resolve = wit_parser::Resolve::default();
+    resolve.push_path(root().join("wit/host.wit")).unwrap();
+    let (package, _) = resolve.push_path(profile.join("wit")).unwrap();
+    let world = &resolve.worlds[resolve.packages[package].worlds["function"]];
+    let name = |item: &WorldItem| match item {
+        WorldItem::Interface { id, .. } => resolve.id_of(*id).unwrap(),
+        _ => panic!("world must use versioned interfaces"),
+    };
+    let m = manifest();
+    let expected = m["wit"]["interfaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(m["host_wasi"]["interfaces"].as_array().unwrap())
+        .map(|name| name.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        world.imports.values().map(name).collect::<BTreeSet<_>>(),
+        expected
+    );
+    assert_eq!(
+        world.exports.values().map(name).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["falcone:host/handler@0.2.0".into()])
+    );
+}
 const PINS: [(&str, &str, &str, &str); 3] = [
     (
         "tinygo",
@@ -350,4 +383,20 @@ fn trusted_build_fails_closed_before_running_unpinned_tools() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("offline toolchain cache required"));
+}
+
+#[test]
+fn verified_archives_supply_tools_and_option_probe_has_a_module() {
+    let output = std::process::Command::new("python3")
+        .arg(root().join("tests/support/go_toolchain_probe.py"))
+        .arg(root().parent().unwrap())
+        .env("TMPDIR", std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

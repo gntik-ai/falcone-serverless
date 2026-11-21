@@ -9,34 +9,47 @@ root=$(cd "$(dirname "$0")/../../.." && pwd)
 cd "$root"
 pins=worker/src/qualification/go_versions.toml
 profile="$root/worker/qualification/profiles/go"
-python3 - "$FS_TOOLCHAIN_CACHE" "$pins" <<'PY'
-import hashlib, pathlib, sys, tomllib
+[[ ! -e "$FS_PROFILE_COMPONENTS" ]] || { echo 'output directory already exists' >&2; exit 1; }
+stage=$(mktemp -d "$TMPDIR/profile-go.XXXXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+python3 - "$FS_TOOLCHAIN_CACHE" "$pins" "$stage/tools" <<'PY'
+import hashlib, pathlib, shutil, sys, tarfile, tomllib
 cache = pathlib.Path(sys.argv[1])
 pins = tomllib.loads(pathlib.Path(sys.argv[2]).read_text())
+tools = pathlib.Path(sys.argv[3])
 for key in ('tinygo', 'go', 'wasm_tools'):
     pin = pins[key]
     with (cache / pin['archive']).open('rb') as archive:
         digest = hashlib.file_digest(archive, 'sha256').hexdigest()
-    if digest != pin['sha256']:
-        raise SystemExit('toolchain archive sha256 mismatch: ' + key)
+        if digest != pin['sha256']:
+            raise SystemExit('toolchain archive sha256 mismatch: ' + key)
+        # Extract the very same verified file, never a separately installed tree.
+        archive.seek(0)
+        with tarfile.open(fileobj=archive, mode='r:gz') as contents:
+            contents.extractall(tools / key, filter='data')
+componentizers = [p for p in (tools / 'wasm_tools').rglob('wasm-tools') if p.is_file()]
+if len(componentizers) != 1:
+    raise SystemExit('missing unique wasm-tools executable in verified archive')
+(tools / 'bin').mkdir()
+shutil.copy2(componentizers[0], tools / 'bin/wasm-tools')
 PY
-# These are the extracted, preinstalled copies supplied by the trusted image.
-# PATH puts the cached componentizer ahead of any host wasm-tools used by TinyGo.
-export PATH="$FS_TOOLCHAIN_CACHE/bin:$FS_TOOLCHAIN_CACHE/go/bin:$FS_TOOLCHAIN_CACHE/tinygo/bin:$PATH"
-export GOROOT="$FS_TOOLCHAIN_CACHE/go"
-export TINYGOROOT="$FS_TOOLCHAIN_CACHE/tinygo"
+# Every executed tool comes from a verified archive in this invocation's scratch.
+# PATH puts that componentizer ahead of any host wasm-tools used by TinyGo.
+export GOROOT="$stage/tools/go/go"
+export TINYGOROOT="$stage/tools/tinygo/tinygo"
+export PATH="$stage/tools/bin:$GOROOT/bin:$TINYGOROOT/bin:$PATH"
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
-[[ $("$FS_TOOLCHAIN_CACHE/bin/wasm-tools" --version) == 'wasm-tools 1.258.3' ]] || { echo 'wasm-tools version mismatch' >&2; exit 1; }
-[[ $("$FS_TOOLCHAIN_CACHE/go/bin/go" version) == 'go version go1.26.11 linux/amd64' ]] || { echo 'Go version mismatch' >&2; exit 1; }
-[[ $("$FS_TOOLCHAIN_CACHE/tinygo/bin/tinygo" version) == 'tinygo version 0.44.0 '* ]] || { echo 'TinyGo version mismatch' >&2; exit 1; }
-[[ ! -e "$FS_PROFILE_COMPONENTS" ]] || { echo 'output directory already exists' >&2; exit 1; }
-stage=$(mktemp -d "$TMPDIR/profile-go.XXXXXXXX")
-trap 'rm -rf -- "$stage"' EXIT
+[[ $("$stage/tools/bin/wasm-tools" --version) == 'wasm-tools 1.258.3' ]] || { echo 'wasm-tools version mismatch' >&2; exit 1; }
+[[ $("$GOROOT/bin/go" version) == 'go version go1.26.11 linux/amd64' ]] || { echo 'Go version mismatch' >&2; exit 1; }
+[[ $("$TINYGOROOT/bin/tinygo" version) == 'tinygo version 0.44.0 '* ]] || { echo 'TinyGo version mismatch' >&2; exit 1; }
 export GOCACHE="$stage/go-cache" GOPATH="$stage/gopath"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$TMPDIR/profile-cargo}"
-tinygo="$FS_TOOLCHAIN_CACHE/tinygo/bin/tinygo"
-wasm_tools="$FS_TOOLCHAIN_CACHE/bin/wasm-tools"
-options=(-target=wasip2 -buildmode=c-shared -wit-package "$root/worker/wit/host.wit" -wit-world function)
+tinygo="$TINYGOROOT/bin/tinygo"
+wasm_tools="$stage/tools/bin/wasm-tools"
+cp -r "$profile/wit" "$stage/wit"
+mkdir "$stage/wit/deps/falcone-host"
+cp "$root/worker/wit/host.wit" "$stage/wit/deps/falcone-host/host.wit"
+options=(-target=wasip2 -buildmode=c-shared -wit-package "$stage/wit" -wit-world function)
 
 # A missing package is deliberately the operand, after option parsing. The loader
 # must run inside a module, or the probe says nothing about these options (#433).
