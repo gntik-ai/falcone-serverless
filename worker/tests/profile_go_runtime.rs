@@ -12,7 +12,7 @@ use std::{
     sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
-use wasi_cases::NoBindings;
+use wasi_cases::Captured;
 use wasmparser::{Parser, Payload};
 struct Scratch(PathBuf);
 impl Drop for Scratch {
@@ -166,7 +166,7 @@ fn built_profile_components() {
                 Some(&validated.imports),
             )
             .unwrap();
-        let mut host = Host::new(Context::default(), Arc::new(NoBindings));
+        let mut host = Host::new(Context::default(), Arc::new(Captured::default()));
         host.set_fuel(100_000_000);
         host.set_max_host_calls(10_000);
         host.set_until(Instant::now() + Duration::from_secs(30));
