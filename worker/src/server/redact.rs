@@ -254,6 +254,22 @@ mod tests {
         AtomicBool::new(false)
     }
 
+    #[test]
+    fn full_stdout_lines_are_kept_whole_by_the_record() {
+        // A 65,536-byte stdout flush is 16 lines of STDOUT_LINE_CHARS, as platform formats them.
+        let mut logs = Logs::new(Redactor::new(["not-in-output"], soon(), &live()));
+        let line = format!(
+            "info {} stream=stdout",
+            "x".repeat(crate::host::STDOUT_LINE_CHARS)
+        );
+        for _ in 0..65_536 / crate::host::STDOUT_LINE_CHARS {
+            logs.push(&line);
+        }
+        let kept = logs.finish();
+        assert_eq!(kept.len(), 16);
+        assert!(kept.iter().all(|kept| *kept == line));
+    }
+
     fn redact(secrets: &[&str], text: &str) -> String {
         let redactor = Redactor::new(secrets.iter().copied(), soon(), &live());
         redactor.line(text, &mut SCAN_BUDGET_CHARS.clone()).unwrap()

@@ -209,7 +209,10 @@ fn finish(
         InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
-    let (stdout_bytes, stdout_truncated) = host.stdout_summary();
+    // Every execution ends here, so buffered stdout reaches the log record even on a trap.
+    let delivered = host.flush_stdout();
+    let (stdout_bytes, truncated) = host.stdout_summary();
+    let stdout_truncated = truncated || !delivered;
     Execution {
         outcome,
         result,

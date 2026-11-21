@@ -6,7 +6,9 @@ pub mod net;
 pub mod outcome;
 pub use execute::{ExecuteError, Execution, Prepared, execute};
 mod runtime;
-pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, StreamError, WasiError, instantiate};
+pub use runtime::{
+    BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, STDOUT_LINE_CHARS, StreamError, WasiError, instantiate,
+};
 use wasmtime::component::{ComponentType, Lift, Lower};
 
 pub fn aggregate_within_limit(parts: &[usize]) -> bool {

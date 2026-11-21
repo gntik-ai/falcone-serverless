@@ -1,4 +1,5 @@
 use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
+use falcone_serverless_worker::limits::Limits;
 use std::sync::{Arc, Mutex};
 
 /// Records the invocation's log lines; WASI reaches no other platform binding.
@@ -68,10 +69,17 @@ pub fn csprng_is_linked_narrowly_and_bounded() {
 
 pub fn stdout_is_bounded_and_invocation_local() {
     let source = include_str!("../fixtures/go/wasi-stdout.wat");
-    let invoke = |length, blocking, barrier: Option<&std::sync::Barrier>| {
+    let invoke = |length, blocking, guest_to_host: u64, barrier: Option<&std::sync::Barrier>| {
         let engine = wasmtime::Engine::default();
         let captured = Arc::new(Captured::default());
-        let host = Host::new(Context::default(), captured.clone());
+        let limits = Limits::parse(&format!(
+            r#"{{"version":1,"compiler_cpu_seconds":120,
+            "compiler_memory_bytes":4294967296,"guest_memory_bytes":2097152,
+            "guest_to_host_bytes":{guest_to_host},"host_to_guest_bytes":1048576,
+            "guest_deadline_ms":1000,"host_call_deadline_ms":50,"termination_budget_ms":500}}"#
+        ))
+        .unwrap();
+        let host = Host::with_limits(Context::default(), captured.clone(), limits);
         let (mut store, instance) = host::instantiate(&engine, source, host).unwrap();
         let write = instance
             .get_typed_func::<(u32, u32), (u64,)>(&mut store, "write")
@@ -83,20 +91,32 @@ pub fn stdout_is_bounded_and_invocation_local() {
         if let Some(barrier) = barrier {
             barrier.wait();
         }
-        // The fixture writes zero bytes, so each captured byte is one NUL character.
+        // Buffered output reaches the log record when the invocation ends, once.
+        assert!(captured.0.lock().unwrap().is_empty());
+        assert!(store.data().flush_stdout());
+        assert!(store.data().flush_stdout());
         let lines = captured.0.lock().unwrap().clone();
+        // The fixture writes zero bytes, so each captured byte is one NUL character.
         assert!(lines.iter().all(|line| line.bytes().all(|byte| byte == 0)));
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.len() <= host::STDOUT_LINE_CHARS)
+        );
         let logged: usize = lines.iter().map(String::len).sum();
         (remaining, store.data().stdout_summary(), logged)
     };
-    // Captured in the invocation's log record, up to the bound, then truncated.
-    assert_eq!(invoke(4, 0, None), (65532, (4, false), 4));
-    assert_eq!(invoke(65536, 0, None), (0, (65536, false), 65536));
-    assert_eq!(invoke(65537, 1, None), (0, (65536, true), 65536));
+    // Kept in the invocation's log record up to the bound, then truncated.
+    assert_eq!(invoke(4, 0, 1048576, None), (65532, (4, false), 4));
+    assert_eq!(invoke(65536, 0, 1048576, None), (0, (65536, false), 65536));
+    assert_eq!(invoke(65537, 1, 1048576, None), (0, (65536, true), 65536));
+    // A narrowed guest-to-host limit bounds each write before any byte is copied.
+    assert_eq!(invoke(1024, 0, 128, None), (128, (128, true), 128));
+    assert_eq!(invoke(1024, 1, 128, None), (128, (128, true), 128));
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
-        let a = scope.spawn(|| invoke(123, 0, Some(&barrier)));
-        let b = scope.spawn(|| invoke(456, 1, Some(&barrier)));
+        let a = scope.spawn(|| invoke(123, 0, 1048576, Some(&barrier)));
+        let b = scope.spawn(|| invoke(456, 1, 1048576, Some(&barrier)));
         assert_eq!(a.join().unwrap(), (65413, (123, false), 123));
         assert_eq!(b.join().unwrap(), (65080, (456, false), 456));
     });

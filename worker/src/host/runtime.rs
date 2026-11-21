@@ -21,6 +21,9 @@ pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
 use crate::limits::{Field, Limits};
 // Separate per-invocation bounds for the narrow WASI random and stdout APIs.
 const WASI_BYTES: usize = 65_536;
+/// The most characters of one stdout log line. With its `info` prefix and
+/// `stream=stdout` field it stays well inside the record's 8,192-character line.
+pub const STDOUT_LINE_CHARS: usize = 4096;
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -340,12 +343,45 @@ pub struct Host {
     fuel_exhausted: AtomicBool,
     stdout_bytes: usize,
     stdout_truncated: bool,
+    /// The accepted stdout bytes, held until the invocation ends.
+    stdout: Mutex<Vec<u8>>,
 }
 
 impl Host {
-    /// Invocation-local stdout metadata. With no output record, bytes are discarded.
+    /// Invocation-local stdout metadata: accepted bytes and whether any were dropped.
     pub fn stdout_summary(&self) -> (usize, bool) {
         (self.stdout_bytes, self.stdout_truncated)
+    }
+
+    /// Hands the buffered stdout to the invocation's existing log record, once, in lines
+    /// of at most [`STDOUT_LINE_CHARS`] so the record keeps each one whole. The binding is
+    /// called directly: the guest has stopped, so no deadline or cancellation applies.
+    /// Returns false when the record refused any line.
+    pub fn flush_stdout(&self) -> bool {
+        let mut stdout = self
+            .stdout
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let buffered = std::mem::take(&mut *stdout);
+        drop(stdout);
+        let text = String::from_utf8_lossy(&buffered);
+        let chars: Vec<char> = text.chars().collect();
+        let mut delivered = true;
+        for line in chars.chunks(STDOUT_LINE_CHARS) {
+            let result = self.bindings.call(
+                &self.context,
+                Operation::Log {
+                    severity: Level::Info,
+                    message: line.iter().collect(),
+                    fields: vec![Pair {
+                        name: "stream".into(),
+                        value: "stdout".into(),
+                    }],
+                },
+            );
+            delivered &= result.and_then(empty).is_ok();
+        }
+        delivered
     }
 
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
@@ -382,6 +418,7 @@ impl Host {
             fuel_exhausted: AtomicBool::new(false),
             stdout_bytes: 0,
             stdout_truncated: false,
+            stdout: Mutex::new(Vec::new()),
         }
     }
 
@@ -710,31 +747,23 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                 if handle.rep() != 0 {
                     return Ok((Err::<(), _>(StreamError::Closed),));
                 }
-                // Only the accepted bytes are copied, into the invocation's existing log
-                // record through the same binding as guest logging; the rest are dropped.
+                // The configured guest-to-host limit bounds each write and the WASI cap
+                // the invocation. Only accepted bytes are copied; the rest are dropped.
                 let slice = bytes.as_le_slice(&store);
                 let length = slice.len();
-                let accepted = length.min(WASI_BYTES - store.data().stdout_bytes);
-                let message = String::from_utf8_lossy(&slice[..accepted]).into_owned();
+                let host = store.data();
+                let accepted = length
+                    .min(host.input_limit())
+                    .min(WASI_BYTES - host.stdout_bytes);
+                let kept = slice[..accepted].to_vec();
                 let host = store.data_mut();
+                host.stdout
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(&kept);
                 host.stdout_bytes += accepted;
                 host.stdout_truncated |= accepted < length;
-                if accepted == 0 {
-                    return Ok((Ok::<(), StreamError>(()),));
-                }
-                let result = store
-                    .data()
-                    .call(Operation::Log {
-                        severity: Level::Info,
-                        message,
-                        fields: vec![Pair {
-                            name: "stream".into(),
-                            value: "stdout".into(),
-                        }],
-                    })
-                    .and_then(empty);
-                store.data().record(&result);
-                Ok((result.map_err(|_| StreamError::Closed),))
+                Ok((Ok::<(), StreamError>(()),))
             },
         )?;
     }
@@ -742,8 +771,9 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
         "[method]output-stream.check-write",
         |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
             store.data().enter()?;
+            let host = store.data();
             let result = if handle.rep() == 0 {
-                Ok((WASI_BYTES - store.data().stdout_bytes) as u64)
+                Ok((WASI_BYTES - host.stdout_bytes).min(host.input_limit()) as u64)
             } else {
                 Err(StreamError::Closed)
             };

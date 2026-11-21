@@ -33,10 +33,14 @@ Randomness comes from the operating system CSPRNG through pinned ring SystemRand
 `host_to_guest_bytes`, whichever is lower, and `get-random-u64` traps when that limit
 is below 8 bytes; both set the buffer-limit flag. Stdout is output-only, capped at 65,536
 bytes per invocation. Additional bytes are silently dropped and set a truncation
-flag; `check-write` reports no more than remaining capacity. Accepted bytes go to
-the invocation's existing log record through the same binding as guest logging
-(one `info` line per write, field `stream=stdout`, decoded as lossy UTF-8); the
-accepted byte count and truncation flag are also kept on the invocation's Host
+flag. Each write is also bounded by the configured `guest_to_host_bytes`, before any
+byte is copied, and `check-write` reports no more than either bound. Accepted bytes
+are buffered on the invocation's Host and, when the invocation ends (including on a
+trap), handed once to its existing log record through the guest-logging binding:
+lossy UTF-8, in `info` lines of at most 4,096 characters with field `stream=stdout`,
+after the guest's own log lines, so the record keeps each line whole (at most 16
+lines). The record's own line count and redaction still apply. A refused line sets
+the truncation flag. The accepted byte count and truncation flag are kept on Host
 (`stdout_summary`). There is no file, network path or new logging pipeline. Hosts
 never share this output or metadata.
 `host::execute` preserves the count and truncation flag in its returned Execution
