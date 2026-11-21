@@ -1,5 +1,13 @@
 //! Reproduce the worker/Containerfile source boundary without a container engine.
 use std::{fs, path::Path, process::Command};
+
+struct Scratch(std::path::PathBuf);
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn copy(from: &Path, to: &Path) {
     if from.is_dir() {
         fs::create_dir_all(to).unwrap();
@@ -16,6 +24,7 @@ fn release_worker_uses_only_image_context() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let scratch = std::env::temp_dir().join(format!("go-image-context-{}", std::process::id()));
     fs::create_dir(&scratch).unwrap();
+    let _cleanup = Scratch(scratch.clone());
     for path in [
         "Cargo.toml",
         "Cargo.lock",

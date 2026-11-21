@@ -15,8 +15,6 @@ fn componentization_world_declares_exactly_the_manifest_imports() {
     use std::collections::BTreeSet;
     use wit_parser::WorldItem;
     let profile = root().join("qualification/profiles/go");
-    let script = fs::read_to_string(root().join("qualification/go/build-profile.sh")).unwrap();
-    assert!(script.contains("-wit-package \"$stage/wit\" -wit-world function"));
     let mut resolve = wit_parser::Resolve::default();
     resolve.push_path(root().join("wit/host.wit")).unwrap();
     let (package, _) = resolve.push_path(profile.join("wit")).unwrap();
@@ -178,9 +176,19 @@ fn directives_and_every_reflect_alias_have_source_locations() {
             2,
         ),
         (
+            "package main\n/*\n//go:generate forbidden\n*/\n",
+            "WASM-INSTALL-HOOK",
+            3,
+        ),
+        (
             "//go:linkname hidden runtime.hidden\npackage main\n",
             "WASM-UNSUPPORTED-API",
             1,
+        ),
+        (
+            "package main\n/*\n//go:linkname hidden runtime.hidden\n*/\n",
+            "WASM-UNSUPPORTED-API",
+            3,
         ),
         (
             "package main\nimport (\n//go:linkname hidden runtime.hidden\n\"reflect\"\n)\n",

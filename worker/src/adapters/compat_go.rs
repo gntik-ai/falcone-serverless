@@ -194,19 +194,25 @@ pub fn check_tree(files: &[TreeFile<'_>], go_mod: Option<&str>) -> Verdict {
             if token.kind != Kind::Comment {
                 continue;
             }
-            if token.text.starts_with("//go:generate") {
-                emit(
-                    &mut out,
-                    file.path,
-                    token.line,
-                    "WASM-INSTALL-HOOK",
-                    "go:generate",
-                );
-            }
-            if token.text.starts_with("//go:linkname") {
-                emit(&mut out, file.path, token.line, UNSUPPORTED, "go:linkname");
-            }
             for (offset, line) in token.text.lines().enumerate() {
+                if line.starts_with("//go:generate") {
+                    emit(
+                        &mut out,
+                        file.path,
+                        token.line + offset,
+                        "WASM-INSTALL-HOOK",
+                        "go:generate",
+                    );
+                }
+                if line.starts_with("//go:linkname") {
+                    emit(
+                        &mut out,
+                        file.path,
+                        token.line + offset,
+                        UNSUPPORTED,
+                        "go:linkname",
+                    );
+                }
                 if line.trim_start().starts_with("#cgo") {
                     emit(
                         &mut out,

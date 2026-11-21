@@ -58,6 +58,8 @@ line scanner can interpret a column-one directive inside a raw string; the trust
 build never invokes `go generate`. Directive prefix matching is conservative, so
 `//go:generated` is also rejected as an install hook.
 
+The default archive-probe test and the trusted build require Python 3.11 or newer
+with `tomllib`, `hashlib.file_digest` and tar extraction filters available.
 Rerun default checks: `cargo test --workspace --locked`. This also builds the release
 worker from only the Containerfile inputs, without a container engine or guest tools.
 Operator build: set `FS_TRUSTED_COMPILER_IMAGE=1`, `FS_TOOLCHAIN_CACHE` to the offline
