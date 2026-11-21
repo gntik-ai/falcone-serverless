@@ -692,6 +692,19 @@ fn cgo_native_process_gpu_and_catalogue_imports_are_rejected() {
         code("package main\nimport rf \"reflect\"\nvar _ = rf.StructOf\n"),
         ["WASM-UNSUPPORTED-API"]
     );
+    // A later blank import of reflect does not hide an earlier alias.
+    assert_eq!(
+        code("package main\nimport (\n\tr \"reflect\"\n\t_ \"reflect\"\n)\nvar _ = r.MakeFunc\n"),
+        ["WASM-UNSUPPORTED-API"]
+    );
+    assert_eq!(
+        code("package main\nimport (\n\t_ \"reflect\"\n\tr \"reflect\"\n)\nvar _ = r.MakeFunc\n"),
+        ["WASM-UNSUPPORTED-API"]
+    );
+    assert_eq!(
+        code("package main\nimport (\n\t. \"reflect\"\n\tr \"reflect\"\n)\nvar _ = r.StructOf\n"),
+        ["WASM-UNSUPPORTED-API"]
+    );
     assert_eq!(
         code("package main\nimport \"reflect\"\nvar _ = reflect.TypeOf(1)\n"),
         Vec::<&str>::new()

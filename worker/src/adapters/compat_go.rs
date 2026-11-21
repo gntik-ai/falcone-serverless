@@ -355,7 +355,8 @@ fn check_go_file(
     for comment in &lexed.comments {
         directives(comment, &mut report, interfaces);
     }
-    let mut reflect = None;
+    // Every name reflect is imported under: Go allows the same package under several aliases.
+    let mut reflect = Vec::new();
     for import in imports(&lexed.tokens) {
         let Some(path) = import.path else {
             report.at(
@@ -393,23 +394,23 @@ fn check_go_file(
                 "standard-library package outside the allow-list",
             );
         } else if path == "reflect" {
-            reflect = Some(import.alias.unwrap_or("reflect"));
+            reflect.push(import.alias.unwrap_or("reflect"));
         }
     }
-    if let Some(name) = reflect {
+    if !reflect.is_empty() {
         for (i, token) in lexed.tokens.iter().enumerate() {
             let selector = i > 0 && lexed.tokens[i - 1].text == ".";
             if token.kind != Kind::Word || selector {
                 continue;
             }
-            if name == "." {
+            if reflect.contains(&".") {
                 // A dot import brings the members into the file scope, so they appear unqualified.
                 if let Some(construct) = reflect_limit(token.text) {
                     report.at(token.at, UNSUPPORTED, construct);
+                    continue;
                 }
-                continue;
             }
-            if token.text != name {
+            if !reflect.contains(&token.text) {
                 continue;
             }
             if let (Some(dot), Some(member)) = (lexed.tokens.get(i + 1), lexed.tokens.get(i + 2))

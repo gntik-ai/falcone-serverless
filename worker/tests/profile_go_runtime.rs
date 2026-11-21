@@ -501,6 +501,8 @@ fn the_build_script_options_are_accepted_by_the_pinned_tools() {
     let scratch = std::env::temp_dir().join(format!("profile-go-options-{}", std::process::id()));
     std::fs::create_dir(&scratch).unwrap();
     let scratch = Scratch(scratch);
+    // Outside a module the loader fails on the missing go.mod before it reaches the operand.
+    std::fs::write(scratch.0.join("go.mod"), "module probe\n\ngo 1.26\n").unwrap();
     let rejected = "flag provided but not defined";
 
     // The control: the detector goes red on an option the pinned tinygo does not define.
