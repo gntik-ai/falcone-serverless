@@ -118,3 +118,17 @@ fn profile_pod_runs_only_prebuilt_fixtures_with_the_restricted_posture() {
         "built_profile_components"
     );
 }
+
+#[test]
+fn built_profile_components_prints_the_record_the_harness_requires() {
+    // Without it the pod fails with "success record missing" even when every check passes.
+    let source = include_str!("profile_go_runtime.rs");
+    let (_, body) = source.split_once("fn built_profile_components()").unwrap();
+    let (before, record) = body.split_once("serde_json::json!(").unwrap();
+    let (record, _) = record.split_once(')').unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(record).unwrap(),
+        serde_json::json!({"check":QUALIFICATION_CHECK,"status":"passed"})
+    );
+    assert!(before.contains("wasi_cases::one_memory_and_only_declared_functions_are_linked();"));
+}

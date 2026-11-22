@@ -1,4 +1,6 @@
-use falcone_serverless_worker::host::{self, Bindings, Context, Host, HostError, Operation, Reply};
+use falcone_serverless_worker::host::{
+    self, Bindings, Context, Host, HostError, Operation, Reply, outcome::InvocationOutcome,
+};
 use falcone_serverless_worker::limits::Limits;
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::{Duration, Instant};
@@ -151,24 +153,39 @@ pub fn stdout_flush_is_supervised_and_reports_refusal() {
         let elapsed = started.elapsed();
         // Nothing is retried after a failed line.
         assert!(store.data().flush_stdout(true));
-        (delivered, elapsed, captured.lines.lock().unwrap().len())
+        // Stdout has no external effect, so an unacknowledged line never makes a pure
+        // handler's outcome uncertain.
+        let outcome = host::outcome::classify(store.data(), Ok(()));
+        assert_ne!(outcome, InvocationOutcome::Uncertain);
+        (
+            delivered,
+            elapsed,
+            captured.lines.lock().unwrap().len(),
+            outcome,
+        )
     };
     // A stalled collector is abandoned at the 50 ms host-call deadline.
     let stalled = Captured {
         stall: Some(Duration::from_secs(5)),
         ..Captured::default()
     };
-    let (delivered, elapsed, lines) = run(stalled, false);
+    let (delivered, elapsed, lines, outcome) = run(stalled, false);
     assert!(!delivered && lines == 0, "{delivered} {lines}");
     assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+    assert_eq!(outcome, InvocationOutcome::Cancelled);
     // Cancellation stops the flush before the collector is reached.
-    assert!(!run(Captured::default(), true).0);
-    // A collector that drops the line is reported, so truncation is flagged.
+    let (delivered, _, _, outcome) = run(Captured::default(), true);
+    assert!(!delivered);
+    assert_eq!(outcome, InvocationOutcome::Cancelled);
+    // A collector that drops the line is reported, so truncation is flagged; the
+    // handler's own outcome is unaffected.
     let refusing = Captured {
         refuse: true,
         ..Captured::default()
     };
-    assert!(!run(refusing, false).0);
+    let (delivered, _, _, outcome) = run(refusing, false);
+    assert!(!delivered);
+    assert_eq!(outcome, InvocationOutcome::Success);
 }
 
 pub fn one_memory_and_only_declared_functions_are_linked() {

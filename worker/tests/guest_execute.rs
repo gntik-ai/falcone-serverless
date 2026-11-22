@@ -8,9 +8,11 @@ mod executable;
 fn completed_execution_retains_bounded_stdout_metadata() {
     use host::{Context, Host, outcome::InvocationOutcome};
     use std::sync::{Arc, atomic::AtomicBool, atomic::Ordering};
-    /// Accepts stdout lines; with `cancel`, cancels the execution while the last is flushed.
+    /// Accepts stdout lines; with `cancel`, cancels the execution while the last is flushed;
+    /// with `stall`, holds each line past the host-call deadline.
     struct Empty {
         cancel: Option<Arc<AtomicBool>>,
+        stall: bool,
     }
     impl host::Bindings for Empty {
         fn call(&self, _: &Context, op: host::Operation) -> Result<host::Reply, host::HostError> {
@@ -19,18 +21,24 @@ fn completed_execution_retains_bounded_stdout_metadata() {
             if let Some(cancel) = &self.cancel {
                 cancel.store(true, Ordering::Release);
             }
+            if self.stall {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
             Ok(host::Reply::Empty)
         }
     }
     let source = include_str!("fixtures/go/wasi-stdout.wat");
     let (prefix, _) = source.rsplit_once("  (func (export \"write\")").unwrap();
     let compiler = cases::compiler();
-    for (length, trap, cancel, expected) in [
-        (4, false, false, (4, false)),
-        (65537, false, false, (65536, true)),
-        (65537, true, false, (65536, true)),
+    for (length, trap, cancel, stall, expected) in [
+        (4, false, false, false, (4, false)),
+        (65537, false, false, false, (65536, true)),
+        (65537, true, false, false, (65536, true)),
         // Cancellation reached while flushing is classified after the flush.
-        (4, false, true, (4, false)),
+        (4, false, true, false, (4, false)),
+        // A final line the record never acknowledged is flagged, and the pure handler's
+        // outcome is the abandoned call's, never uncertain.
+        (4, false, false, true, (4, true)),
     ] {
         let source = format!(
             r#"{prefix}
@@ -62,14 +70,20 @@ fn completed_execution_retains_bounded_stdout_metadata() {
         let flag = Arc::new(AtomicBool::new(false));
         let binding = Empty {
             cancel: cancel.then(|| flag.clone()),
+            stall,
         };
         let mut host = Host::new(Context::default(), Arc::new(binding));
         host.set_cancellation(flag);
+        host.set_call_timeout(std::time::Duration::from_millis(50));
         let execution = cases::prepare(&compiler, &bytes, host).unwrap().call(b"");
-        assert_eq!(execution.result.is_err(), trap || cancel, "{execution:?}");
+        assert_eq!(
+            execution.result.is_err(),
+            trap || cancel || stall,
+            "{execution:?}"
+        );
         assert_eq!(
             execution.outcome == InvocationOutcome::Cancelled,
-            cancel,
+            cancel || stall,
             "{execution:?}"
         );
         assert_eq!(

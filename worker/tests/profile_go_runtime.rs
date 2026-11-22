@@ -203,4 +203,9 @@ fn built_profile_components() {
     println!(
         "Go runtime checks passed; qualification remains UNVERIFIED until artifact ID and SHA256 are recorded on #53"
     );
+    // The cluster harness passes the pod only on this record, printed after every check.
+    println!(
+        "{}",
+        serde_json::json!({"check":"profile_go","status":"passed"})
+    );
 }

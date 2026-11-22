@@ -572,7 +572,11 @@ impl Host {
     fn call(&self, operation: Operation) -> Result<Reply, HostError> {
         // Dispatch is the handoff to the helper, not entry into the binding.
         // Conservatively include HTTP and progress, which can have external effects.
-        let mutating = !matches!(operation, Operation::Read { .. } | Operation::Log { .. });
+        // Stdout lines only reach the invocation's log record, like guest logging.
+        let mutating = !matches!(
+            operation,
+            Operation::Read { .. } | Operation::Log { .. } | Operation::Stdout { .. }
+        );
         if self.cancelled.load(Ordering::Acquire) {
             self.call_cancelled.store(true, Ordering::Release);
             return Err(HostError::Cancelled);
