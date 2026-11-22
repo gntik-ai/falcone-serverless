@@ -21,9 +21,6 @@ pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
 use crate::limits::{Field, Limits};
 // Separate per-invocation bounds for the narrow WASI random and stdout APIs.
 const WASI_BYTES: usize = 65_536;
-/// The most bytes, and so characters, of one stdout log line. With its `info` prefix and
-/// `stream=stdout` field it stays well inside the record's 8,192-character line.
-pub const STDOUT_LINE_CHARS: usize = 4096;
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -353,43 +350,26 @@ impl Host {
         (self.stdout_bytes, self.stdout_truncated)
     }
 
-    /// Takes the next complete stdout line, or with `all` whatever is left. A line is at
-    /// most [`STDOUT_LINE_CHARS`] bytes and never splits a UTF-8 sequence.
-    fn take_stdout_line(&self, all: bool) -> Option<Vec<u8>> {
-        let mut stdout = self
-            .stdout
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if stdout.is_empty() || (!all && stdout.len() < STDOUT_LINE_CHARS) {
-            return None;
+    /// Hands the invocation's whole buffered stdout to its log record as one
+    /// [`Operation::Stdout`], through the supervised host-call path: the call deadline, the
+    /// execution deadline and cancellation all apply. The bytes are decoded once, so no
+    /// character is split between writes, and the record redacts the text before it cuts
+    /// it into lines. Returns false when the record did not keep all of it; nothing is
+    /// retried.
+    pub fn flush_stdout(&self) -> bool {
+        let bytes = std::mem::take(
+            &mut *self
+                .stdout
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if bytes.is_empty() {
+            return true;
         }
-        let mut cut = stdout.len().min(STDOUT_LINE_CHARS);
-        while cut < stdout.len() && cut + 3 > STDOUT_LINE_CHARS && stdout[cut] & 0xc0 == 0x80 {
-            cut -= 1;
-        }
-        Some(stdout.drain(..cut).collect())
-    }
-
-    /// Hands buffered stdout to the invocation's log record as [`Operation::Stdout`] lines,
-    /// through the supervised host-call path: the call deadline, the execution deadline and
-    /// cancellation all apply. With `all` false only complete lines leave. Returns false,
-    /// and drops what is left, when the record did not keep a line.
-    pub fn flush_stdout(&self, all: bool) -> bool {
-        while let Some(line) = self.take_stdout_line(all) {
-            let text = String::from_utf8_lossy(&line).into_owned();
-            if self
-                .call(Operation::Stdout { text })
-                .and_then(empty)
-                .is_err()
-            {
-                self.stdout
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clear();
-                return false;
-            }
-        }
-        true
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.call(Operation::Stdout { text })
+            .and_then(empty)
+            .is_ok()
     }
 
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
@@ -775,10 +755,6 @@ fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
                     .extend_from_slice(&kept);
                 host.stdout_bytes += accepted;
                 host.stdout_truncated |= accepted < length;
-                // Complete lines leave while the guest runs, under its deadline.
-                if !store.data().flush_stdout(false) {
-                    store.data_mut().stdout_truncated = true;
-                }
                 Ok((Ok::<(), StreamError>(()),))
             },
         )?;

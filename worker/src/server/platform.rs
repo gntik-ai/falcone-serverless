@@ -139,14 +139,15 @@ impl Bindings for Capturing {
                     .push(&line);
                 Ok(Reply::Empty)
             }
-            // Stdout lines join the same record; a dropped line is reported, so the host
-            // flags truncation. Guest log calls keep their existing behaviour.
+            // The invocation's whole stdout joins the same record, redacted before it is
+            // cut into lines; a dropped line is reported, so the host flags truncation.
+            // Guest log calls keep their existing behaviour.
             Operation::Stdout { text } => {
                 let kept = self
                     .logs
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(&format!("info {text} stream=stdout"));
+                    .push_stdout(&text);
                 if kept {
                     Ok(Reply::Empty)
                 } else {

@@ -199,6 +199,8 @@ fn built_profile_components() {
     wasi_cases::csprng_is_linked_narrowly_and_bounded();
     wasi_cases::stdout_is_bounded_and_invocation_local();
     wasi_cases::stdout_flush_is_supervised_and_reports_refusal();
+    wasi_cases::stdout_reaches_the_record_redacted_and_whole();
+    wasi_cases::execution_end_delivers_and_classifies_stdout();
     wasi_cases::one_memory_and_only_declared_functions_are_linked();
     println!(
         "Go runtime checks passed; qualification remains UNVERIFIED until artifact ID and SHA256 are recorded on #53"

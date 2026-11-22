@@ -2,23 +2,30 @@ use falcone_serverless_worker::host::{
     self, Bindings, Context, Host, HostError, Operation, Reply, outcome::InvocationOutcome,
 };
 use falcone_serverless_worker::limits::Limits;
+use falcone_serverless_worker::{artifact::supervisor::CompileLimits, cache, server::hooks};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::{Duration, Instant};
 
-/// Records the invocation's stdout lines; WASI reaches no other platform binding.
+/// Records the invocation's stdout; WASI reaches no other platform binding.
 #[derive(Default)]
 pub struct Captured {
     lines: Mutex<Vec<String>>,
-    /// Holds each line this long first, like a stalled log collector.
+    /// Holds the stdout this long first, like a stalled log collector.
     stall: Option<Duration>,
-    /// Refuses each line, like a full log collector.
+    /// Refuses the stdout, like a full log collector.
     refuse: bool,
+    /// Cancels the execution while its stdout is delivered.
+    cancel: Option<Arc<AtomicBool>>,
 }
 impl Bindings for Captured {
     fn call(&self, _: &Context, operation: Operation) -> Result<Reply, HostError> {
         let Operation::Stdout { text } = operation else {
             panic!("WASI must not call other platform bindings")
         };
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(stall) = self.stall {
             std::thread::sleep(stall);
         }
@@ -101,20 +108,14 @@ pub fn stdout_is_bounded_and_invocation_local() {
         if let Some(barrier) = barrier {
             barrier.wait();
         }
-        // Complete lines leave while the guest runs; the rest when the invocation ends.
-        let (accepted, _) = store.data().stdout_summary();
-        let early = captured.lines.lock().unwrap().len();
-        assert_eq!(early, accepted / host::STDOUT_LINE_CHARS);
-        assert!(store.data().flush_stdout(true));
-        assert!(store.data().flush_stdout(true));
+        // Nothing leaves while the guest runs; the whole stdout leaves once, at the end.
+        assert!(captured.lines.lock().unwrap().is_empty());
+        assert!(store.data().flush_stdout());
+        assert!(store.data().flush_stdout());
         let lines = captured.lines.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1);
         // The fixture writes zero bytes, so each captured byte is one NUL character.
         assert!(lines.iter().all(|line| line.bytes().all(|byte| byte == 0)));
-        assert!(
-            lines
-                .iter()
-                .all(|line| line.len() <= host::STDOUT_LINE_CHARS)
-        );
         let logged: usize = lines.iter().map(String::len).sum();
         (remaining, store.data().stdout_summary(), logged)
     };
@@ -149,10 +150,10 @@ pub fn stdout_flush_is_supervised_and_reports_refusal() {
             store.data().cancellation().store(true, Ordering::Release);
         }
         let started = Instant::now();
-        let delivered = store.data().flush_stdout(true);
+        let delivered = store.data().flush_stdout();
         let elapsed = started.elapsed();
-        // Nothing is retried after a failed line.
-        assert!(store.data().flush_stdout(true));
+        // Nothing is retried after a failed delivery.
+        assert!(store.data().flush_stdout());
         // Stdout has no external effect, so an unacknowledged line never makes a pure
         // handler's outcome uncertain.
         let outcome = host::outcome::classify(store.data(), Ok(()));
@@ -186,6 +187,205 @@ pub fn stdout_flush_is_supervised_and_reports_refusal() {
     let (delivered, _, _, outcome) = run(refusing, false);
     assert!(!delivered);
     assert_eq!(outcome, InvocationOutcome::Success);
+}
+
+/// The stdout fixture with `data` at the address its plain writes start from; blocking
+/// writes start 4,096 bytes later.
+fn stdout_with(data: &str) -> String {
+    include_str!("../fixtures/go/wasi-stdout.wat")
+        .replace(
+            r#"(core module $mem (memory (export "memory") 2))"#,
+            &format!(r#"(core module $mem (memory (export "memory") 2) (data (i32.const 1024) "{data}"))"#),
+        )
+        .replace(
+            "local.get $handle i32.const 1024 local.get $len i32.const 0 call $blocking",
+            "local.get $handle i32.const 5120 local.get $len i32.const 0 call $blocking",
+        )
+}
+
+/// Runs `writes` of (length, blocking) against the worker's own log record and returns the
+/// record's stdout text with each line's framing removed, and the stdout metadata.
+fn recorded(data: &str, secrets: &[&str], writes: &[(u32, u32)]) -> (String, (usize, bool)) {
+    let engine = wasmtime::Engine::default();
+    let (bindings, lines) = hooks::log_record(secrets);
+    let host = Host::with_limits(Context::default(), bindings, limits(1048576));
+    let (mut store, instance) = host::instantiate(&engine, stdout_with(data), host).unwrap();
+    let write = instance
+        .get_typed_func::<(u32, u32), (u64,)>(&mut store, "write")
+        .unwrap();
+    for write_args in writes {
+        write.call(&mut store, *write_args).unwrap();
+    }
+    assert!(store.data().flush_stdout());
+    let summary = store.data().stdout_summary();
+    let text = lines()
+        .iter()
+        .map(|line| {
+            line.strip_prefix("info ")
+                .and_then(|line| line.strip_suffix(" stream=stdout"))
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    (text, summary)
+}
+
+pub fn stdout_reaches_the_record_redacted_and_whole() {
+    // A short claim straddles the first 4,096-character line cut and a long one the second.
+    // The record redacts the whole stdout before it cuts, so neither survives in any line
+    // or across adjacent lines.
+    let (short, long) = ("pw1234", "abcdefghijkl");
+    let padding = |n| "a".repeat(n);
+    let data = format!("{}{short}{}{long}", padding(4093), padding(4089));
+    let (text, summary) = recorded(&data, &[short, long], &[(8200, 0)]);
+    assert_eq!(
+        text,
+        format!("{}<redacted>{}<redacted>", padding(4093), padding(4089))
+    );
+    assert_eq!(summary, (8200, false));
+    // A character split between two writes at the line size is decoded whole.
+    let data = format!(r"{}\c3\a9", padding(4095));
+    let (text, summary) = recorded(&data, &[], &[(4096, 0), (1, 1)]);
+    assert_eq!(text, format!("{}é", padding(4095)));
+    assert_eq!(summary, (4097, false));
+}
+
+/// Fixture compilation through the bounded trusted compile path, in a scratch cache.
+struct Compiler {
+    cache: cache::Cache,
+    directory: std::path::PathBuf,
+}
+impl Compiler {
+    fn new() -> Self {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("go-wasi-cache-{}-{id}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let exe = std::env::current_exe().unwrap();
+        let parent = exe.parent().unwrap();
+        // Cargo integration tests live in deps/; in the restricted pod the test binary is
+        // beside the compiler.
+        let binaries = if parent.file_name().is_some_and(|name| name == "deps") {
+            parent.parent().unwrap()
+        } else {
+            parent
+        };
+        let cache = cache::Cache::new(&directory, binaries.join("artifact-compile-child")).unwrap();
+        Self { cache, directory }
+    }
+    fn compile(&mut self, bytes: &[u8]) -> cache::Loaded {
+        let limits = CompileLimits {
+            input_bytes: 64 * 1024 * 1024,
+            cpu_seconds: 120,
+            memory_bytes: 4 * 1024 * 1024 * 1024,
+            wall_clock_deadline: Instant::now() + Duration::from_secs(300),
+        };
+        self.cache
+            .compile(
+                cache::CONTRACT_VERSION,
+                bytes,
+                limits,
+                &AtomicBool::new(false),
+            )
+            .unwrap()
+    }
+}
+impl Drop for Compiler {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// A handler that writes `length` stdout bytes and returns, or traps after the write.
+fn writing_handler(length: u32, trap: bool) -> Vec<u8> {
+    let source = include_str!("../fixtures/go/wasi-stdout.wat");
+    let (prefix, _) = source.rsplit_once("  (func (export \"write\")").unwrap();
+    let source = format!(
+        r#"{prefix}
+      (type $bytes (list u8))
+      (type $handler-error (variant (case "invalid-input" string) (case "failed" string)))
+      (type $result (result $bytes (error $handler-error)))
+      (core module $handler
+        (import "host" "memory" (memory 2))
+        (import "host" "write" (func $write (param i32 i32) (result i64)))
+        (export "memory" (memory 0))
+        (func (export "realloc") (param i32 i32 i32 i32) (result i32) i32.const 70000)
+        (func (export "handle") (param i32 i32) (result i32)
+          i32.const {length} i32.const 1 call $write drop
+          {failure}
+          i32.const 0 i64.const 0 i64.store
+          i32.const 8 i32.const 0 i32.store
+          i32.const 0))
+      (core instance $handler (instantiate $handler (with "host" (instance
+        (export "memory" (memory $mem "memory"))
+        (export "write" (func $guest "write"))))))
+      (func $handle (param "params" $bytes) (result $result)
+        (canon lift (core func $handler "handle") (memory $handler "memory")
+          (realloc (func $handler "realloc"))))
+      (instance $export (export "handler-error" (type $handler-error)) (export "handle" (func $handle)))
+      (export "falcone:host/handler@0.2.0" (instance $export)))"#,
+        failure = if trap { "unreachable" } else { "" }
+    );
+    wat::parse_str(source).unwrap()
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Collector {
+    Keeps,
+    CancelsWhileKeeping,
+    Stalls,
+    Refuses,
+    StallsPastTheDeadline,
+}
+
+pub fn execution_end_delivers_and_classifies_stdout() {
+    // Every execution ends in the same finish step: stdout leaves even on a trap, and a
+    // cancellation, call timeout, refusal or deadline met while it leaves is classified
+    // after it, never as uncertain. The returned metadata reports what was lost.
+    use Collector::*;
+    use InvocationOutcome::*;
+    let mut compiler = Compiler::new();
+    for (length, trap, collector, outcome, metadata) in [
+        (4, false, Keeps, Success, (4, false)),
+        (65537, false, Keeps, Success, (65536, true)),
+        (65537, true, Keeps, Failed, (65536, true)),
+        (4, false, CancelsWhileKeeping, Cancelled, (4, false)),
+        (4, false, Stalls, Cancelled, (4, true)),
+        (4, false, Refuses, Success, (4, true)),
+        // The execution deadline takes precedence over the abandoned call.
+        (4, false, StallsPastTheDeadline, GuestInterrupted, (4, true)),
+    ] {
+        let loaded = compiler.compile(&writing_handler(length, trap));
+        let flag = Arc::new(AtomicBool::new(false));
+        let captured = Arc::new(Captured {
+            stall: matches!(collector, Stalls | StallsPastTheDeadline)
+                .then(|| Duration::from_secs(1)),
+            refuse: matches!(collector, Refuses),
+            cancel: matches!(collector, CancelsWhileKeeping).then(|| flag.clone()),
+            ..Captured::default()
+        });
+        let mut host = Host::new(Context::default(), captured.clone());
+        host.set_cancellation(flag);
+        if matches!(collector, StallsPastTheDeadline) {
+            host.set_call_timeout(Duration::from_secs(5));
+            host.set_until(Instant::now() + Duration::from_millis(300));
+        } else {
+            host.set_call_timeout(Duration::from_millis(50));
+        }
+        let execution = host::execute(&loaded, host, b"");
+        let case = format!("{length} {trap} {collector:?}: {execution:?}");
+        assert_eq!(execution.outcome, outcome, "{case}");
+        assert_eq!(execution.result.is_err(), outcome != Success, "{case}");
+        assert_eq!(
+            (execution.stdout_bytes, execution.stdout_truncated),
+            metadata,
+            "{case}"
+        );
+        let delivered = captured.lines.lock().unwrap().clone();
+        let kept = matches!(collector, Keeps | CancelsWhileKeeping);
+        assert_eq!(delivered.len(), usize::from(kept), "{case}");
+    }
 }
 
 pub fn one_memory_and_only_declared_functions_are_linked() {

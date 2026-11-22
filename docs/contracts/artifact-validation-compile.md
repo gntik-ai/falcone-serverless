@@ -217,10 +217,12 @@ write, check-write, blocking-write-and-flush, flush, blocking-flush and drop.
 The io error resource is a type only and the host never creates one.
 The invocation-local sink buffers accepted bytes (at most 65,536, and at most
 guest_to_host_bytes per write) and hands them to the invocation's existing log record
-as Operation::Stdout lines of at most 4,096 bytes through the supervised host-call path
-(complete lines while the guest runs, the rest before the outcome is classified; a line
-not kept sets the truncation flag). Like Log, Stdout is non-mutating: a line the record
-never acknowledged can make the outcome Cancelled or a deadline, never Uncertain. It records the byte count and
+once, as one Operation::Stdout through the supervised host-call path, when the
+execution ends and before the outcome is classified. The bytes are decoded once; the
+record redacts the whole text and only then cuts it into lines of at most 4,096
+characters, so no protected claim straddles two lines. Stdout not kept in full sets the
+truncation flag. Like Log, Stdout is non-mutating: stdout the record never acknowledged
+can make the outcome Cancelled or a deadline, never Uncertain. It records the byte count and
 truncation flag on Host, preserved in the returned Execution as stdout_bytes and
 stdout_truncated even on failure; there is no new log pipeline. Excess bytes are dropped with successful writes; check-write reports
 at most remaining capacity. Concurrent invocations have separate metadata.

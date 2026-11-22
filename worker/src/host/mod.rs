@@ -6,9 +6,7 @@ pub mod net;
 pub mod outcome;
 pub use execute::{ExecuteError, Execution, Prepared, execute};
 mod runtime;
-pub use runtime::{
-    BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, STDOUT_LINE_CHARS, StreamError, WasiError, instantiate,
-};
+pub use runtime::{BUFFER_BYTES, GUEST_MEMORY_BYTES, Host, StreamError, WasiError, instantiate};
 use wasmtime::component::{ComponentType, Lift, Lower};
 
 pub fn aggregate_within_limit(parts: &[usize]) -> bool {
@@ -101,8 +99,9 @@ pub enum Operation {
     ProgressCheckpoint {
         key: String,
     },
-    /// One line of the guest's WASI stdout for the invocation's log record. A binding
-    /// that does not keep the line returns an error, so the host flags truncation.
+    /// The guest's whole WASI stdout for the invocation's log record, sent once when the
+    /// execution ends. A binding that does not keep all of it returns an error, so the
+    /// host flags truncation.
     Stdout {
         text: String,
     },
