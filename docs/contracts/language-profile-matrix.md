@@ -119,10 +119,12 @@ human review must assess the policy and prose.
 | --- | --- | --- |
 | JavaScript | `javascript-wasi-v1` | Disabled; tested examples are named, but no evidence is recorded. |
 | Python | `python-wasi-v1` | Disabled; no evidence or tested examples. |
-| Go | `go-wasi-v1` | Disabled; no evidence or tested examples. |
+| Go | `go-wasi-v1` | Disabled; named source fixtures, no runtime evidence. |
 
-Every committed profile is disabled and has an empty evidence object. The Python
-and Go seeds keep an empty capability ceiling and unqualified versions. JavaScript
+Every committed profile is disabled and has an empty evidence object. The Python seed keeps an empty capability ceiling and unqualified versions. Go records
+TinyGo `0.44.0`, Go `1.26.11`, wasm-tools `1.258.3` and WASI `0.2.0`;
+its Falcone capability ceiling and named source fixtures remain unverified.
+See [Go qualification](../qualification/profiles/go.md). JavaScript
 records the operator-approved jco toolchain version `1.41.0`, `wasiVersion` `none`
 (the final component may import only `falcone:host/*@0.2.0`), the eight
 `falcone:host` imports of the `function` world as its capability ceiling, and its
@@ -142,3 +144,20 @@ that encoding. UTF-16 and compact Latin-1 (`latin1+utf16`) lift/lower options
 are rejected before instantiation. Guest result and handler-error payload
 ceilings count UTF-8 bytes and use the configured guest-to-host limit.
 This version break does not enable any language profile.
+
+
+### Go toolchain archive pins
+
+The optional `toolchainPins` object records `tinygo`, `go`, and `wasm_tools`.
+Each pin has `name`, `version`, `source`, `archive` and `sha256`; the schema
+requires the exact operator-approved values. The manifest and `go_versions.toml`
+are checked against these pins. `allowedInterfaces` remains Falcone-only.
+Go's separate host WASI ceiling is random/random, cli/stdout, io/streams and io/error
+at 0.2.0. Random is OS CSPRNG-backed and traps above 65,536 requested bytes or above the
+configured `host_to_guest_bytes`, whichever is lower.
+Stdout buffers accepted bytes, capped at 65,536 per invocation and at
+`guest_to_host_bytes` per write, and hands them once, when the invocation ends, to its
+existing log record through the supervised host-call path; the record redacts the whole
+text before cutting it into lines of at most 4,096 characters; stdout the record does
+not keep in full sets the truncation flag; it keeps an invocation-local count; check-write reports remaining space. No stdout bytes leave
+the host through a file, socket or new logging pipeline. No other WASI is linked.

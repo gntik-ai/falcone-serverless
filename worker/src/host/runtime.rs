@@ -19,6 +19,8 @@ use wasmtime::{Engine, ResourceLimiter, Store, StoreContextMut, StoreLimits, Sto
 
 pub use crate::limits::{BUFFER_BYTES, GUEST_MEMORY_BYTES};
 use crate::limits::{Field, Limits};
+// Separate per-invocation bounds for the narrow WASI random and stdout APIs.
+const WASI_BYTES: usize = 65_536;
 // Tables allocate host memory separately from guest linear memory. Bound each
 // of the four permitted tables, including growth after instantiation.
 const GUEST_TABLE_ELEMENTS: usize = 65_536;
@@ -336,9 +338,40 @@ pub struct Host {
     host_call_budget_exceeded: AtomicBool,
     late_host_call: AtomicBool,
     fuel_exhausted: AtomicBool,
+    stdout_bytes: usize,
+    stdout_truncated: bool,
+    /// The accepted stdout bytes, held until the invocation ends.
+    stdout: Mutex<Vec<u8>>,
 }
 
 impl Host {
+    /// Invocation-local stdout metadata: accepted bytes and whether any were dropped.
+    pub fn stdout_summary(&self) -> (usize, bool) {
+        (self.stdout_bytes, self.stdout_truncated)
+    }
+
+    /// Hands the invocation's whole buffered stdout to its log record as one
+    /// [`Operation::Stdout`], through the supervised host-call path: the call deadline, the
+    /// execution deadline and cancellation all apply. The bytes are decoded once, so no
+    /// character is split between writes, and the record redacts the text before it cuts
+    /// it into lines. Returns false when the record did not keep all of it; nothing is
+    /// retried.
+    pub fn flush_stdout(&self) -> bool {
+        let bytes = std::mem::take(
+            &mut *self
+                .stdout
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        if bytes.is_empty() {
+            return true;
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.call(Operation::Stdout { text })
+            .and_then(empty)
+            .is_ok()
+    }
+
     pub fn new(context: Context, bindings: Arc<dyn Bindings>) -> Self {
         Self::with_limits(context, bindings, Limits::compatibility())
     }
@@ -371,6 +404,9 @@ impl Host {
             host_call_budget_exceeded: AtomicBool::new(false),
             late_host_call: AtomicBool::new(false),
             fuel_exhausted: AtomicBool::new(false),
+            stdout_bytes: 0,
+            stdout_truncated: false,
+            stdout: Mutex::new(Vec::new()),
         }
     }
 
@@ -516,7 +552,11 @@ impl Host {
     fn call(&self, operation: Operation) -> Result<Reply, HostError> {
         // Dispatch is the handoff to the helper, not entry into the binding.
         // Conservatively include HTTP and progress, which can have external effects.
-        let mutating = !matches!(operation, Operation::Read { .. } | Operation::Log { .. });
+        // Stdout lines only reach the invocation's log record, like guest logging.
+        let mutating = !matches!(
+            operation,
+            Operation::Read { .. } | Operation::Log { .. } | Operation::Stdout { .. }
+        );
         if self.cancelled.load(Ordering::Acquire) {
             self.call_cancelled.store(true, Ordering::Release);
             return Err(HostError::Cancelled);
@@ -661,6 +701,145 @@ fn storage_resource<T: Send + 'static>(
     )
 }
 
+struct Stdout;
+pub struct WasiError;
+#[derive(ComponentType, wasmtime::component::Lower)]
+#[component(variant)]
+pub enum StreamError {
+    #[component(name = "last-operation-failed")]
+    LastOperationFailed(Resource<WasiError>),
+    #[component(name = "closed")]
+    Closed,
+}
+
+fn link_stdout(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
+    linker.instance("wasi:io/error@0.2.0")?.resource(
+        "error",
+        ResourceType::host::<WasiError>(),
+        |store, _| {
+            store.data().enter()?;
+            Err(wasmtime::Error::msg("unissued io error"))
+        },
+    )?;
+    let mut streams = linker.instance("wasi:io/streams@0.2.0")?;
+    streams.resource(
+        "output-stream",
+        ResourceType::host::<Stdout>(),
+        |store, _| store.data().enter(),
+    )?;
+    for name in [
+        "[method]output-stream.write",
+        "[method]output-stream.blocking-write-and-flush",
+    ] {
+        streams.func_wrap(
+            name,
+            |mut store: StoreContextMut<'_, Host>,
+             (handle, bytes): (Resource<Stdout>, WasmList<u8>)| {
+                store.data().enter()?;
+                if handle.rep() != 0 {
+                    return Ok((Err::<(), _>(StreamError::Closed),));
+                }
+                // The configured guest-to-host limit bounds each write and the WASI cap
+                // the invocation. Only accepted bytes are copied; the rest are dropped.
+                let slice = bytes.as_le_slice(&store);
+                let length = slice.len();
+                let host = store.data();
+                let accepted = length
+                    .min(host.input_limit())
+                    .min(WASI_BYTES - host.stdout_bytes);
+                let kept = slice[..accepted].to_vec();
+                let host = store.data_mut();
+                host.stdout
+                    .get_mut()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(&kept);
+                host.stdout_bytes += accepted;
+                host.stdout_truncated |= accepted < length;
+                Ok((Ok::<(), StreamError>(()),))
+            },
+        )?;
+    }
+    streams.func_wrap(
+        "[method]output-stream.check-write",
+        |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
+            store.data().enter()?;
+            let host = store.data();
+            let result = if handle.rep() == 0 {
+                Ok((WASI_BYTES - host.stdout_bytes).min(host.input_limit()) as u64)
+            } else {
+                Err(StreamError::Closed)
+            };
+            Ok((result,))
+        },
+    )?;
+    for name in [
+        "[method]output-stream.flush",
+        "[method]output-stream.blocking-flush",
+    ] {
+        streams.func_wrap(
+            name,
+            |store: StoreContextMut<'_, Host>, (handle,): (Resource<Stdout>,)| {
+                store.data().enter()?;
+                Ok((if handle.rep() == 0 {
+                    Ok(())
+                } else {
+                    Err(StreamError::Closed)
+                },))
+            },
+        )?;
+    }
+    linker.instance("wasi:cli/stdout@0.2.0")?.func_wrap(
+        "get-stdout",
+        |store: StoreContextMut<'_, Host>, (): ()| {
+            store.data().enter()?;
+            Ok((Resource::<Stdout>::new_own(0),))
+        },
+    )?;
+    Ok(())
+}
+
+// ring is already an exactly pinned production dependency. SystemRandom uses the
+// operating system CSPRNG; errors trap rather than substituting predictable bytes.
+fn link_random(linker: &mut Linker<Host>) -> wasmtime::Result<()> {
+    use ring::rand::{SecureRandom, SystemRandom};
+    let mut random = linker.instance("wasi:random/random@0.2.0")?;
+    random.func_wrap(
+        "get-random-u64",
+        |store: StoreContextMut<'_, Host>, (): ()| {
+            let host = store.data();
+            host.enter()?;
+            // The eight result bytes count against a narrowed host-to-guest limit too.
+            if host.output_limit() < 8 {
+                host.record::<()>(&Err(HostError::LimitExceeded));
+                return Err(wasmtime::Error::msg("random byte limit exceeded"));
+            }
+            let mut bytes = [0; 8];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("OS randomness unavailable"))?;
+            Ok((u64::from_le_bytes(bytes),))
+        },
+    )?;
+    random.func_wrap(
+        "get-random-bytes",
+        |store: StoreContextMut<'_, Host>, (len,): (u64,)| {
+            let host = store.data();
+            host.enter()?;
+            // Checked before allocation: the configured limit can be below the WASI cap.
+            if len > WASI_BYTES.min(host.output_limit()) as u64 {
+                host.record::<()>(&Err(HostError::LimitExceeded));
+                return Err(wasmtime::Error::msg("random byte limit exceeded"));
+            }
+            let mut bytes = vec![0; len as usize];
+            SystemRandom::new()
+                .fill(&mut bytes)
+                .map_err(|_| wasmtime::Error::msg("OS randomness unavailable"))?;
+            Ok((bytes,))
+        },
+    )?;
+    Ok(())
+}
+
 /// Qualification-only: compiles raw source in process, never native artifacts.
 /// A runtime adapter must use the supervised trusted compiler for tenant input;
 /// this fixture entry point does not enforce compilation CPU or memory budgets.
@@ -701,6 +880,8 @@ pub(super) fn instantiate_in_store(
         }
     }
     let mut linker = Linker::new(engine);
+    link_random(&mut linker)?;
+    link_stdout(&mut linker)?;
     linker
         .instance("falcone:host/cancellation@0.2.0")?
         .func_wrap(

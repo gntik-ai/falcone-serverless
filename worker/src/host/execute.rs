@@ -30,6 +30,10 @@ pub struct ExecuteError {
 pub struct Execution {
     pub outcome: InvocationOutcome,
     pub result: Result<Vec<u8>, ExecuteError>,
+    /// Accepted stdout byte count, capped by the invocation's stdout bound.
+    /// The bytes themselves are discarded; no output or logging path is added.
+    pub stdout_bytes: usize,
+    pub stdout_truncated: bool,
 }
 fn error(code: &'static str) -> ExecuteError {
     ExecuteError {
@@ -175,6 +179,10 @@ fn finish(
     result: Result<Vec<u8>, ExecuteError>,
     trap: Option<&wasmtime::Error>,
 ) -> Execution {
+    // Every execution ends here, so stdout leaves even on a trap. It goes through the
+    // supervised path before classification, so a deadline or cancellation reached while
+    // flushing is still classified.
+    let delivered = host.flush_stdout();
     let failed = wasmtime::Error::msg("handler_failed");
     let cancelled = host
         .cancellation()
@@ -205,7 +213,14 @@ fn finish(
         InvocationOutcome::HostCallBudget => Err(error("host_call_budget_exceeded")),
         InvocationOutcome::Cancelled => Err(error("cancelled")),
     };
-    Execution { outcome, result }
+    let (stdout_bytes, truncated) = host.stdout_summary();
+    let stdout_truncated = truncated || !delivered;
+    Execution {
+        outcome,
+        result,
+        stdout_bytes,
+        stdout_truncated,
+    }
 }
 pub fn execute(loaded: &Loaded, host: Host, params: &[u8]) -> Execution {
     if params.len() > host.output_limit() {

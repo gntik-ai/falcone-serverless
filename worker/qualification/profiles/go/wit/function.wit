@@ -1,0 +1,11 @@
+package falcone:go-qualification@0.2.0;
+
+// Componentization must describe TinyGo's runtime imports as well as Falcone.
+// These qualification-only definitions grant no additional host functions.
+world function {
+    include falcone:host/function@0.2.0;
+    import wasi:random/random@0.2.0;
+    import wasi:cli/stdout@0.2.0;
+    import wasi:io/streams@0.2.0;
+    import wasi:io/error@0.2.0;
+}

@@ -266,6 +266,40 @@ pub mod hooks {
             }
         }
     }
+
+    /// Denies every platform operation; logging and stdout never reach it.
+    struct Denied;
+    impl crate::host::Bindings for Denied {
+        fn call(
+            &self,
+            _: &crate::host::Context,
+            _: crate::host::Operation,
+        ) -> Result<crate::host::Reply, crate::host::HostError> {
+            Err(crate::host::HostError::Denied)
+        }
+    }
+
+    /// The invocation log record an execution writes to: the same capturing binding and
+    /// redactor, with `secrets` as the credential's claim strings. Returns the bindings
+    /// for a [`crate::host::Host`] and a function that takes the record's lines.
+    pub fn log_record(
+        secrets: &[&str],
+    ) -> (Arc<dyn crate::host::Bindings>, impl FnOnce() -> Vec<String>) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
+        let redactor =
+            super::redact::Redactor::new(secrets.iter().copied(), until, &AtomicBool::new(false));
+        let logs = Arc::new(Mutex::new(super::redact::Logs::new(redactor)));
+        let capturing = Arc::new(super::platform::Capturing {
+            inner: Arc::new(Denied),
+            logs: logs.clone(),
+        });
+        let lines = move || {
+            logs.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .finish()
+        };
+        (capturing, lines)
+    }
 }
 
 pub(crate) struct Shared {

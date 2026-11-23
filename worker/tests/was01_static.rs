@@ -98,6 +98,7 @@ fn fixture_names_valid(names: &[String]) -> bool {
             "capability-http.wat",
             "capability-import.wat",
             "capability-logging.wat",
+            "capability-random.wat",
             "capability-storage.wat",
             "capability-table.wat",
             "capability-workflows.wat",

@@ -1,0 +1,111 @@
+# Static eligibility only; operator-run build and cluster evidence remain UNVERIFIED.
+modules = [] # No third-party modules are qualified.
+[profile]
+id = "go-wasi-v1"
+status = "disabled"
+qualification = "not-qualified"
+mode = "wasm"
+matrix_revision = "2"
+[toolchain]
+target = "wasip2"
+wasmtime = "49.0.5"
+wasi = "0.2.0"
+[stdlib]
+toolchain = "1.26.11"
+packages = ["encoding/json", "encoding/hex", "crypto/sha256", "regexp", "reflect"]
+[wit]
+package = "falcone:host@0.2.0"
+world = "function"
+interfaces = ["falcone:host/storage@0.2.0", "falcone:host/http@0.2.0", "falcone:host/events@0.2.0", "falcone:host/workflows@0.2.0", "falcone:host/logging@0.2.0", "falcone:host/cancellation@0.2.0", "falcone:host/progress@0.2.0", "falcone:host/invocation-context@0.2.0"]
+[host_wasi]
+interfaces = ["wasi:random/random@0.2.0", "wasi:cli/stdout@0.2.0", "wasi:io/streams@0.2.0", "wasi:io/error@0.2.0"]
+
+[pins.tinygo]
+name = "TinyGo"
+version = "0.44.0"
+source = "https://github.com/tinygo-org/tinygo/releases/download/v0.44.0/tinygo0.44.0.linux-amd64.tar.gz"
+archive = "tinygo0.44.0.linux-amd64.tar.gz"
+sha256 = "ed0f45543a49ff2a99120a5a1b8814a0750e1fda1a66f8e2a0a172576134aaf9"
+
+[pins.go]
+name = "Go"
+version = "1.26.11"
+source = "https://go.dev/dl/go1.26.11.linux-amd64.tar.gz"
+archive = "go1.26.11.linux-amd64.tar.gz"
+sha256 = "9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec"
+
+[pins.wasm_tools]
+name = "wasm-tools"
+version = "1.258.3"
+source = "https://github.com/bytecodealliance/wasm-tools/releases/download/v1.258.3/wasm-tools-1.258.3-x86_64-linux.tar.gz"
+archive = "wasm-tools-1.258.3-x86_64-linux.tar.gz"
+sha256 = "99b486a9ddc19af0260cd5f98f3b709a60817a3acd20efc9c582d719caebbf6d"
+
+[[workloads]]
+name = "json-transform"
+source = "workloads/json-transform/main.go"
+input = "workloads/json-transform/input.json"
+expected = "workloads/json-transform/expected.json"
+imports = []
+
+[[workloads]]
+name = "text-regex"
+source = "workloads/text-regex/main.go"
+input = "workloads/text-regex/input.json"
+expected = "workloads/text-regex/expected.json"
+imports = []
+
+[[workloads]]
+name = "hash-sha256"
+source = "workloads/hash-sha256/main.go"
+input = "workloads/hash-sha256/input.json"
+expected = "workloads/hash-sha256/expected.json"
+imports = []
+
+[[negative]]
+file = "negative/native-library/main.go"
+code = "WASM-NATIVE-LIBRARY"
+line = 3
+
+[diagnostics."WASM-NATIVE-LIBRARY"]
+message = "native-library is outside the Go Wasm profile."
+
+[[negative]]
+file = "negative/process-spawn/main.go"
+code = "WASM-PROCESS-SPAWN"
+line = 3
+
+[diagnostics."WASM-PROCESS-SPAWN"]
+message = "process-spawn is outside the Go Wasm profile."
+
+[[negative]]
+file = "negative/install-hook/main.go"
+code = "WASM-INSTALL-HOOK"
+line = 3
+
+[diagnostics."WASM-INSTALL-HOOK"]
+message = "install-hook is outside the Go Wasm profile."
+
+[[negative]]
+file = "negative/gpu/main.go"
+code = "WASM-GPU"
+line = 3
+
+[diagnostics."WASM-GPU"]
+message = "gpu is outside the Go Wasm profile."
+
+[[negative]]
+file = "negative/package-not-in-catalogue/main.go"
+code = "WASM-PACKAGE-NOT-IN-CATALOGUE"
+line = 3
+
+[diagnostics."WASM-PACKAGE-NOT-IN-CATALOGUE"]
+message = "package-not-in-catalogue is outside the Go Wasm profile."
+
+[[negative]]
+file = "negative/unsupported-api/main.go"
+code = "WASM-UNSUPPORTED-API"
+line = 5
+
+[diagnostics."WASM-UNSUPPORTED-API"]
+message = "unsupported-api is outside the Go Wasm profile."

@@ -49,6 +49,7 @@ fn raw_component_accepts_exact_world_function_interfaces() {
     assert_eq!(
         artifact::validate::ALLOWED_IMPORTS
             .iter()
+            .filter(|name| name.starts_with("falcone:host/"))
             .map(|s| s.to_string())
             .collect::<BTreeSet<_>>(),
         expected

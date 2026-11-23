@@ -289,6 +289,8 @@ fn failed_executor_outcomes_match_inventory_without_exception_details() {
                 javascript::Outcome::from_execution(
                     Execution {
                         outcome: InvocationOutcome::Failed,
+                        stdout_bytes: 0,
+                        stdout_truncated: false,
                         result: Err(ExecuteError {
                             code: "handler_failed",
                             message: Some("synthetic private exception".into()),

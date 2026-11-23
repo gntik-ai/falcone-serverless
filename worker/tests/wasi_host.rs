@@ -1,0 +1,27 @@
+#[path = "support/go_wasi.rs"]
+mod cases;
+#[test]
+fn csprng_is_linked_narrowly_and_bounded() {
+    cases::csprng_is_linked_narrowly_and_bounded();
+}
+#[test]
+fn stdout_is_bounded_and_invocation_local() {
+    cases::stdout_is_bounded_and_invocation_local();
+}
+#[test]
+fn stdout_flush_is_supervised_and_reports_refusal() {
+    cases::stdout_flush_is_supervised_and_reports_refusal();
+}
+#[test]
+fn stdout_reaches_the_record_redacted_and_whole() {
+    cases::stdout_reaches_the_record_redacted_and_whole();
+}
+#[test]
+fn execution_end_delivers_and_classifies_stdout() {
+    cases::execution_end_delivers_and_classifies_stdout();
+}
+
+#[test]
+fn one_memory_and_only_declared_functions_are_linked() {
+    cases::one_memory_and_only_declared_functions_are_linked();
+}

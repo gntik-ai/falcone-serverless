@@ -10,7 +10,8 @@
 //! and it ends at the execution's deadline. Scanning is capped per execution by
 //! [`SCAN_BUDGET_CHARS`]. When any cap is exceeded the execution fails closed: every log line is dropped and the logs become the single line
 //! [`MARKER`]. Text is redacted in full and only then cut to [`LINE_CHARS`], so a secret that
-//! crosses the cut point is gone before the cut.
+//! crosses the cut point is gone before the cut. An invocation's stdout is redacted whole in
+//! the same way and only then cut into lines of [`STDOUT_LINE_CHARS`].
 
 use std::collections::HashSet;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -23,6 +24,8 @@ pub const MARKER: &str = "<redacted>";
 pub const LINE_CHARS: usize = 8192;
 /// The most log lines of a result.
 pub const MAX_LINES: usize = 1000;
+/// The most stdout characters of one log line, so a formatted stdout line fits [`LINE_CHARS`].
+pub const STDOUT_LINE_CHARS: usize = 4096;
 /// The most distinct secret windows the matcher holds.
 pub const MAX_WINDOWS: usize = 1 << 20;
 /// The most characters one execution scans for redaction.
@@ -149,6 +152,11 @@ impl Redactor {
     /// execution's remaining scan budget in characters; `None` is returned, and the caller
     /// must fail closed, when the text does not fit.
     pub fn line(&self, text: &str, budget: &mut usize) -> Option<String> {
+        self.redact(text, budget, LINE_CHARS)
+    }
+
+    /// As [`Redactor::line`], cutting the redacted result to `cap` characters.
+    fn redact(&self, text: &str, budget: &mut usize, cap: usize) -> Option<String> {
         if self.overflow {
             return None;
         }
@@ -172,12 +180,12 @@ impl Redactor {
         let mut produced = 0;
         let mut in_run = false;
         for (c, hit) in chars.iter().zip(&covered) {
-            if produced >= LINE_CHARS {
+            if produced >= cap {
                 break;
             }
             if *hit {
                 if !in_run {
-                    for m in MARKER.chars().take(LINE_CHARS - produced) {
+                    for m in MARKER.chars().take(cap - produced) {
                         out.push(m);
                         produced += 1;
                     }
@@ -217,18 +225,46 @@ impl Logs {
     }
 
     /// Adds one log line, redacted. Past [`MAX_LINES`] lines are dropped; past the scan
-    /// budget the execution fails closed.
-    pub fn push(&mut self, text: &str) {
+    /// budget the execution fails closed. Returns whether the line was kept.
+    pub fn push(&mut self, text: &str) -> bool {
         if self.failed_closed || self.lines.len() >= MAX_LINES {
-            return;
+            return false;
         }
         match self.redactor.line(text, &mut self.budget) {
-            Some(line) => self.lines.push(line),
+            Some(line) => {
+                self.lines.push(line);
+                true
+            }
             None => {
                 self.failed_closed = true;
                 self.lines.clear();
+                false
             }
         }
+    }
+
+    /// Adds an invocation's whole stdout. It is redacted in full and only then cut into lines
+    /// of at most [`STDOUT_LINE_CHARS`] characters, so no protected run straddles two lines.
+    /// The lines are kept as cut, never rescanned, so markers cannot grow one past
+    /// [`LINE_CHARS`]. Returns whether every line was kept.
+    pub fn push_stdout(&mut self, text: &str) -> bool {
+        if self.failed_closed {
+            return false;
+        }
+        let Some(redacted) = self.redactor.redact(text, &mut self.budget, usize::MAX) else {
+            self.failed_closed = true;
+            self.lines.clear();
+            return false;
+        };
+        let chars: Vec<char> = redacted.chars().collect();
+        chars.chunks(STDOUT_LINE_CHARS).all(|chunk| {
+            if self.lines.len() >= MAX_LINES {
+                return false;
+            }
+            let chunk: String = chunk.iter().collect();
+            self.lines.push(format!("info {chunk} stream=stdout"));
+            true
+        })
     }
 
     /// The lines of the result: every one redacted, or the single marker line.
@@ -252,6 +288,51 @@ mod tests {
 
     fn live() -> AtomicBool {
         AtomicBool::new(false)
+    }
+
+    #[test]
+    fn full_stdout_is_kept_whole_by_the_record() {
+        // A full 65,536-byte stdout is 16 lines of STDOUT_LINE_CHARS.
+        let mut logs = Logs::new(Redactor::new(["not-in-output"], soon(), &live()));
+        assert!(logs.push_stdout(&"x".repeat(65_536)));
+        let line = format!("info {} stream=stdout", "x".repeat(STDOUT_LINE_CHARS));
+        let kept = logs.finish();
+        assert_eq!(kept.len(), 16);
+        assert!(kept.iter().all(|kept| *kept == line));
+    }
+
+    #[test]
+    fn redacted_stdout_is_cut_once_and_never_cut_again() {
+        // Each one-character claim becomes a ten-character marker: 11,000 characters.
+        let mut logs = Logs::new(Redactor::new(["e"], soon(), &live()));
+        assert!(logs.push_stdout(&"eX".repeat(1000)));
+        let kept = logs.finish();
+        assert!(kept.iter().all(|line| line.chars().count() <= LINE_CHARS));
+        let joined: String = kept
+            .iter()
+            .map(|line| &line["info ".len()..line.len() - " stream=stdout".len()])
+            .collect();
+        assert_eq!(joined, format!("{MARKER}X").repeat(1000));
+    }
+
+    #[test]
+    fn stdout_is_redacted_before_it_is_cut_into_lines() {
+        // Each secret straddles the first cut: four characters before it, the rest after.
+        for secret in ["pw1234", "abcdefghijkl"] {
+            let mut logs = Logs::new(Redactor::new([secret], soon(), &live()));
+            let text = format!("{}{secret} tail", "a".repeat(STDOUT_LINE_CHARS - 4));
+            assert!(logs.push_stdout(&text));
+            let kept = logs.finish();
+            assert_eq!(kept.len(), 2);
+            let joined: String = kept
+                .iter()
+                .map(|line| &line["info ".len()..line.len() - " stream=stdout".len()])
+                .collect();
+            assert_eq!(
+                joined,
+                format!("{}{MARKER} tail", "a".repeat(STDOUT_LINE_CHARS - 4))
+            );
+        }
     }
 
     fn redact(secrets: &[&str], text: &str) -> String {

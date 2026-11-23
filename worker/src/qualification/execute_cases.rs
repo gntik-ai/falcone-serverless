@@ -57,6 +57,8 @@ impl Compiler {
             )
             .map_err(|error| host::Execution {
                 outcome: host::outcome::InvocationOutcome::Failed,
+                stdout_bytes: 0,
+                stdout_truncated: false,
                 result: Err(host::ExecuteError {
                     code: error.code,
                     message: None,
