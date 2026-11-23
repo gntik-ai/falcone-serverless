@@ -244,8 +244,9 @@ impl Logs {
     }
 
     /// Adds an invocation's whole stdout. It is redacted in full and only then cut into lines
-    /// of at most [`STDOUT_LINE_CHARS`] characters, so no protected run straddles two lines,
-    /// and each line is then added like any other. Returns whether every line was kept.
+    /// of at most [`STDOUT_LINE_CHARS`] characters, so no protected run straddles two lines.
+    /// The lines are kept as cut, never rescanned, so markers cannot grow one past
+    /// [`LINE_CHARS`]. Returns whether every line was kept.
     pub fn push_stdout(&mut self, text: &str) -> bool {
         if self.failed_closed {
             return false;
@@ -257,8 +258,12 @@ impl Logs {
         };
         let chars: Vec<char> = redacted.chars().collect();
         chars.chunks(STDOUT_LINE_CHARS).all(|chunk| {
+            if self.lines.len() >= MAX_LINES {
+                return false;
+            }
             let chunk: String = chunk.iter().collect();
-            self.push(&format!("info {chunk} stream=stdout"))
+            self.lines.push(format!("info {chunk} stream=stdout"));
+            true
         })
     }
 
@@ -294,6 +299,20 @@ mod tests {
         let kept = logs.finish();
         assert_eq!(kept.len(), 16);
         assert!(kept.iter().all(|kept| *kept == line));
+    }
+
+    #[test]
+    fn redacted_stdout_is_cut_once_and_never_cut_again() {
+        // Each one-character claim becomes a ten-character marker: 11,000 characters.
+        let mut logs = Logs::new(Redactor::new(["e"], soon(), &live()));
+        assert!(logs.push_stdout(&"eX".repeat(1000)));
+        let kept = logs.finish();
+        assert!(kept.iter().all(|line| line.chars().count() <= LINE_CHARS));
+        let joined: String = kept
+            .iter()
+            .map(|line| &line["info ".len()..line.len() - " stream=stdout".len()])
+            .collect();
+        assert_eq!(joined, format!("{MARKER}X").repeat(1000));
     }
 
     #[test]

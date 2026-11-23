@@ -34,11 +34,14 @@ if len(componentizers) != 1:
 shutil.copy2(componentizers[0], tools / 'bin/wasm-tools')
 PY
 # Every executed tool comes from a verified archive in this invocation's scratch.
-# TinyGo reads WASMTOOLS before PATH, so an inherited value is replaced, not kept.
+# TinyGo reads WASMTOOLS before PATH and WASMOPT before its bundled optimizer, so
+# inherited values are replaced, not kept.
 export GOROOT="$stage/tools/go/go"
 export TINYGOROOT="$stage/tools/tinygo/tinygo"
 export PATH="$stage/tools/bin:$GOROOT/bin:$TINYGOROOT/bin:$PATH"
 export WASMTOOLS="$stage/tools/bin/wasm-tools"
+export WASMOPT="$TINYGOROOT/bin/wasm-opt"
+[[ -f $WASMOPT && -x $WASMOPT ]] || { echo 'missing wasm-opt in verified TinyGo archive' >&2; exit 1; }
 export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
 [[ $("$stage/tools/bin/wasm-tools" --version) == 'wasm-tools 1.258.3' ]] || { echo 'wasm-tools version mismatch' >&2; exit 1; }
 [[ $("$GOROOT/bin/go" version) == 'go version go1.26.11 linux/amd64' ]] || { echo 'Go version mismatch' >&2; exit 1; }

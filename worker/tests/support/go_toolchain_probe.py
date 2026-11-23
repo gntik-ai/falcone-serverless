@@ -15,13 +15,14 @@ import tempfile
 import tomllib
 
 
-def archive(path, name, text):
-    data = text.encode()
+def archive(path, members):
     with tarfile.open(path, "w:gz") as output:
-        member = tarfile.TarInfo(name)
-        member.mode = 0o755
-        member.size = len(data)
-        output.addfile(member, io.BytesIO(data))
+        for name, text in members:
+            data = text.encode()
+            member = tarfile.TarInfo(name)
+            member.mode = 0o755
+            member.size = len(data)
+            output.addfile(member, io.BytesIO(data))
 
 
 def run(source, scratch):
@@ -34,7 +35,7 @@ def run(source, scratch):
     pins_text = pins_path.read_text()
     pins = tomllib.loads(pins_text)
     tools = {
-        "tinygo": ("tinygo/bin/tinygo", '''#!/usr/bin/env python3
+        "tinygo": [("tinygo/bin/tinygo", '''#!/usr/bin/env python3
 import os, pathlib, subprocess, sys
 if sys.argv[1:] == ['version']:
     print('tinygo version 0.44.0 linux/amd64 (using go version go1.26.11)')
@@ -53,24 +54,27 @@ assert pathlib.Path(os.environ['GOROOT']).parent.name == 'go'
 assert subprocess.check_output(['wasm-tools', '--version'], text=True).strip() == 'wasm-tools 1.258.3'
 # TinyGo runs $WASMTOOLS before PATH: it must name the verified componentizer.
 assert subprocess.check_output([os.environ['WASMTOOLS'], '--version'], text=True).strip() == 'wasm-tools 1.258.3'
+# TinyGo runs $WASMOPT before its bundled optimizer: it must name the verified archive's.
+assert pathlib.Path(os.environ['WASMOPT']) == pathlib.Path(os.environ['TINYGOROOT']) / 'bin/wasm-opt'
+assert subprocess.check_output([os.environ['WASMOPT'], '--version'], text=True).strip() == 'wasm-opt verified'
 sys.exit('missing-probe-package: expected loader failure')
-'''),
-        "go": ("go/bin/go", "#!/bin/sh\necho 'go version go1.26.11 linux/amd64'\n"),
-        "wasm_tools": (
+'''), ("tinygo/bin/wasm-opt", "#!/bin/sh\necho 'wasm-opt verified'\n")],
+        "go": [("go/bin/go", "#!/bin/sh\necho 'go version go1.26.11 linux/amd64'\n")],
+        "wasm_tools": [(
             "wasm-tools-1.258.3-x86_64-linux/wasm-tools",
             "#!/bin/sh\necho 'wasm-tools 1.258.3'\n",
-        ),
+        )],
     }
-    for key, (name, executable) in tools.items():
+    for key, members in tools.items():
         path = cache / pins[key]["archive"]
-        archive(path, name, executable)
+        archive(path, members)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         pins_text = pins_text.replace(pins[key]["sha256"], digest)
     target = root / "worker/src/qualification/go_versions.toml"
     target.parent.mkdir(parents=True)
     target.write_text(pins_text)
     # These unverified extracted files must never be used, even with valid archives.
-    for name in ["bin/wasm-tools", "go/bin/go", "tinygo/bin/tinygo"]:
+    for name in ["bin/wasm-tools", "bin/wasm-opt", "go/bin/go", "tinygo/bin/tinygo"]:
         path = cache / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("#!/bin/sh\necho 'unverified extracted executable was used' >&2\nexit 91\n")
@@ -78,8 +82,8 @@ sys.exit('missing-probe-package: expected loader failure')
     env = dict(os.environ, FS_TRUSTED_COMPILER_IMAGE="1", FS_OPTION_PROBE_ONLY="1",
                FS_TOOLCHAIN_CACHE=str(cache), FS_PROFILE_COMPONENTS=str(scratch / "components"),
                TMPDIR=str(scratch),
-               # A poisoned inherited override: the build must replace it.
-               WASMTOOLS=str(cache / "bin/wasm-tools"))
+               # Poisoned inherited overrides: the build must replace them.
+               WASMTOOLS=str(cache / "bin/wasm-tools"), WASMOPT=str(cache / "bin/wasm-opt"))
     command = ["bash", str(root / "worker/qualification/go/build-profile.sh")]
     result = subprocess.run(command, env=env, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr
